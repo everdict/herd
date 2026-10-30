@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,16 +224,29 @@ func TestBootWaitsForGuestVsock(t *testing.T) {
 func TestBootFailsWhenGuestNeverAnswers(t *testing.T) {
 	hv := vzfake.New()
 	hv.SetGuestSilent(true)
+	// The context ends only once the machine runs and its guest has refused a connection, so the silent-guest wait
+	// is the only thing Boot can fail on, however slowly the box builds and starts the machine.
+	ctx, cancel := context.WithCancel(ctxT(t, 10*time.Second))
+	var refused atomic.Bool
+	hv.OnGuestRefused(func(*vzfake.Machine) {
+		refused.Store(true)
+		cancel()
+	})
 	v := newVMM(t, hv, vz.Config{})
-	_, err := v.Boot(ctxT(t, 300*time.Millisecond), specIn(t.TempDir())("g2"))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Boot with a silent guest = %v, want context.DeadlineExceeded", err)
+	_, err := v.Boot(ctx, specIn(t.TempDir())("g2"))
+	if !refused.Load() {
+		t.Fatalf("Boot = %v before the guest was ever asked on vsock", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Boot with a silent guest = %v, want context.Canceled", err)
 	}
 	if p, err := v.Inspect(ctxT(t, time.Second), "g2"); p != vmm.PresenceGone {
 		t.Errorf("after the failed Boot g2 is %v (%v), want gone", p, err)
 	}
-	if st := hv.Machines()[0].CurrentState(); st != vz.MachineStopped {
-		t.Errorf("the failed Boot left the machine %s", st)
+	for i, m := range hv.Machines() {
+		if st := m.CurrentState(); st != vz.MachineStopped {
+			t.Errorf("the failed Boot left machine %d %s", i, st)
+		}
 	}
 }
 

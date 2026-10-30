@@ -55,6 +55,8 @@ type Hypervisor struct {
 	// guestDelay is how long after start the guest begins to answer on vsock; guestSilent means never.
 	guestDelay  time.Duration
 	guestSilent bool
+	// onRefused runs each time a running machine's guest refuses a vsock connection.
+	onRefused func(*Machine)
 
 	machines []*Machine
 }
@@ -91,6 +93,10 @@ func (h *Hypervisor) SetGuestDelay(d time.Duration) { h.set(func() { h.guestDela
 
 // SetGuestSilent makes guests never answer on vsock.
 func (h *Hypervisor) SetGuestSilent(silent bool) { h.set(func() { h.guestSilent = silent }) }
+
+// OnGuestRefused makes fn run each time a running machine's guest refuses a vsock connection, before ConnectVsock
+// returns: the machine was built and started and the backend is waiting on its guest.
+func (h *Hypervisor) OnGuestRefused(fn func(*Machine)) { h.set(func() { h.onRefused = fn }) }
 
 // Clear removes every fault and releases hung calls. Guest timing and the save/restore answer stay.
 func (h *Hypervisor) Clear() {
@@ -245,13 +251,18 @@ func (m *Machine) ConnectVsock(port uint32) (net.Conn, error) {
 		return nil, err
 	}
 	m.h.mu.Lock()
-	delay, silent := m.h.guestDelay, m.h.guestSilent
+	delay, silent, onRefused := m.h.guestDelay, m.h.guestSilent, m.h.onRefused
 	m.h.mu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.state != vz.MachineRunning || silent || time.Since(m.startedAt) < delay {
+	running := m.state == vz.MachineRunning
+	if !running || silent || time.Since(m.startedAt) < delay {
+		m.mu.Unlock()
+		if running && onRefused != nil {
+			onRefused(m)
+		}
 		return nil, fmt.Errorf("vzfake: vsock port %d: connection refused", port)
 	}
+	defer m.mu.Unlock()
 	if m.answered.IsZero() {
 		m.answered = time.Now()
 	}
