@@ -1,5 +1,5 @@
 // Package agent is herd-guest's API: agent-substrate/env's ProcessService and FileSystemService (ateenv.v1alpha,
-// wire-compatible) plus herd's FileInfoService (stat, list), served over grpcwire. Every call acts on one target
+// wire-compatible) plus herd's FileInfoService (stat, list), served over gRPC. Every call acts on one target
 // container, chosen by the request metadata key x-herd-container (default: the first container). Processes are
 // Everdict detached-exec records (package execrec) inside the target's filesystem, so the service keeps no state a
 // restart could lose.

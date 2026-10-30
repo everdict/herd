@@ -16,8 +16,11 @@ import (
 	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/execrec"
+	"github.com/everdict/herd/guest/guestclient"
 	"github.com/everdict/herd/guest/transport"
-	"github.com/everdict/herd/internal/grpcwire"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -40,9 +43,9 @@ type guestUnderTest struct {
 	targets []agent.Target
 	sock    string
 	g       *agent.Guest
-	srv     *grpcwire.Server
+	srv     *grpc.Server
 	done    chan error
-	conn    *grpcwire.Conn
+	conn    *guestclient.Conn
 }
 
 func newTarget(t *testing.T, name string) *agent.Local {
@@ -76,11 +79,11 @@ func (h *guestUnderTest) start() {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	srv := grpcwire.NewServer()
+	srv := grpc.NewServer()
 	g.Register(srv)
 	h.g, h.srv, h.done = g, srv, make(chan error, 1)
 	go func() { h.done <- srv.Serve(l) }()
-	h.conn = grpcwire.NewConn(transport.DialUnix(h.sock))
+	h.conn = dialGuest(h.t, h.sock)
 }
 
 func (h *guestUnderTest) stop() {
@@ -88,7 +91,7 @@ func (h *guestUnderTest) stop() {
 		return
 	}
 	h.conn.Close()
-	h.srv.Close()
+	h.srv.Stop()
 	<-h.done
 	h.g.Close()
 	h.srv = nil
@@ -207,7 +210,7 @@ func TestProcessStreamsStdoutStderrAndExit(t *testing.T) {
 		t.Errorf("GetProcess = %v", got)
 	}
 	err = h.conn.Invoke(ctx, agent.MethodGetProcess, &ateenv.GetProcessRequest{ProcessId: "nope"}, got, nil)
-	if grpcwire.CodeOf(err) != grpcwire.NotFound {
+	if status.Code(err) != codes.NotFound {
 		t.Errorf("GetProcess(unknown) = %v, want NotFound", err)
 	}
 }
@@ -242,7 +245,7 @@ func TestProcessRecordLivesInTheTargetContainer(t *testing.T) {
 	}
 	err = h.conn.Invoke(ctx, agent.MethodStartProcess, &ateenv.StartProcessRequest{Command: []string{"true"}}, p,
 		map[string]string{agent.ContainerHeader: "ghost"})
-	if grpcwire.CodeOf(err) != grpcwire.NotFound {
+	if status.Code(err) != codes.NotFound {
 		t.Errorf("StartProcess in an unknown container = %v, want NotFound", err)
 	}
 }
@@ -269,12 +272,12 @@ func TestProcessStdin(t *testing.T) {
 		t.Fatalf("stdout %q exit %v, want %q and 0", o.stdout.String(), o.exit, "hello world!")
 	}
 	_, err = h.writeInput(ctx, &ateenv.WriteProcessInputRequest{ProcessId: p.GetProcessId(), Data: []byte("late")})
-	if grpcwire.CodeOf(err) != grpcwire.FailedPrecondition {
+	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("input after close = %v, want FailedPrecondition", err)
 	}
 	q := h.start1(ctx, &ateenv.StartProcessRequest{Command: []string{"true"}})
 	_, err = h.writeInput(ctx, &ateenv.WriteProcessInputRequest{ProcessId: q.GetProcessId(), Data: []byte("x")})
-	if grpcwire.CodeOf(err) != grpcwire.FailedPrecondition {
+	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("input to a process without stdin = %v, want FailedPrecondition", err)
 	}
 }
@@ -295,7 +298,7 @@ func TestProcessSignalAndTimeout(t *testing.T) {
 		t.Errorf("exit after SIGTERM = %v, want 143", o.exit)
 	}
 	err = h.conn.Invoke(ctx, agent.MethodSignalProcess, &ateenv.SignalProcessRequest{ProcessId: p.GetProcessId(), Signal: ateenv.Signal_SIGNAL_TERM}, got, nil)
-	if grpcwire.CodeOf(err) != grpcwire.FailedPrecondition {
+	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("signal after exit = %v, want FailedPrecondition", err)
 	}
 
@@ -453,7 +456,7 @@ func TestFiles(t *testing.T) {
 	if b, _ := read("dir/a.txt", 0); string(b[:8]) != "0123XY67" || len(b) != len(big) {
 		t.Errorf("after seek write: %q... (%d bytes)", b[:8], len(b))
 	}
-	if _, err := read("missing", 0); grpcwire.CodeOf(err) != grpcwire.NotFound {
+	if _, err := read("missing", 0); status.Code(err) != codes.NotFound {
 		t.Errorf("ReadFile(missing) = %v, want NotFound", err)
 	}
 	if b, err := read("new/empty", 0o640); err != nil || len(b) != 0 {
@@ -503,4 +506,14 @@ func TestFiles(t *testing.T) {
 	if b, _ := os.ReadFile(outside); string(b) != "host secret" {
 		t.Errorf("file outside the root changed: %q", b)
 	}
+}
+
+// dialGuest connects to a herd-guest serving on a unix socket.
+func dialGuest(t testing.TB, sock string) *guestclient.Conn {
+	t.Helper()
+	c, err := guestclient.New(transport.DialUnix(sock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

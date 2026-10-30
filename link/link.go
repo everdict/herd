@@ -1,0 +1,128 @@
+// Package link is the herdlet ↔ herd-api protocol. A herdlet dials out to herd-api and opens one bidirectional
+// stream (LinkMethod); herd-api never dials a herdlet (spec R-D3). On the stream the herdlet registers its
+// capabilities and capacity, herd-api sends it work, and the herdlet answers each piece of work with a three-valued
+// outcome: done, failed (definitely not done) or unknown (it could not find out). A call that gets no answer in time
+// is unknown, never done.
+//
+// Messages are JSON in gRPC framing (application/grpc+json) until the protocol gets a .proto alongside the gRPC
+// dependency.
+package link
+
+import (
+	"github.com/everdict/herd/vmm"
+)
+
+// LinkMethod is the stream's full gRPC method name.
+const LinkMethod = "/herd.ext.v1.Herdlet/Link"
+
+// Up is a herdlet → herd-api message. Exactly one field is set.
+type Up struct {
+	Register *Register `json:"register,omitempty"`
+	Capacity *Capacity `json:"capacity,omitempty"`
+	Outcome  *Outcome  `json:"outcome,omitempty"`
+}
+
+// Down is a herd-api → herdlet message. Exactly one field is set.
+type Down struct {
+	Registered *Registered `json:"registered,omitempty"`
+	Work       *Work       `json:"work,omitempty"`
+}
+
+// Capabilities is what the host declares (ADR 0001, A-5; vmm.Capabilities).
+type Capabilities struct {
+	Platform              vmm.Platform `json:"platform"`
+	Arch                  string       `json:"arch"`
+	SuspendMaxFidelity    vmm.Fidelity `json:"suspendMaxFidelity"`
+	RestoreFamily         string       `json:"restoreFamily,omitempty"`
+	PortableRestoreFamily string       `json:"portableRestoreFamily"`
+	HypervisorVersion     string       `json:"hypervisorVersion,omitempty"`
+	Reason                string       `json:"reason,omitempty"`
+}
+
+// Register is a herdlet's first message.
+type Register struct {
+	Worker string `json:"worker"`
+	// Class is the sandbox class the worker runs ("microvm").
+	Class        string            `json:"class"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Capabilities Capabilities      `json:"capabilities"`
+	Capacity     Capacity          `json:"capacity"`
+}
+
+// Capacity is how many actors the herdlet can hold and which templates it keeps warm VMs for.
+type Capacity struct {
+	Slots int `json:"slots"`
+	// Warm maps an actor template uid to the warm VMs the herdlet holds for it.
+	Warm map[string]int `json:"warm,omitempty"`
+}
+
+// Registered acknowledges Register.
+type Registered struct {
+	Worker string `json:"worker"`
+}
+
+// Op is a piece of work.
+type Op string
+
+const (
+	OpBoot     Op = "boot"
+	OpSnapshot Op = "snapshot"
+	OpRestore  Op = "restore"
+	OpDelete   Op = "delete"
+	OpInspect  Op = "inspect"
+)
+
+// SnapshotRef names a snapshot object in the snapshot store and what it holds.
+type SnapshotRef struct {
+	Key           string       `json:"key"`
+	Digest        string       `json:"digest"`
+	Fidelity      vmm.Fidelity `json:"fidelity"`
+	RestoreFamily string       `json:"restoreFamily"`
+}
+
+// Work asks a herdlet to do one thing to one VM.
+type Work struct {
+	ID string `json:"id"`
+	Op Op     `json:"op"`
+	// VM is the VM's id on the herdlet (the actor's uid, label-safe).
+	VM string `json:"vm"`
+	// Template is the actor template's uid (a boot may take a warm VM of it).
+	Template string `json:"template,omitempty"`
+	// Fidelity is what OpSnapshot must keep.
+	Fidelity vmm.Fidelity `json:"fidelity,omitempty"`
+	// SnapshotKey is where OpSnapshot writes its object.
+	SnapshotKey string `json:"snapshotKey,omitempty"`
+	// Snapshot is what OpRestore restores.
+	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
+	// DeadlineUnixMilli bounds the work; past it the herdlet answers unknown.
+	DeadlineUnixMilli int64 `json:"deadlineUnixMilli,omitempty"`
+}
+
+// Result is the three-valued outcome of a piece of work.
+type Result string
+
+const (
+	// ResultDone: the work was carried out (for delete: and the VM verified gone).
+	ResultDone Result = "done"
+	// ResultFailed: the work was definitely not carried out.
+	ResultFailed Result = "failed"
+	// ResultUnknown: the herdlet could not find out. The zero value reads as unknown.
+	ResultUnknown Result = ""
+)
+
+// Outcome answers a Work.
+type Outcome struct {
+	ID     string `json:"id"`
+	Result Result `json:"result"`
+	// Presence is the VM's presence after OpDelete or OpInspect: "gone", "present" or "" (unknown).
+	Presence string `json:"presence,omitempty"`
+	// Snapshot is what OpSnapshot wrote.
+	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
+	Reason   string       `json:"reason,omitempty"`
+}
+
+// Presence names for Outcome.Presence.
+const (
+	PresenceGone    = "gone"
+	PresencePresent = "present"
+)

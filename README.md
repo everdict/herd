@@ -4,8 +4,9 @@ herd is a microVM actor runtime that speaks a pinned subset of the [Substrate](h
 API. It gives hosts that have no Kubernetes what Substrate gives a Kubernetes cluster: actors created from templates,
 suspended and resumed, forked through tags, behind a per-actor egress gateway, deleted with verification.
 
-Status: R0. The repository holds the ADR, the vendored API subset with its Go types, the hypervisor interface with an
-in-memory fake and stub backends, and the guest kernel configuration. Nothing runs actors yet.
+Status: R1. `herd-api` serves the Control subset over gRPC with records, scheduler, suspend/resume/delete workflows,
+snapshot store and static-key authn/authz, and `herdlet` drives a `vmm.VMM` over its outbound link; the conformance suite
+runs them against the in-memory hypervisor fake. The real hypervisor backends (R2) are stubs, so nothing boots a VM yet.
 
 ## What herd is
 
@@ -47,6 +48,14 @@ credential injection), `herd-guest` (the in-VM agent).
 | `vmm` | The hypervisor boundary; `vmm/fake` (in-memory), `vmm/vmmtest` (the contract every backend keeps), `vmm/cloudhypervisor` (linux), `vmm/vz` (darwin) |
 | `guest` | Guest kernel configuration (one for arm64 and amd64), initramfs list, `build.sh` |
 | `internal/cmd/protosubset` | Cuts the subset out of the upstream proto |
+| `cmd/herd-api`, `apiserver` | herd-api: the Control subset, the Capabilities extension, workflows, `Reconcile` |
+| `link`, `herdlet` | The herdlet's outbound link (three-valued outcomes) and the herdlet agent on a `vmm.VMM` |
+| `sched` | Placement by slots, class, labels, warm VMs and restore family |
+| `store` | Records with uid+version preconditions: `memstore`, `boltstore` (bbolt, all-in-one), `storetest` (the contract) |
+| `snapstore` | Snapshot objects with digests: `snapstore/disk` |
+| `auth` | Authn and per-space authz interfaces; static-key HS256 JWTs |
+| `guest/agent`, `guest/guestclient`, `cmd/herd-guest` | herd-guest: env-compatible process/file API on grpc-go, and its host-side client |
+| `conformance` | The Control-subset conformance suite against herd-api with fake herdlets |
 
 ## Developing
 

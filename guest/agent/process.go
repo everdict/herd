@@ -14,7 +14,8 @@ import (
 
 	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
 	"github.com/everdict/herd/guest/execrec"
-	"github.com/everdict/herd/internal/grpcwire"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -106,7 +107,7 @@ func (g *Guest) target(md func(string) string) (*container, error) {
 	}
 	c, ok := g.byName[name]
 	if !ok {
-		return nil, grpcwire.Errorf(grpcwire.NotFound, "container %q not found", name)
+		return nil, status.Errorf(codes.NotFound, "container %q not found", name)
 	}
 	return c, nil
 }
@@ -114,7 +115,7 @@ func (g *Guest) target(md func(string) string) (*container, error) {
 // lookup finds a process by id in any container: ids are unique across the guest.
 func (g *Guest) lookup(id string) (*container, execrec.State, error) {
 	if id == "" {
-		return nil, execrec.State{}, grpcwire.Errorf(grpcwire.InvalidArgument, "process_id cannot be empty")
+		return nil, execrec.State{}, status.Errorf(codes.InvalidArgument, "process_id cannot be empty")
 	}
 	for _, c := range g.containers {
 		if !c.store.Exists(id) {
@@ -122,11 +123,11 @@ func (g *Guest) lookup(id string) (*container, execrec.State, error) {
 		}
 		st, err := c.store.Read(id)
 		if err != nil {
-			return nil, execrec.State{}, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+			return nil, execrec.State{}, status.Errorf(codes.Internal, "%v", err)
 		}
 		return c, st, nil
 	}
-	return nil, execrec.State{}, grpcwire.Errorf(grpcwire.NotFound, "process %q not found", id)
+	return nil, execrec.State{}, status.Errorf(codes.NotFound, "process %q not found", id)
 }
 
 func newID() (string, error) {
@@ -157,10 +158,10 @@ func toProto(st execrec.State) *ateenv.Process {
 // runs (or has already ended).
 func (g *Guest) StartProcess(ctx context.Context, md func(string) string, req *ateenv.StartProcessRequest) (*ateenv.Process, error) {
 	if len(req.GetCommand()) == 0 {
-		return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "command cannot be empty")
+		return nil, status.Errorf(codes.InvalidArgument, "command cannot be empty")
 	}
 	if req.GetTimeout() != nil && !req.GetTimeout().IsValid() {
-		return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "timeout is invalid")
+		return nil, status.Errorf(codes.InvalidArgument, "timeout is invalid")
 	}
 	c, err := g.target(md)
 	if err != nil {
@@ -168,12 +169,12 @@ func (g *Guest) StartProcess(ctx context.Context, md func(string) string, req *a
 	}
 	for k := range req.GetEnv() {
 		if !validEnvName(k) {
-			return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "invalid environment variable name %q", k)
+			return nil, status.Errorf(codes.InvalidArgument, "invalid environment variable name %q", k)
 		}
 	}
 	id, err := newID()
 	if err != nil {
-		return nil, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	timeout := req.GetTimeout().AsDuration()
 	if timeout <= 0 {
@@ -191,23 +192,23 @@ func (g *Guest) StartProcess(ctx context.Context, md func(string) string, req *a
 		Timeout: timeout, StartedAt: time.Now().UTC(),
 	}
 	if err := c.store.Create(m); err != nil {
-		return nil, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	if err := c.t.StartShim(ctx, execrec.Dir+"/"+id); err != nil {
-		return nil, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	g.armTimeout(c, m)
 	deadline := time.Now().Add(StartWait)
 	for {
 		st, err := c.store.Read(id)
 		if err != nil {
-			return nil, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+			return nil, status.Errorf(codes.Internal, "%v", err)
 		}
 		if st.Pgid != 0 || st.Exited {
 			return toProto(st), nil
 		}
 		if time.Now().After(deadline) {
-			return nil, grpcwire.Errorf(grpcwire.DeadlineExceeded, "process %q: the shim did not report a process group within %v", id, StartWait)
+			return nil, status.Errorf(codes.DeadlineExceeded, "process %q: the shim did not report a process group within %v", id, StartWait)
 		}
 		select {
 		case <-ctx.Done():
@@ -274,7 +275,7 @@ func (g *Guest) StreamProcessOutput(ctx context.Context, req *ateenv.StreamProce
 		return err
 	}
 	if req.GetStdoutOffset() < 0 || req.GetStderrOffset() < 0 {
-		return grpcwire.Errorf(grpcwire.InvalidArgument, "offsets cannot be negative")
+		return status.Errorf(codes.InvalidArgument, "offsets cannot be negative")
 	}
 	id := req.GetProcessId()
 	offOut, offErr := req.GetStdoutOffset(), req.GetStderrOffset()
@@ -295,7 +296,7 @@ func (g *Guest) StreamProcessOutput(ctx context.Context, req *ateenv.StreamProce
 			} {
 				b, next, err := c.store.ReadOutput(id, s.name, *s.off)
 				if err != nil {
-					return grpcwire.Errorf(grpcwire.Internal, "reading %s: %v", s.name, err)
+					return status.Errorf(codes.Internal, "reading %s: %v", s.name, err)
 				}
 				if len(b) == 0 {
 					continue
@@ -315,7 +316,7 @@ func (g *Guest) StreamProcessOutput(ctx context.Context, req *ateenv.StreamProce
 	for {
 		st, err := c.store.Read(id)
 		if err != nil {
-			return grpcwire.Errorf(grpcwire.Internal, "%v", err)
+			return status.Errorf(codes.Internal, "%v", err)
 		}
 		if err := flush(); err != nil {
 			return err
@@ -358,14 +359,14 @@ func (g *Guest) WriteProcessInput(ctx context.Context, recv func() (*ateenv.Writ
 		if c == nil {
 			id = req.GetProcessId()
 			if id == "" {
-				return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "process_id is required on the first message")
+				return nil, status.Errorf(codes.InvalidArgument, "process_id is required on the first message")
 			}
 			var st execrec.State
 			if c, st, err = g.lookup(id); err != nil {
 				return nil, err
 			}
 			if !st.Meta.Stdin {
-				return nil, grpcwire.Errorf(grpcwire.FailedPrecondition, "process %q was started without stdin", id)
+				return nil, status.Errorf(codes.FailedPrecondition, "process %q was started without stdin", id)
 			}
 		}
 		if len(req.GetData()) > 0 {
@@ -378,9 +379,9 @@ func (g *Guest) WriteProcessInput(ctx context.Context, recv func() (*ateenv.Writ
 			total += int64(n)
 			if err != nil {
 				if errors.Is(err, syscall.EPIPE) {
-					return nil, grpcwire.Errorf(grpcwire.FailedPrecondition, "process %q has exited", id)
+					return nil, status.Errorf(codes.FailedPrecondition, "process %q has exited", id)
 				}
-				return nil, grpcwire.Errorf(grpcwire.Internal, "writing stdin of %q: %v", id, err)
+				return nil, status.Errorf(codes.Internal, "writing stdin of %q: %v", id, err)
 			}
 		}
 		if req.GetClose() {
@@ -394,7 +395,7 @@ func (g *Guest) WriteProcessInput(ctx context.Context, recv func() (*ateenv.Writ
 		}
 	}
 	if c == nil {
-		return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "process_id is required on the first message")
+		return nil, status.Errorf(codes.InvalidArgument, "process_id is required on the first message")
 	}
 	return &ateenv.WriteProcessInputResponse{BytesWritten: total}, nil
 }
@@ -402,13 +403,13 @@ func (g *Guest) WriteProcessInput(ctx context.Context, recv func() (*ateenv.Writ
 func inputError(err error, id string) error {
 	switch {
 	case errors.Is(err, execrec.ErrExited):
-		return grpcwire.Errorf(grpcwire.FailedPrecondition, "process %q has exited", id)
+		return status.Errorf(codes.FailedPrecondition, "process %q has exited", id)
 	case errors.Is(err, execrec.ErrStdinClosed):
-		return grpcwire.Errorf(grpcwire.FailedPrecondition, "stdin of process %q is closed", id)
+		return status.Errorf(codes.FailedPrecondition, "stdin of process %q is closed", id)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return err
 	}
-	return grpcwire.Errorf(grpcwire.Internal, "stdin of %q: %v", id, err)
+	return status.Errorf(codes.Internal, "stdin of %q: %v", id, err)
 }
 
 // SignalProcess delivers a signal to the process group and returns the state right after.
@@ -419,22 +420,22 @@ func (g *Guest) SignalProcess(ctx context.Context, req *ateenv.SignalProcessRequ
 	}
 	sig, ok := toSyscallSignal(req.GetSignal())
 	if !ok {
-		return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "unsupported signal %v", req.GetSignal())
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported signal %v", req.GetSignal())
 	}
 	if st.Exited {
-		return nil, grpcwire.Errorf(grpcwire.FailedPrecondition, "process %q has exited", st.Meta.ID)
+		return nil, status.Errorf(codes.FailedPrecondition, "process %q has exited", st.Meta.ID)
 	}
 	if st.Pgid == 0 {
-		return nil, grpcwire.Errorf(grpcwire.Unavailable, "process %q has not reported its process group yet", st.Meta.ID)
+		return nil, status.Errorf(codes.Unavailable, "process %q has not reported its process group yet", st.Meta.ID)
 	}
 	if err := c.t.Signal(ctx, st.Pgid, sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
-			return nil, grpcwire.Errorf(grpcwire.FailedPrecondition, "process %q has exited", st.Meta.ID)
+			return nil, status.Errorf(codes.FailedPrecondition, "process %q has exited", st.Meta.ID)
 		}
-		return nil, grpcwire.Errorf(grpcwire.Internal, "signalling %q: %v", st.Meta.ID, err)
+		return nil, status.Errorf(codes.Internal, "signalling %q: %v", st.Meta.ID, err)
 	}
 	if st, err = c.store.Read(st.Meta.ID); err != nil {
-		return nil, grpcwire.Errorf(grpcwire.Internal, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	return toProto(st), nil
 }

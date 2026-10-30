@@ -18,6 +18,6 @@ commit (sha256 `6b1bba25f7040bb72857c36d6bfdcb59a0a9fa8c3ebd67e6c03221dec3349763
 serialized descriptor embedded there with the one herd generates: every message, field number, type, oneof, enum
 value and method must be equal; only the file name and `go_package` may differ.
 
-Generated with protoc 36.2 (libprotoc) and protoc-gen-go v1.36.12. env's gRPC service stubs are not used: herd-guest
-serves the methods through `internal/grpcwire` (gRPC framing over net/http with unencrypted HTTP/2), so the
-grpc-go module is not a dependency.
+Generated with protoc 36.2 (libprotoc) and protoc-gen-go v1.36.12. env's gRPC service stubs are not linked (their descriptors would register the same proto names twice): herd-guest
+serves the methods on grpc-go with hand-written service descriptors (`guest/agent/service.go`, ADR 0001 A-12),
+which a test checks against this descriptor.

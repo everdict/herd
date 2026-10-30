@@ -26,7 +26,7 @@ import (
 	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/guest/oci"
 	"github.com/everdict/herd/guest/transport"
-	"github.com/everdict/herd/internal/grpcwire"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -112,11 +112,11 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := grpcwire.NewServer()
+	srv := grpc.NewServer()
 	g.Register(srv)
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		srv.Stop()
 	}()
 	log.Printf("herd-guest: serving %d container(s) on %s", len(targets), *listen)
 	return srv.Serve(l)

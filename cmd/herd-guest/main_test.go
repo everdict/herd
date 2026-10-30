@@ -15,8 +15,8 @@ import (
 
 	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
 	"github.com/everdict/herd/guest/agent"
+	"github.com/everdict/herd/guest/guestclient"
 	"github.com/everdict/herd/guest/transport"
-	"github.com/everdict/herd/internal/grpcwire"
 )
 
 // The test binary is herd-guest when HERD_GUEST_MAIN is set (the shims it starts inherit it).
@@ -61,7 +61,7 @@ func TestKilledGuestProcessIsRefollowedByTheNextOne(t *testing.T) {
 	root := t.TempDir()
 	sock := filepath.Join(t.TempDir(), "g.sock")
 	first := startServe(t, root, sock)
-	conn := grpcwire.NewConn(transport.DialUnix(sock))
+	conn := dialGuest(t, sock)
 	p := new(ateenv.Process)
 	err := conn.Invoke(ctx, agent.MethodStartProcess, &ateenv.StartProcessRequest{
 		Command: []string{"sh", "-c", `i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo "n$i"; sleep 0.02; done; exit 4`},
@@ -70,7 +70,7 @@ func TestKilledGuestProcessIsRefollowedByTheNextOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got bytes.Buffer
-	read := func(c *grpcwire.Conn, stopAt int) *ateenv.Process {
+	read := func(c *guestclient.Conn, stopAt int) *ateenv.Process {
 		s, err := c.NewStream(ctx, agent.MethodStreamProcessOutput, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -105,7 +105,7 @@ func TestKilledGuestProcessIsRefollowedByTheNextOne(t *testing.T) {
 	conn.Close()
 
 	startServe(t, root, sock)
-	conn = grpcwire.NewConn(transport.DialUnix(sock))
+	conn = dialGuest(t, sock)
 	defer conn.Close()
 	exit := read(conn, 0)
 	var want strings.Builder
@@ -133,4 +133,14 @@ func TestSignalHelperRefusesInit(t *testing.T) {
 	if err := herdGuest("signal", "1", "9").Run(); err == nil {
 		t.Fatal("signal to process group 1 accepted")
 	}
+}
+
+// dialGuest connects to a herd-guest serving on a unix socket.
+func dialGuest(t testing.TB, sock string) *guestclient.Conn {
+	t.Helper()
+	c, err := guestclient.New(transport.DialUnix(sock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

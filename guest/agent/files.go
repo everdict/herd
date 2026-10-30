@@ -11,7 +11,8 @@ import (
 
 	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
 	herdext "github.com/everdict/herd/api/herdext/v1"
-	"github.com/everdict/herd/internal/grpcwire"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -22,7 +23,7 @@ const ReadBufferSize = 64 * 1024
 // to the container root for os.Root, which refuses anything that would leave the root, symlinks included.
 func resolve(c *container, p string) (string, error) {
 	if p == "" {
-		return "", grpcwire.Errorf(grpcwire.InvalidArgument, "file path cannot be empty")
+		return "", status.Errorf(codes.InvalidArgument, "file path cannot be empty")
 	}
 	if !path.IsAbs(p) {
 		p = path.Join("/", c.t.Workdir(), p)
@@ -37,13 +38,13 @@ func resolve(c *container, p string) (string, error) {
 func fileError(err error, verb, p string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return grpcwire.Errorf(grpcwire.NotFound, "file %q not found", p)
+		return status.Errorf(codes.NotFound, "file %q not found", p)
 	case errors.Is(err, fs.ErrPermission):
-		return grpcwire.Errorf(grpcwire.PermissionDenied, "permission denied %s %q", verb, p)
+		return status.Errorf(codes.PermissionDenied, "permission denied %s %q", verb, p)
 	case strings.Contains(err.Error(), "escapes"):
-		return grpcwire.Errorf(grpcwire.PermissionDenied, "access denied: path %q is outside the container", p)
+		return status.Errorf(codes.PermissionDenied, "access denied: path %q is outside the container", p)
 	}
-	return grpcwire.Errorf(grpcwire.Internal, "%s %q: %v", verb, p, err)
+	return status.Errorf(codes.Internal, "%s %q: %v", verb, p, err)
 }
 
 // ReadFile streams a file in chunks. With a mode, a missing file is created empty (parents included).
@@ -105,7 +106,7 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 		req, err := recv()
 		if errors.Is(err, io.EOF) {
 			if f == nil {
-				return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "no file data received")
+				return nil, status.Errorf(codes.InvalidArgument, "no file data received")
 			}
 			err := f.Close()
 			f = nil
@@ -124,7 +125,7 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 				return nil, err
 			}
 			if req.GetSeekOffset() < 0 {
-				return nil, grpcwire.Errorf(grpcwire.InvalidArgument, "seek_offset cannot be negative")
+				return nil, status.Errorf(codes.InvalidArgument, "seek_offset cannot be negative")
 			}
 			if err := c.root.MkdirAll(path.Dir(name), 0o755); err != nil {
 				return nil, fileError(err, "creating parents of", reqP)

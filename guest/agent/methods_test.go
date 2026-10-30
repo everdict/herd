@@ -1,25 +1,26 @@
 package agent_test
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
 	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
 	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/guest/agent"
-	"github.com/everdict/herd/internal/grpcwire"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Every method of env's ProcessService and FileSystemService, and of herd's FileInfoService, is served under the
-// full name its descriptor gives it, and nothing else is.
+// full name its descriptor gives it, with the streaming kind it declares, and nothing else is.
 func TestServesEveryMethodUnderItsWireName(t *testing.T) {
 	g, err := agent.New(newTarget(t, "main"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer g.Close()
-	srv := grpcwire.NewServer()
+	srv := grpc.NewServer()
 	g.Register(srv)
 	var want []string
 	for _, sd := range []protoreflect.ServiceDescriptor{
@@ -28,10 +29,16 @@ func TestServesEveryMethodUnderItsWireName(t *testing.T) {
 		herdext.File_herdext_v1_files_proto.Services().ByName("FileInfoService"),
 	} {
 		for i := 0; i < sd.Methods().Len(); i++ {
-			want = append(want, "/"+string(sd.FullName())+"/"+string(sd.Methods().Get(i).Name()))
+			m := sd.Methods().Get(i)
+			want = append(want, fmt.Sprintf("/%s/%s client-stream=%v server-stream=%v", sd.FullName(), m.Name(), m.IsStreamingClient(), m.IsStreamingServer()))
 		}
 	}
-	got := srv.Methods()
+	var got []string
+	for name, info := range srv.GetServiceInfo() {
+		for _, m := range info.Methods {
+			got = append(got, fmt.Sprintf("/%s/%s client-stream=%v server-stream=%v", name, m.Name, m.IsClientStream, m.IsServerStream))
+		}
+	}
 	sort.Strings(want)
 	sort.Strings(got)
 	if len(got) != len(want) {
