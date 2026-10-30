@@ -129,6 +129,9 @@ func (v *VMM) start(id string) error {
 	if err != nil {
 		return fmt.Errorf("fakeguest: %w", err)
 	}
+	// The container is a host directory: nothing sits between it and the share, so Sync has nothing to flush, and a
+	// syncfs(2) of the host's disk on every snapshot would stall every other test's fsyncs.
+	g.SyncFS = func(*os.File) error { return nil }
 	sock, err := v.sockPath(id)
 	if err != nil {
 		g.Close()

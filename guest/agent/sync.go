@@ -11,17 +11,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Sync writes what the guest buffered back to its devices and the host (PLT-195): sync(2) for every filesystem the
-// guest holds, then syncfs(2) on each container's root and on every directory in SyncDirs, whose write-back errors
-// sync(2) does not report. herdlet calls it before every snapshot. It answers when ctx ends even if a flush is still
+// Sync writes what the guest buffered back to its devices and the host (PLT-195): syncfs(2) on each container's root
+// and on every directory in SyncDirs (the volume share), which flushes exactly those filesystems and reports their
+// write-back errors. herdlet calls it before every snapshot. It answers when ctx ends even if a flush is still
 // blocked (an unanswering virtio-fs server), so the caller's deadline decides and the snapshot is not taken.
 func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.SyncResponse, error) {
 	dirs := append([]string(nil), g.SyncDirs...)
 	for _, c := range g.containers {
 		dirs = append(dirs, c.t.Rootfs())
 	}
+	flush := g.SyncFS
+	if flush == nil {
+		flush = syncFS
+	}
 	done := make(chan error, 1)
-	go func() { done <- syncDirs(dirs) }()
+	go func() { done <- syncDirs(dirs, flush) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -33,8 +37,7 @@ func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.Sync
 	}
 }
 
-func syncDirs(dirs []string) error {
-	syncAll()
+func syncDirs(dirs []string, flush func(*os.File) error) error {
 	var errs []error
 	for _, d := range dirs {
 		f, err := os.Open(d)
@@ -42,7 +45,7 @@ func syncDirs(dirs []string) error {
 			errs = append(errs, err)
 			continue
 		}
-		if err := syncFS(f); err != nil {
+		if err := flush(f); err != nil {
 			errs = append(errs, fmt.Errorf("syncfs %s: %w", d, err))
 		}
 		f.Close()

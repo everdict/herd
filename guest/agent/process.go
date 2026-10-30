@@ -47,6 +47,9 @@ type Guest struct {
 	// SyncDirs are directories Sync flushes besides the containers' roots (herd-guest's volume share). Set it
 	// before serving.
 	SyncDirs []string
+	// SyncFS, if set, replaces syncfs(2) as Sync's flush of one directory's filesystem (a guest that is not a VM,
+	// whose files are already the host's, has nothing to flush and must not flush the host's disk).
+	SyncFS func(*os.File) error
 
 	containers []*container
 	byName     map[string]*container

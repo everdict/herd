@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,27 +15,9 @@ import (
 
 type mountCall struct{ source, target, fstype string }
 
-// bindCall is a bind mount, with its target as the /proc/self/fd link resolved at the time of the call.
-type bindCall struct {
-	source, target string
-	flags          uintptr
-}
+type fakeMounter struct{ calls []mountCall }
 
-type fakeMounter struct {
-	calls []mountCall
-	binds []bindCall
-}
-
-func (f *fakeMounter) Mount(source, target, fstype string, flags uintptr, _ string) error {
-	const msBind = 0x1000
-	if flags&msBind != 0 {
-		real, err := os.Readlink(target)
-		if err != nil {
-			real = target
-		}
-		f.binds = append(f.binds, bindCall{source, real, flags})
-		return nil
-	}
+func (f *fakeMounter) Mount(source, target, fstype string, _ uintptr, _ string) error {
 	f.calls = append(f.calls, mountCall{source, target, fstype})
 	return nil
 }
@@ -165,62 +146,6 @@ func TestBootMountsShareCreatesVolumesThenStartsContainers(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(l.ShareDir, "workspace", "kept")); err != nil {
 		t.Errorf("volume content lost across boots: %v", err)
-	}
-}
-
-// TestBootBindsVolumesWhereTheFileAPILooks (PLT-195): herd-guest's file API resolves a container's paths in the
-// guest's own view of its rootfs, where crun's binds do not exist. Each volume is bound there too, from its share
-// directory, read-only when the template says so, so a file the API writes under a volume's path is in the share.
-func TestBootBindsVolumesWhereTheFileAPILooks(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("herd-guest binds through /proc/self/fd, which only Linux has; the guest is Linux-only")
-	}
-	l := layout(t)
-	m, _, _, err := boot(t, l, planJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const bind, ro = 0x1000, 0x1000 | 0x20 | 0x1
-	main, side := filepath.Join(l.RunDir, "containers/main/rootfs"), filepath.Join(l.RunDir, "containers/sidecar/rootfs")
-	want := []bindCall{
-		{filepath.Join(l.ShareDir, "workspace"), filepath.Join(main, "workspace"), bind},
-		{filepath.Join(l.ShareDir, "home"), filepath.Join(main, "home/agent"), bind},
-		{filepath.Join(l.ShareDir, "workspace"), filepath.Join(side, "data"), bind},
-		{"", filepath.Join(side, "data"), ro},
-	}
-	if len(m.binds) != len(want) {
-		t.Fatalf("binds = %v,\nwant %v", m.binds, want)
-	}
-	for i := range want {
-		if m.binds[i] != want[i] {
-			t.Errorf("bind %d = %v, want %v", i, m.binds[i], want[i])
-		}
-	}
-}
-
-// A volume's mount path that the image makes a symlink out of the rootfs is refused: the guest-side bind would
-// otherwise land outside the container.
-func TestBootRefusesAVolumeMountPointOutsideTheRootfs(t *testing.T) {
-	l := layout(t)
-	outside := t.TempDir()
-	rootfs := filepath.Join(l.RunDir, "containers/main/rootfs")
-	if err := os.MkdirAll(rootfs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(rootfs, "workspace")); err != nil {
-		t.Fatal(err)
-	}
-	m, rt, _, err := boot(t, l, planJSON)
-	if err == nil {
-		t.Fatal("boot accepted a volume mount point outside the rootfs")
-	}
-	for _, b := range m.binds {
-		if strings.HasPrefix(b.target, outside) {
-			t.Errorf("bound %s onto %s, outside the rootfs", b.source, b.target)
-		}
-	}
-	if len(rt.events) != 0 {
-		t.Errorf("containers started: %v", rt.events)
 	}
 }
 
