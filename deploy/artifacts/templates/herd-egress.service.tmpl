@@ -1,0 +1,17 @@
+# herd-egress on a joined host (docs/runbooks/join.md): its credential is the one `herdlet join` wrote.
+# Rendered by deploy/artifacts; edit the template, not this file.
+[Unit]
+Description=herd-egress
+After=herdlet.service
+
+[Service]
+EnvironmentFile=/etc/herd/herdlet.env
+ExecStart=[[.BinDir]]/herd-egress -api ${HERD_API} -token-file [[.HerdletStateDir]]/egress.token \
+    -bindings /run/herd/egress-bindings.json -ca-out [[.HerdletStateDir]]/egress-ca.pem
+RuntimeDirectory=herd
+RuntimeDirectoryPreserve=yes
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

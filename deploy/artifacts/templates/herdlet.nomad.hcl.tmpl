@@ -1,0 +1,75 @@
+# herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
+# herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that.
+# Rendered by deploy/artifacts; edit the template, not this file.
+variable "release_url" {
+  type    = string
+  default = "[[.ReleaseURL]]"
+}
+
+job "herdlet" {
+  type = "system"
+
+  group "herdlet" {
+    constraint {
+      attribute = "${attr.kernel.name}"
+      value     = "linux"
+    }
+
+    task "herdlet" {
+      driver = "raw_exec"
+
+      artifact {
+        source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
+      }
+
+      template {
+        data        = "HERD_API={{ range nomadService \"herd-api\" }}{{ .Address }}:{{ .Port }}{{ end }}"
+        destination = "local/herd-api.env"
+        env         = true
+      }
+
+      template {
+        data        = "{{ with nomadVar \"nomad/jobs/herdlet\" }}{{ .join_token }}{{ end }}"
+        destination = "secrets/join.token"
+        perms       = "0600"
+      }
+
+      config {
+        command = "local/herdlet"
+        args = [
+          "join", "${HERD_API}",
+          "-token-file", "secrets/join.token",
+          "-state", "[[.HerdletStateDir]]",
+          "-snapshots", "[[.SnapshotDir]]",
+          "-kernel", "${NOMAD_TASK_DIR}/kernel",
+          "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
+          "-virtiofsd", "/usr/libexec/virtiofsd",
+        ]
+      }
+    }
+
+    task "herd-egress" {
+      driver = "raw_exec"
+
+      artifact {
+        source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
+      }
+
+      template {
+        data        = "HERD_API={{ range nomadService \"herd-api\" }}{{ .Address }}:{{ .Port }}{{ end }}"
+        destination = "local/herd-api.env"
+        env         = true
+      }
+
+      config {
+        command = "local/herd-egress"
+        args = [
+          "-api", "${HERD_API}",
+          "-token-file", "[[.HerdletStateDir]]/egress.token",
+          "-bindings", "/run/herd/egress-bindings.json",
+          "-ca-out", "[[.HerdletStateDir]]/egress-ca.pem",
+        ]
+      }
+    }
+  }
+}

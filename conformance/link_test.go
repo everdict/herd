@@ -113,10 +113,11 @@ func TestHerdletGoneIsUnknown(t *testing.T) {
 }
 
 // TestHerdAPINeverDials: herd-api's packages hold no dialer — no net.Dial*, no grpc.Dial or grpc.NewClient, no http client.
+// herd-api's main is deploy.API (deploy/api.go) and its join service package join.
 func TestHerdAPINeverDials(t *testing.T) {
 	fset := token.NewFileSet()
-	for _, dir := range []string{"../apiserver", "../link", "../cmd/herd-api"} {
-		pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	for _, dir := range []string{"../apiserver", "../link", "../join", "../cmd/herd-api", "../deploy/api.go"} {
+		pkgs, err := parseSources(fset, dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,4 +157,16 @@ func register(ctx context.Context, addr, token, reg string) error {
 	}
 	_, err = st.Recv()
 	return err
+}
+
+// parseSources parses the non-test Go files of a directory, or one Go file.
+func parseSources(fset *token.FileSet, path string) (map[string]*ast.Package, error) {
+	if strings.HasSuffix(path, ".go") {
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]*ast.Package{f.Name.Name: {Name: f.Name.Name, Files: map[string]*ast.File{path: f}}}, nil
+	}
+	return parser.ParseDir(fset, path, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 }

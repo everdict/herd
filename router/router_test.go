@@ -160,12 +160,12 @@ func connectStatus(t *testing.T, s *stack, target, tok, authority string) int {
 
 // TestRouterNeverDialsNodes (route-by-name): the router's packages hold no dialer — every connection to a VM is one
 // the herdlet opened — and with the herdlet's tunnel down a running actor is unreachable even though its guest
-// still listens on the node.
+// still listens on the node. herd-router's main is deploy.Router (deploy/router.go).
 func TestRouterNeverDialsNodes(t *testing.T) {
 	fset := token.NewFileSet()
 	newClients := 0
-	for _, dir := range []string{"../router", "../tunnel", "../cmd/herd-router"} {
-		pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	for _, dir := range []string{"../router", "../tunnel", "../cmd/herd-router", "../deploy/router.go"} {
+		pkgs, err := parseSources(fset, dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -182,7 +182,7 @@ func TestRouterNeverDialsNodes(t *testing.T) {
 					}
 					call := x.Name + "." + sel.Sel.Name
 					switch {
-					case call == "grpc.NewClient" && strings.HasSuffix(dir, "cmd/herd-router"):
+					case call == "grpc.NewClient" && strings.HasSuffix(dir, "deploy/router.go"):
 						newClients++ // the connection to herd-api
 					case strings.HasPrefix(sel.Sel.Name, "Dial") && x.Name != "tunnel", call == "net.Dialer", call == "grpc.NewClient",
 						call == "http.Client", call == "http.Get", call == "http.Post", call == "http.DefaultTransport":
@@ -194,7 +194,7 @@ func TestRouterNeverDialsNodes(t *testing.T) {
 		}
 	}
 	if newClients != 1 {
-		t.Errorf("cmd/herd-router makes %d gRPC clients, want exactly one (herd-api)", newClients)
+		t.Errorf("herd-router (deploy/router.go) makes %d gRPC clients, want exactly one (herd-api)", newClients)
 	}
 
 	s := startStack(t, stackOpts{budget: 500 * time.Millisecond})
@@ -414,4 +414,16 @@ func TestLongStreams(t *testing.T) {
 	if again.err != nil || again.stdout != "two\n" || again.exit.GetExitCode() != 0 {
 		t.Errorf("re-attach: %+v", again)
 	}
+}
+
+// parseSources parses the non-test Go files of a directory, or one Go file.
+func parseSources(fset *token.FileSet, path string) (map[string]*ast.Package, error) {
+	if strings.HasSuffix(path, ".go") {
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]*ast.Package{f.Name.Name: {Name: f.Name.Name, Files: map[string]*ast.File{path: f}}}, nil
+	}
+	return parser.ParseDir(fset, path, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 }

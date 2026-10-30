@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- herdlet on a joined Mac (docs/runbooks/join.md): replace @HERD_API@ with herd-api's host:port. Rendered by
+     deploy/artifacts; edit the template. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.everdict.herdlet</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/herdlet</string>
+		<string>join</string>
+		<string>@HERD_API@</string>
+		<string>-token-file</string>
+		<string>/usr/local/etc/herd/join.token</string>
+		<string>-state</string>
+		<string>/usr/local/var/herdlet</string>
+		<string>-kernel</string>
+		<string>/usr/local/share/herd/kernel</string>
+		<string>-initrd</string>
+		<string>/usr/local/share/herd/initrd.img</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/log/herdlet.log</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+# herd-api for multi-host join (docs/runbooks/join.md). HERD_ADVERTISE_TUNNEL in /etc/herd/herd-api.env is the
+# herd-router tunnel address herdlets dial (host:7444).
+# Rendered by deploy/artifacts; edit the template, not this file.
+[Unit]
+Description=herd-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/herd/herd-api.env
+ExecStart=/usr/local/bin/herd-api -listen 0.0.0.0:7443 -key-file /etc/herd/jwt.key \
+    -store bolt:/var/lib/herd/herd.db -snapshots /var/lib/herd/snapshots -advertise-tunnel ${HERD_ADVERTISE_TUNNEL}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

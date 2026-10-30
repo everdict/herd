@@ -1,0 +1,86 @@
+# Runbook: herd all-in-one (one host)
+
+One host runs everything in one process: herd-api on a bbolt store, herd-router, herd-egress and a herdlet that joins
+that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands below are checked by
+`docs/runbooks/runbooks_test.go`: every herd command and flag named here exists.
+
+## Ubuntu (x86_64 or arm64, KVM)
+
+1. Install Cloud Hypervisor v54.0 and virtiofsd (>= 1.11):
+
+   ```sh
+   ARCH=$(dpkg --print-architecture)   # amd64 or arm64
+   CH=cloud-hypervisor-static; [ "$ARCH" = arm64 ] && CH=cloud-hypervisor-static-aarch64
+   curl -fsSLo cloud-hypervisor https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/$CH
+   sudo install -m 0755 cloud-hypervisor /usr/local/bin/cloud-hypervisor
+   sudo apt-get install -y virtiofsd
+   ```
+
+2. Install herd from its release archive (binaries, guest kernel and initramfs, and `dist/`):
+
+   ```sh
+   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_linux_$ARCH.tar.gz
+   mkdir herd && tar -C herd -xzf herd_linux_$ARCH.tar.gz
+   sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
+   sudo install -d /usr/local/share/herd
+   sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
+   ```
+
+3. Check that this host can run herd actors. Every line must say `ok`; a `FAIL` line says what is missing (for
+   example `/dev/kvm`):
+
+   ```sh
+   sudo herdlet doctor -virtiofsd /usr/libexec/virtiofsd
+   ```
+
+4. Install and start the unit (`dist/systemd/herd.service`; data in `/var/lib/herd`):
+
+   ```sh
+   sudo install -m 0644 herd/dist/systemd/herd.service /etc/systemd/system/herd.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now herd
+   ```
+
+5. Check the pool. The process wrote its signing key to `/var/lib/herd/jwt.key`; mint a client token with it and list
+   the workers — this host's name appears, with platform `PLATFORM_LINUX_CLOUD_HYPERVISOR`:
+
+   ```sh
+   TOKEN=$(sudo herd-api token -key-file /var/lib/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
+   herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
+   ```
+
+   Clients use herd-api at `<host>:7443` (Substrate Control API) and herd-router at `<host>:8443` with that token.
+   Both serve cleartext HTTP/2: put a TLS terminator in front before exposing them beyond the host (ADR A-12).
+
+## macOS (Apple Silicon, macOS 14+)
+
+1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement):
+
+   ```sh
+   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_darwin_arm64.tar.gz
+   mkdir herd && tar -C herd -xzf herd_darwin_arm64.tar.gz
+   sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
+   sudo install -d /usr/local/share/herd /usr/local/var/herd
+   sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
+   ```
+
+2. Check the host:
+
+   ```sh
+   herdlet doctor
+   ```
+
+3. Install and load the launchd job (`dist/launchd/com.everdict.herd.plist`; data in `/usr/local/var/herd`):
+
+   ```sh
+   sudo install -m 0644 herd/dist/launchd/com.everdict.herd.plist /Library/LaunchDaemons/com.everdict.herd.plist
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.everdict.herd.plist
+   ```
+
+4. Check the pool (platform `PLATFORM_DARWIN_VZ`, suspend fidelity `SNAPSHOT_FIDELITY_VOLUMES` unless this Mac
+   proved it can save machine state, R-D9):
+
+   ```sh
+   TOKEN=$(sudo herd-api token -key-file /usr/local/var/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
+   herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
+   ```

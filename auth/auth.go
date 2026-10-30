@@ -44,6 +44,8 @@ type Principal struct {
 	Spaces map[string]Role
 	// Herdlet is set for a herdlet's credential.
 	Herdlet bool
+	// Join is set for a join token: it may only be exchanged for a herdlet credential (package join).
+	Join bool
 }
 
 // Authenticator turns a bearer token into a principal; ErrUnauthenticated otherwise.
@@ -91,6 +93,7 @@ type Claims struct {
 	NotBefore int64           `json:"nbf,omitempty"`
 	Spaces    map[string]Role `json:"herd_spaces,omitempty"`
 	Herdlet   bool            `json:"herd_herdlet,omitempty"`
+	Join      bool            `json:"herd_join,omitempty"`
 }
 
 // StaticKey authenticates HS256 JWTs signed with one key. Tokens must carry sub and exp; aud must equal Audience when
@@ -161,7 +164,10 @@ func (s StaticKey) Authenticate(ctx context.Context, token string) (Principal, e
 	case s.Audience != "" && c.Audience != s.Audience:
 		return Principal{}, fmt.Errorf("%w: audience %q", ErrUnauthenticated, c.Audience)
 	}
-	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet}, nil
+	if c.Join && (c.Herdlet || len(c.Spaces) > 0) {
+		return Principal{}, fmt.Errorf("%w: a join token grants nothing else", ErrUnauthenticated)
+	}
+	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet, Join: c.Join}, nil
 }
 
 func decodePart(p string, v any) error {

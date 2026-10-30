@@ -1,0 +1,14 @@
+# herd-router beside herd-api (docs/runbooks/join.md).
+# Rendered by deploy/artifacts; edit the template, not this file.
+[Unit]
+Description=herd-router
+After=herd-api.service
+
+[Service]
+ExecStart=[[.BinDir]]/herd-router -listen 0.0.0.0:8443 -tunnel-listen 0.0.0.0:7444 -api 127.0.0.1:7443 \
+    -key-file /etc/herd/jwt.key
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
