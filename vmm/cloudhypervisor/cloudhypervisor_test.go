@@ -222,6 +222,37 @@ func TestBootWaitsForVMBoot(t *testing.T) {
 	}
 }
 
+// TestBootDefaultCmdline: a spec without a command line boots with the backend's default for the host's arch, a
+// console the guest's output reaches and a panic that ends the VM, not an empty payload cmdline; a given one is
+// passed through as is.
+func TestBootDefaultCmdline(t *testing.T) {
+	for _, c := range []struct {
+		name, cmdline, want string
+		cpu                 CPU
+	}{
+		{"amd64 empty", "", "console=ttyS0 panic=-1", X86CPU{CPUID: tigerLake.cpuid}},
+		{"arm64 empty", "", "console=ttyAMA0 panic=-1", ARM64CPU{Root: "/nonexistent"}},
+		{"given", "console=ttyS0 quiet", "console=ttyS0 quiet", X86CPU{CPUID: tigerLake.cpuid}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			v := New(Config{Binary: r.host.chBin, Virtiofsd: r.host.fsBin, StateDir: filepath.Join(r.root, "a"),
+				CPU: c.cpu, Processes: r.host, ExitTimeout: 200 * time.Millisecond})
+			spec := r.spec("c1")
+			spec.Cmdline = c.cmdline
+			if _, err := v.Boot(ctxT(t, 5*time.Second), spec); err != nil {
+				t.Fatal(err)
+			}
+			r.host.mu.Lock()
+			got := r.host.cmdlines
+			r.host.mu.Unlock()
+			if len(got) != 1 || got[0] != c.want {
+				t.Errorf("spec cmdline %q sent payload cmdlines %q to Cloud Hypervisor, want [%q]", c.cmdline, got, c.want)
+			}
+		})
+	}
+}
+
 // TestCallWithoutAnswerIsNotSuccess: the client never turns a timed-out or unanswered call into success.
 func TestCallWithoutAnswerIsNotSuccess(t *testing.T) {
 	r := newRig(t)

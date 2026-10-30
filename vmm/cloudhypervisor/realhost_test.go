@@ -23,7 +23,7 @@ import (
 //	HERD_KERNEL        guest kernel (bzImage on amd64, Image on arm64; ch-release-v7.2.8-20261009)
 //	HERD_INITRAMFS     an initramfs whose /init keeps running (it must not exit, or the guest panics)
 //
-// Optional: HERD_CMDLINE (default "console=ttyS0 panic=-1" on amd64, "console=ttyAMA0 panic=-1" on arm64),
+// Optional: HERD_CMDLINE (default DefaultCmdline: "console=ttyS0 panic=-1" on amd64, "console=ttyAMA0 panic=-1" on arm64),
 // HERD_ROOTFS (a raw disk image to attach), HERD_VIRTIOFSD_ARGS (extra virtiofsd arguments, space-separated;
 // default --sandbox=none when not root). The contract's Faults subtest skips: real Cloud Hypervisor cannot be made to
 // misbehave on demand, and the fake-server contract covers those paths in every go test.
@@ -47,10 +47,7 @@ func TestRealHostContract(t *testing.T) {
 	cpu := HostCPU()
 	cmdline := os.Getenv("HERD_CMDLINE")
 	if cmdline == "" {
-		cmdline = "console=ttyS0 panic=-1"
-		if cpu.Arch() == "arm64" {
-			cmdline = "console=ttyAMA0 panic=-1"
-		}
+		cmdline = DefaultCmdline(cpu.Arch())
 	}
 	fsArgs := strings.Fields(os.Getenv("HERD_VIRTIOFSD_ARGS"))
 	if len(fsArgs) == 0 && os.Geteuid() != 0 {

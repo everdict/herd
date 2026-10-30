@@ -272,9 +272,23 @@ func waitFor(ctx context.Context, what string, p Process, ready func() (bool, er
 	}
 }
 
+// DefaultCmdline is the guest kernel command line a spec without one boots with: the serial console Cloud
+// Hypervisor writes to serial.log, so a failing guest is visible, and panic=-1, so a guest kernel panic ends the VM
+// at once instead of hanging it.
+func DefaultCmdline(arch string) string {
+	if arch == "arm64" {
+		return "console=ttyAMA0 panic=-1"
+	}
+	return "console=ttyS0 panic=-1"
+}
+
 func (v *VMM) vmConfig(spec vmm.Spec, dir string) vmConfig {
+	cmdline := spec.Cmdline
+	if cmdline == "" {
+		cmdline = DefaultCmdline(v.cfg.CPU.Arch())
+	}
 	c := vmConfig{
-		Payload: payloadConfig{Kernel: spec.Kernel, Initramfs: spec.Initrd, Cmdline: spec.Cmdline},
+		Payload: payloadConfig{Kernel: spec.Kernel, Initramfs: spec.Initrd, Cmdline: cmdline},
 		CPUs:    cpusConfig{BootVCPUs: spec.VCPUs, MaxVCPUs: spec.VCPUs},
 		Memory:  memoryConfig{Size: int64(spec.MemoryMiB) << 20, Shared: true},
 		Vsock:   &vsockConfig{CID: guestCID, Socket: filepath.Join(dir, "vsock.sock")},

@@ -35,6 +35,7 @@ type fakeHost struct {
 	fsSurvive      bool // virtiofsd survives signals
 	calls          []string
 	starts         []string
+	cmdlines       []string // the payload command line of every accepted vm.create
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -255,6 +256,9 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.config, c.state = &cfg, "created"
+		c.h.mu.Lock()
+		c.h.cmdlines = append(c.h.cmdlines, cfg.Payload.Cmdline)
+		c.h.mu.Unlock()
 	case epBoot:
 		if c.state != "created" {
 			fail(http.StatusNotFound, "VM not created")
