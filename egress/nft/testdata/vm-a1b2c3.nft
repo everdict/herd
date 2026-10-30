@@ -1,0 +1,43 @@
+# herd-egress: VM a1b2c3 on herd-a1b2c3 (10.88.0.2); generated, do not edit.
+table inet herd_a1b2c3 {
+	counter refused_input {
+	}
+	counter refused_forward {
+	}
+	counter refused_spoofed {
+	}
+	counter refused_output {
+	}
+
+	chain screen {
+		type filter hook prerouting priority raw; policy accept;
+		iifname "herd-a1b2c3" meta nfproto != ipv4 counter name "refused_input" drop
+		iifname "herd-a1b2c3" ip saddr != 10.88.0.2 counter name "refused_spoofed" drop
+	}
+
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "herd-a1b2c3" ip saddr 10.88.0.2 meta l4proto tcp redirect to :15001
+		iifname "herd-a1b2c3" ip saddr 10.88.0.2 udp dport 53 redirect to :15053
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "herd-a1b2c3" ct state established,related ct status dnat accept
+		iifname "herd-a1b2c3" ct state new ct status dnat ip daddr 10.88.0.1 tcp dport 15001 accept
+		iifname "herd-a1b2c3" ct state new ct status dnat ip daddr 10.88.0.1 udp dport 15053 accept
+		iifname "herd-a1b2c3" counter name "refused_input" drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname "herd-a1b2c3" counter name "refused_forward" drop
+		oifname "herd-a1b2c3" counter name "refused_forward" drop
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "herd-a1b2c3" ct state established,related accept
+		oifname "herd-a1b2c3" counter name "refused_output" drop
+	}
+}
