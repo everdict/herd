@@ -115,7 +115,7 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
 	}
-	o := s.call(ctx, ar.st.Worker, w)
+	o := s.step(ctx, ar, w)
 	switch o.Result {
 	case link.ResultDone:
 		worker := ar.st.Worker
@@ -217,7 +217,10 @@ func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest
 	if err := s.place(ctx, ar, tpl, true); err != nil {
 		return nil, toStatus(err)
 	}
-	if err := s.start(ctx, ar, owedBoot, ateapi.ActorState_ACTOR_STATE_UNSPECIFIED); err != nil {
+	logBegun(ar, "create")
+	err = s.start(ctx, ar, owedBoot, ateapi.ActorState_ACTOR_STATE_UNSPECIFIED)
+	logEnded(ar, "create", err)
+	if err != nil {
 		return nil, toStatus(err)
 	}
 	return ar.view(), nil

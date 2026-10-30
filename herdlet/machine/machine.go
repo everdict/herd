@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -205,9 +206,13 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if err != nil {
 		return vmm.Snapshot{}, err
 	}
+	start := time.Now()
 	if err := m.flush(ctx, vmID); err != nil {
 		// Not %w: the guest's answer is no outcome of the VMM's, and no snapshot was taken.
 		return vmm.Snapshot{}, fmt.Errorf("machine: snapshot %s: flushing the guest: %v", id, err)
+	}
+	if m.cfg.Flush != nil {
+		log.Printf("machine: snapshot %s: guest flushed after %v", id, time.Since(start).Round(time.Millisecond))
 	}
 	snap, err := m.cfg.VMM.Snapshot(ctx, vmID, f)
 	if err != nil {

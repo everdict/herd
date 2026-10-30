@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -25,7 +26,7 @@ func presenceName(p string) string {
 // against the digest the herdlet answered. Only a verified object comes back as done; an answer without one is
 // unknown, since a snapshot may or may not exist.
 func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity, cause link.Cause) (*link.SnapshotRef, link.Result, string) {
-	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key, Cause: cause})
+	o := s.step(ctx, ar, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key, Cause: cause})
 	if o.Result != link.ResultDone {
 		return nil, o.Result, o.Reason
 	}
@@ -69,6 +70,7 @@ func (s *Server) SuspendActor(ctx context.Context, req *ateapi.SuspendActorReque
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s/%s is %v", space, name, ar.actor.Status.GetState())
 	}
 	if req.GetOptions().GetMode() == ateapi.DurabilityMode_DURABILITY_MODE_ASYNCHRONOUS {
+		logBegun(ar, "asynchronous suspend")
 		if ar.st.Owed == nil || ar.st.Owed.Op != owedRelease {
 			ar.setState(ateapi.ActorState_ACTOR_STATE_SUSPENDING)
 			ar.owe(owedSuspend, "asynchronous suspend in progress", time.Now())
@@ -82,12 +84,16 @@ func (s *Server) SuspendActor(ctx context.Context, req *ateapi.SuspendActorReque
 		go func() {
 			defer s.bg.Done()
 			defer unlock()
-			_ = s.suspendSteps(context.WithoutCancel(ctx), ar)
+			// No caller waits for this answer: the log is where a failed or owed suspend shows.
+			err := s.suspendSteps(context.WithoutCancel(ctx), ar)
+			logEnded(ar, "asynchronous suspend", err)
 		}()
 		return &ateapi.SuspendActorResponse{Actor: view}, nil
 	}
 	defer unlock()
+	logBegun(ar, "suspend")
 	err = s.suspendSteps(ctx, ar)
+	logEnded(ar, "suspend", err)
 	showOwed(ctx, ar)
 	if err != nil {
 		return nil, toStatus(err)
@@ -149,7 +155,7 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 // release deletes a suspended actor's VM on its worker; the actor is SUSPENDED and the slot free only once the
 // herdlet answered the VM verified gone.
 func (s *Server) release(ctx context.Context, ar *actorRec) error {
-	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseSuspend})
+	o := s.step(ctx, ar, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseSuspend})
 	if o.Result == link.ResultDone && o.Presence == link.PresenceGone {
 		ar.st.Worker, ar.st.Owed = "", nil
 		ar.setState(ateapi.ActorState_ACTOR_STATE_SUSPENDED)
@@ -183,7 +189,10 @@ func (s *Server) ResumeActor(ctx context.Context, req *ateapi.ResumeActorRequest
 	case ateapi.ActorState_ACTOR_STATE_RUNNING:
 		return &ateapi.ResumeActorResponse{Actor: ar.view(), Resumed: false}, nil
 	case ateapi.ActorState_ACTOR_STATE_RESUMING:
-		if err := s.reconcileStart(ctx, ar); err != nil {
+		logBegun(ar, "resume")
+		err := s.reconcileStart(ctx, ar)
+		logEnded(ar, "resume", err)
+		if err != nil {
 			showOwed(ctx, ar)
 			return nil, toStatus(err)
 		}
@@ -199,13 +208,17 @@ func (s *Server) ResumeActor(ctx context.Context, req *ateapi.ResumeActorRequest
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	logBegun(ar, "resume")
 	ar.st.Restore = ar.st.Snapshot
 	ar.setState(ateapi.ActorState_ACTOR_STATE_RESUMING)
 	ar.owe(owedResume, "placed, not restored yet", time.Now())
 	if err := s.place(ctx, ar, tpl, false); err != nil {
+		log.Printf("herd-api: actor %s/%s: resume not placed: %v", space, name, err)
 		return nil, toStatus(err)
 	}
-	if err := s.start(ctx, ar, owedResume, ateapi.ActorState_ACTOR_STATE_SUSPENDED); err != nil {
+	err = s.start(ctx, ar, owedResume, ateapi.ActorState_ACTOR_STATE_SUSPENDED)
+	logEnded(ar, "resume", err)
+	if err != nil {
 		showOwed(ctx, ar)
 		return nil, toStatus(err)
 	}
@@ -220,7 +233,7 @@ func (s *Server) reconcileStart(ctx context.Context, ar *actorRec) error {
 	if ar.st.Owed != nil && ar.st.Owed.Op == owedBoot {
 		failed, op = ateapi.ActorState_ACTOR_STATE_UNSPECIFIED, owedBoot
 	}
-	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpInspect, VM: vmID(ar)})
+	o := s.step(ctx, ar, link.Work{Op: link.OpInspect, VM: vmID(ar)})
 	if o.Result == link.ResultUnknown || (o.Presence != link.PresenceGone && o.Presence != link.PresencePresent) {
 		ar.owe(op, "start unknown; inspect unknown: "+o.Reason, time.Now())
 		if err := s.save(ctx, ar); err != nil {
@@ -251,6 +264,7 @@ func (s *Server) DeleteActor(ctx context.Context, req *ateapi.DeleteActorRequest
 	if err := precondition(ar.rec, req.GetOptions().GetUid(), req.GetOptions().GetVersion(), false); err != nil {
 		return nil, err
 	}
+	logBegun(ar, "delete")
 	if ar.st.DeleteTime == nil {
 		now := time.Now().UTC()
 		ar.st.DeleteTime = &now
@@ -261,15 +275,17 @@ func (s *Server) DeleteActor(ctx context.Context, req *ateapi.DeleteActorRequest
 		return nil, toStatus(err)
 	}
 	if err := s.deleteSteps(ctx, ar); err != nil {
+		logEnded(ar, "delete", err)
 		showOwed(ctx, ar)
 		return nil, toStatus(err)
 	}
+	log.Printf("herd-api: actor %s/%s: delete ends: record deleted", space, name)
 	return ar.view(), nil
 }
 
 func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	if ar.st.Worker != "" {
-		o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseDelete})
+		o := s.step(ctx, ar, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseDelete})
 		if o.Result != link.ResultDone || o.Presence != link.PresenceGone {
 			ar.owe(owedDelete, fmt.Sprintf("VM not verified gone (%s): %s", presenceName(o.Presence), o.Reason), time.Now())
 			if err := s.save(ctx, ar); err != nil {
@@ -334,6 +350,8 @@ func (s *Server) reconcileOne(ctx context.Context, k store.Key) (stillOwed bool)
 	if err != nil || ar.st.Owed == nil {
 		return false
 	}
+	what := "reconcile of owed " + ar.st.Owed.Op
+	logBegun(ar, what)
 	switch ar.st.Owed.Op {
 	case owedDelete:
 		err = s.deleteSteps(ctx, ar)
@@ -341,6 +359,11 @@ func (s *Server) reconcileOne(ctx context.Context, k store.Key) (stillOwed bool)
 		err = s.suspendSteps(ctx, ar)
 	case owedBoot, owedResume:
 		err = s.reconcileStart(ctx, ar)
+	}
+	if ar.st.Owed == nil && ar.actor.Status.GetState() == ateapi.ActorState_ACTOR_STATE_DELETING && err == nil {
+		log.Printf("herd-api: actor %s/%s: %s ends: record deleted", k.Space, k.Name, what)
+	} else {
+		logEnded(ar, what, err)
 	}
 	return err != nil && ar.st.Owed != nil
 }

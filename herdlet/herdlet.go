@@ -167,7 +167,7 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o := a.do(ctx, w)
+			o := a.logged(ctx, w)
 			o.ID = w.ID
 			if a.Rewrite != nil {
 				var ok bool

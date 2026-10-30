@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/transport"
@@ -39,6 +40,11 @@ type VMM struct {
 	// RootOf, if set, places vm's container at the directory it names instead of under Dir (e.g. the VM's share
 	// as herdlet laid it out, so the guest's files are the volumes a suspend carries).
 	RootOf func(vm string) string
+	// GuestDelay, if set, is how long a VM's herd-guest takes to serve after its boot or restore was answered, as
+	// under Cloud Hypervisor, which answers a boot before the guest's init runs: until then DialGuest refuses.
+	GuestDelay time.Duration
+	// SyncFS, if set, is each guest's flush of one directory (agent.Guest.SyncFS); nil flushes nothing.
+	SyncFS func(*os.File) error
 
 	mu      sync.Mutex
 	guests  map[string]*guest
@@ -73,6 +79,8 @@ type guest struct {
 	srv  *grpc.Server
 	sock string
 	done chan struct{}
+	// ready is when the guest serves (GuestDelay after its start).
+	ready time.Time
 }
 
 // New wraps f; dir must be short enough for unix socket paths.
@@ -132,6 +140,9 @@ func (v *VMM) start(id string) error {
 	// The container is a host directory: nothing sits between it and the share, so Sync has nothing to flush, and a
 	// syncfs(2) of the host's disk on every snapshot would stall every other test's fsyncs.
 	g.SyncFS = func(*os.File) error { return nil }
+	if v.SyncFS != nil {
+		g.SyncFS = v.SyncFS
+	}
 	sock, err := v.sockPath(id)
 	if err != nil {
 		g.Close()
@@ -144,7 +155,7 @@ func (v *VMM) start(id string) error {
 	}
 	srv := grpc.NewServer()
 	g.Register(srv)
-	gu := &guest{g: g, srv: srv, sock: sock, done: make(chan struct{})}
+	gu := &guest{g: g, srv: srv, sock: sock, done: make(chan struct{}), ready: time.Now().Add(v.GuestDelay)}
 	go func() {
 		defer close(gu.done)
 		_ = srv.Serve(l)
@@ -193,7 +204,7 @@ func (v *VMM) DialGuest(ctx context.Context, vm string, port uint32) (net.Conn, 
 	v.mu.Lock()
 	gu, ok := v.guests[vm]
 	v.mu.Unlock()
-	if !ok || port != GuestPort {
+	if !ok || port != GuestPort || time.Now().Before(gu.ready) {
 		return nil, fmt.Errorf("%w: VM %s port %d", ErrNoGuest, vm, port)
 	}
 	return transport.DialUnix(gu.sock)(ctx)

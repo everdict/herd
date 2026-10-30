@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"time"
 
@@ -19,6 +20,12 @@ type Flusher interface {
 // DefaultFlushTimeout bounds a flush when Config.FlushTimeout is zero.
 const DefaultFlushTimeout = 20 * time.Second
 
+// DialRetry is how long GuestFlush waits between dials of a guest that does not answer yet.
+const DialRetry = 20 * time.Millisecond
+
+// dialAttempt bounds one dial of the guest, so one hung handshake does not use up the whole flush.
+const dialAttempt = 2 * time.Second
+
 // GuestFlush is the default Flusher: herd-guest's Sync, over the guest dialer.
 type GuestFlush struct {
 	Guests GuestDialer
@@ -26,11 +33,31 @@ type GuestFlush struct {
 	Port uint32
 }
 
+// Flush dials the guest until it answers and then calls Sync; ctx bounds both. A hypervisor may answer a boot before
+// herd-guest serves (Cloud Hypervisor does not wait for the guest), so a snapshot right after a boot can find a guest
+// that is still starting: that guest is waited for, not taken for a failed flush (PLT-200).
 func (f GuestFlush) Flush(ctx context.Context, vmID string) error {
-	c, err := guestclient.New(func(ctx context.Context) (net.Conn, error) { return f.Guests.DialGuest(ctx, vmID, f.Port) })
+	c, err := guestclient.New(func(ctx context.Context) (net.Conn, error) { return f.dial(ctx, vmID) })
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 	return c.Invoke(ctx, agent.MethodSync, &herdext.SyncRequest{}, &herdext.SyncResponse{}, nil)
+}
+
+// dial reaches the guest's port, trying again every DialRetry until ctx ends.
+func (f GuestFlush) dial(ctx context.Context, vmID string) (net.Conn, error) {
+	for {
+		actx, cancel := context.WithTimeout(ctx, dialAttempt)
+		conn, err := f.Guests.DialGuest(actx, vmID, f.Port)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("guest of %s did not answer on port %d: %w (last: %v)", vmID, f.Port, ctx.Err(), err)
+		case <-time.After(DialRetry):
+		}
+	}
 }
