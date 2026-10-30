@@ -255,7 +255,7 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		return err
 	}
 	snap := man.Snapshot
-	vmID := id
+	vmID, cold := id, false
 	switch snap.Fidelity {
 	case vmm.FidelityVolumes:
 	case vmm.FidelityMemory:
@@ -267,6 +267,14 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 			return fmt.Errorf("machine: restore %s: a MEMORY snapshot of %q on a host of %q: %w", id, snap.RestoreFamily, caps.RestoreFamily, ErrFamily)
 		}
 		vmID = snap.VMID
+		if vmID != id {
+			if _, err := os.Lstat(filepath.Join(m.cfg.ShareDir, vmID)); err == nil {
+				// The VM id this memory restores under is taken on this host (a second fork of one MEMORY tag, or
+				// the tag's source running again): one memory cannot run twice under one id, so this actor
+				// cold-boots from the bundle's volume tree under its own id, as a VOLUMES restore does.
+				vmID, cold = id, true
+			}
+		}
 	default:
 		return fmt.Errorf("machine: restore %s at %v: %w", id, snap.Fidelity, vmm.ErrFidelityUnsupported)
 	}
@@ -279,7 +287,7 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		}
 		return err
 	}
-	if snap.Fidelity == vmm.FidelityMemory {
+	if snap.Fidelity == vmm.FidelityMemory && !cold {
 		_, err = m.cfg.VMM.Restore(ctx, snap, spec)
 	} else {
 		_, err = m.cfg.VMM.Boot(ctx, spec)

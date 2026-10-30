@@ -453,6 +453,12 @@ func (rt *Router) proxy(w http.ResponseWriter, r *http.Request, conn net.Conn, t
 		w.Header().Del(h)
 	}
 	w.WriteHeader(resp.StatusCode)
+	// A gRPC status in the headers is a trailers-only answer (the guest refused before any message): it must stay
+	// one HEADERS frame that ends the stream. Flushed now, it would open a stream that then ends with no
+	// grpc-status, which a gRPC client reads as a broken stream instead of the guest's typed refusal.
+	if resp.Header.Get("Grpc-Status") != "" {
+		return
+	}
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
 	buf := make([]byte, 32<<10)

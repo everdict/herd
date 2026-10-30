@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/everdict/herd/conformance/substrateapi"
 )
 
 // Command is one command line a herd binary accepts: Binary, and Sub when it is a subcommand.
@@ -183,6 +185,22 @@ func Commands() []Command {
 			a := &AllInOne{}
 			a.Flags(fs)
 			return func(ctx context.Context, _ []string, _ io.Writer) error { return a.Run(ctx, nil) }
+		}},
+		{Binary: "herd", Sub: "conformance", Synopsis: "run the Substrate-API conformance suite against a target (Substrate or herd)", New: func(fs *flag.FlagSet) func(context.Context, []string, io.Writer) error {
+			o := &substrateapi.Options{}
+			o.Flags(fs)
+			return func(ctx context.Context, _ []string, out io.Writer) error {
+				cfg, err := o.Config()
+				if err != nil {
+					return err
+				}
+				rep := substrateapi.Run(ctx, cfg)
+				rep.Print(out)
+				if !rep.OK() {
+					return fmt.Errorf("the suite is not green on %s", rep.Target)
+				}
+				return nil
+			}
 		}},
 	}
 }

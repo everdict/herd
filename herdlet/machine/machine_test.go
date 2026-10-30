@@ -312,3 +312,44 @@ func mustJSON(t *testing.T, v any) []byte {
 func equalJSON(t *testing.T, a, b any) bool {
 	return bytes.Equal(mustJSON(t, a), mustJSON(t, b))
 }
+
+// TestSecondMemoryForkColdBoots: two actors restored from one MEMORY bundle on its own host (two forks of one tag)
+// both start. The first restores the memory under the snapshot's VM id; that id is then taken, so the second
+// cold-boots from the bundle's volume tree under its own id instead of failing on the taken share.
+func TestSecondMemoryForkColdBoots(t *testing.T) {
+	ctx := context.Background()
+	h := newHost(t, ubuntuCaps, registry())
+	if err := h.m.Boot(ctx, "parent", template()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.m.ShareDir("parent"), "data", "notes"), []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var bundle bytes.Buffer
+	if _, err := h.m.Snapshot(ctx, "parent", vmm.FidelityMemory, true, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	// The suspend releases the parent: its VM and share are gone before the forks.
+	if p, err := h.m.Delete(ctx, "parent"); p != vmm.PresenceGone {
+		t.Fatalf("release: %v, %v", p, err)
+	}
+	for _, id := range []string{"fork-1", "fork-2"} {
+		if err := h.m.Restore(ctx, id, bytes.NewReader(bundle.Bytes())); err != nil {
+			t.Fatalf("Restore %s: %v", id, err)
+		}
+		if b, err := os.ReadFile(filepath.Join(h.m.ShareDir(id), "data", "notes")); err != nil || string(b) != "kept" {
+			t.Errorf("%s: volume holds %q, %v", id, b, err)
+		}
+	}
+	if got := h.m.ShareDir("fork-1"); filepath.Base(got) != "parent" {
+		t.Errorf("fork-1 runs in %s, want the snapshot's VM id", got)
+	}
+	if got := h.m.ShareDir("fork-2"); filepath.Base(got) != "fork-2" {
+		t.Errorf("fork-2 runs in %s, want its own id", got)
+	}
+	h.vm.mu.Lock()
+	defer h.vm.mu.Unlock()
+	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 || h.vm.booted[1].ID != "fork-2" {
+		t.Errorf("restored %d, booted %d (%v); want one memory restore and fork-2 cold-booted", len(h.vm.restored), len(h.vm.booted), h.vm.booted)
+	}
+}

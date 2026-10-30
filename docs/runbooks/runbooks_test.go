@@ -16,7 +16,7 @@ import (
 	"github.com/everdict/herd/deploy"
 )
 
-var runbooks = []string{"all-in-one.md", "join.md", "nomad.md"}
+var runbooks = []string{"all-in-one.md", "join.md", "nomad.md", "../conformance.md"}
 
 var binaries = map[string]bool{"herd": true, "herd-api": true, "herd-router": true, "herd-egress": true, "herdlet": true}
 

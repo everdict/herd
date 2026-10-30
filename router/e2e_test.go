@@ -5,6 +5,9 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
+	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
+	"github.com/everdict/herd/guest/agent"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -82,4 +85,25 @@ func TestRouterE2E(t *testing.T) {
 		t.Errorf("re-attached: %q + %q, exit %v, err %v", cut.stdout, rest.stdout, rest.exit, rest.err)
 	}
 	t.Logf("%d requests, hops %+v", requests, s.hops())
+}
+
+// TestGuestRefusalPassesThrough: a guest's own typed refusal reaches the client as the guest answered it, on a
+// unary and on a streaming call: a trailers-only answer stays trailers-only through the router.
+func TestGuestRefusalPassesThrough(t *testing.T) {
+	s := startStack(t, stackOpts{budget: 5 * time.Second})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "r1")
+	c := s.client(space1+"/r1", s.clientToken())
+	_, err := c.invoke(ctx, agent.MethodGetProcess, &ateenv.GetProcessRequest{ProcessId: "no-such-exec"}, new(ateenv.Process))
+	wantCode(t, "unary GetProcess of an unknown exec", err, codes.NotFound)
+	cs, err := c.conn.ClientConn().NewStream(c.ctx(ctx), &grpc.StreamDesc{ServerStreams: true}, agent.MethodReadFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.SendMsg(&ateenv.ReadFileRequest{Path: "/no-such-file"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = cs.CloseSend()
+	err = cs.RecvMsg(new(ateenv.ReadFileResponse))
+	wantCode(t, "streaming ReadFile of a missing file", err, codes.NotFound)
 }

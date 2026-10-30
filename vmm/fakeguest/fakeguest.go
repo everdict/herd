@@ -34,6 +34,9 @@ type VMM struct {
 	// Shim is the command herd-guest starts detached execs with; the record directory is appended
 	// (agent.Local.Shim).
 	Shim []string
+	// RootOf, if set, places vm's container at the directory it names instead of under Dir (e.g. the VM's share
+	// as herdlet laid it out, so the guest's files are the volumes a suspend carries).
+	RootOf func(vm string) string
 
 	mu     sync.Mutex
 	guests map[string]*guest
@@ -77,7 +80,12 @@ func (v *VMM) Delete(ctx context.Context, id string) (vmm.Presence, error) {
 }
 
 // Root is the directory of vm's container.
-func (v *VMM) Root(vm string) string { return filepath.Join(v.Dir, vm, "root") }
+func (v *VMM) Root(vm string) string {
+	if v.RootOf != nil {
+		return v.RootOf(vm)
+	}
+	return filepath.Join(v.Dir, vm, "root")
+}
 
 func (v *VMM) start(id string) error {
 	v.mu.Lock()
@@ -86,8 +94,10 @@ func (v *VMM) start(id string) error {
 		return nil
 	}
 	root := v.Root(id)
-	if err := os.MkdirAll(filepath.Join(root, "workspace"), 0o755); err != nil {
-		return fmt.Errorf("fakeguest: %w", err)
+	for _, d := range []string{filepath.Join(root, "workspace"), filepath.Join(v.Dir, id)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("fakeguest: %w", err)
+		}
 	}
 	g, err := agent.New(&agent.Local{ContainerName: "main", Root: root, Dir: "/workspace", Shim: v.Shim})
 	if err != nil {
