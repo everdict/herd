@@ -1,5 +1,6 @@
 // Package api holds herd's wire API: the pinned subset of Substrate's Control service (ateapi/v1, package
-// substrate.ateapi.v1, so full method names match real Substrate) and herd's capability extension (herdext/v1).
+// substrate.ateapi.v1, so full method names match real Substrate), herd's capability extension (herdext/v1), and
+// agent-substrate/env's guest API (ateenv/v1alpha, vendored unmodified) that herd-guest serves.
 //
 // Regenerating needs protoc and protoc-gen-go v1.36.12 on PATH.
 package api

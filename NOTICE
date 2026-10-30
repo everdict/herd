@@ -7,3 +7,10 @@ commit 6d7b3f49f6154d52a1de46c94a1481868a5ed042), Copyright 2026 Google LLC,
 licensed under the Apache License, Version 2.0. The unmodified file is kept at
 api/ateapi/v1/testdata/upstream-ateapi.proto; the modifications are described in
 api/ateapi/v1/UPSTREAM.md.
+
+This product includes the agent-substrate/env guest API definition
+(proto/ateenv/v1alpha/guest.proto from https://github.com/agent-substrate/env,
+commit 281e86085bb0b6d3090ff3fa82d722cf0d9f2f0b), Copyright 2026 Google LLC,
+licensed under the Apache License, Version 2.0, unmodified at
+api/ateenv/v1alpha/guest.proto, and env's generated Go code for it (test data
+and test/interop/envclient).
