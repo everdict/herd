@@ -6,7 +6,8 @@ suspended and resumed, forked through tags, behind a per-actor egress gateway, d
 
 Status: R1. `herd-api` serves the Control subset over gRPC with records, scheduler, suspend/resume/delete workflows,
 snapshot store and static-key authn/authz, and `herdlet` drives a `vmm.VMM` over its outbound link; the conformance suite
-runs them against the in-memory hypervisor fake. The real hypervisor backends (R2) are stubs, so nothing boots a VM yet.
+runs them against the in-memory hypervisor fake. R3: `herd-router` routes clients to actors through the herdlets'
+outbound tunnels and resumes suspended actors on request.
 
 ## What herd is
 
@@ -56,6 +57,8 @@ credential injection), `herd-guest` (the in-VM agent).
 | `auth` | Authn and per-space authz interfaces; static-key HS256 JWTs |
 | `guest/agent`, `guest/guestclient`, `cmd/herd-guest` | herd-guest: env-compatible process/file API on grpc-go, and its host-side client |
 | `conformance` | The Control-subset conformance suite against herd-api with fake herdlets |
+| `cmd/herd-router`, `router`, `tunnel` | herd-router: `ate-target-actor` ingress with per-space JWT, parking and resume-on-request, typed 503s and cut reasons; the herdlet's outbound tunnel (router side in `tunnel`, herdlet side in `herdlet/tunnel.go`) |
+| `vmm/fakeguest` | A fake hypervisor whose VMs run the real herd-guest on unix sockets (the router's end-to-end test) |
 
 ## Developing
 
