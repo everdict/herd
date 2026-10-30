@@ -1,0 +1,18 @@
+# The Control methods herd serves (spec herd.md R-D2, issue PLT-112). Changing this list changes the pinned subset.
+CreateActor
+GetActor
+ListActors
+UpdateActor
+DeleteActor
+SuspendActor
+ResumeActor
+CreateTag
+GetTag
+DeleteTag
+CreateActorTemplate
+GetActorTemplate
+DeleteActorTemplate
+GetActorEgressPolicy
+CreateActorEgressPolicy
+UpdateActorEgressPolicy
+DeleteActorEgressPolicy

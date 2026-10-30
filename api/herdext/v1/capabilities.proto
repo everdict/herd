@@ -1,0 +1,80 @@
+// Copyright 2026 The herd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+// herd's capability extension to the Substrate API (spec herd.md R-D2, R-D9). A client that speaks only
+// substrate.ateapi.v1.Control can ignore it; one that wants to know what a suspend will keep reads it here.
+package herd.ext.v1;
+
+import "ateapi/v1/ateapi.proto";
+
+option go_package = "github.com/everdict/herd/api/herdext/v1;herdext";
+
+// Capabilities reports what each worker (one herdlet host) declares it can do. Capabilities are declared by the host,
+// never assumed by the scheduler.
+service Capabilities {
+  // Get one worker's declared capabilities.
+  rpc GetWorkerCapabilities(GetWorkerCapabilitiesRequest) returns (WorkerCapabilities);
+
+  // List the declared capabilities of every worker.
+  rpc ListWorkerCapabilities(ListWorkerCapabilitiesRequest) returns (ListWorkerCapabilitiesResponse);
+}
+
+// Platform is the hypervisor a worker runs its microVMs on.
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  // Ubuntu (x86_64 or arm64) with KVM: Cloud Hypervisor + virtiofsd, hybrid vsock, TAP into herd-egress.
+  PLATFORM_LINUX_CLOUD_HYPERVISOR = 1;
+  // macOS on Apple Silicon: Virtualization.framework, native vsock, file-handle network into herd-egress.
+  PLATFORM_DARWIN_VZ = 2;
+}
+
+// WorkerCapabilities is one worker's declaration.
+message WorkerCapabilities {
+  // The worker's name, as substrate.ateapi.v1 names workers.
+  string worker = 1;
+
+  Platform platform = 2;
+
+  // "amd64" or "arm64".
+  string arch = 3;
+
+  // The highest fidelity a suspend on this worker keeps: MEMORY on Cloud Hypervisor; VOLUMES on a Mac unless it has
+  // shown that it can save machine state in its current session.
+  substrate.ateapi.v1.SnapshotFidelity suspend_max_fidelity = 4;
+
+  // The family a MEMORY snapshot taken here restores within: microvm-ch-<arch>-<cpu-class> or
+  // microvm-vz-arm64-<host>. Empty when suspend_max_fidelity is below MEMORY.
+  string restore_family = 5;
+
+  // The family every VOLUMES snapshot belongs to and restores within anywhere: microvm-volumes.
+  string portable_restore_family = 6;
+
+  // The hypervisor version, e.g. "cloud-hypervisor v54.0" or "macOS 26.2"; part of what a MEMORY restore must match.
+  string hypervisor_version = 7;
+
+  // Why the worker declares less than its platform could, e.g. "no unlocked user session" on a Mac.
+  string reason = 8;
+}
+
+message GetWorkerCapabilitiesRequest {
+  string worker = 1;
+}
+
+message ListWorkerCapabilitiesRequest {}
+
+message ListWorkerCapabilitiesResponse {
+  repeated WorkerCapabilities workers = 1;
+}
