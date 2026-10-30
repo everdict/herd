@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -171,6 +172,9 @@ func TestBootMountsShareCreatesVolumesThenStartsContainers(t *testing.T) {
 // guest's own view of its rootfs, where crun's binds do not exist. Each volume is bound there too, from its share
 // directory, read-only when the template says so, so a file the API writes under a volume's path is in the share.
 func TestBootBindsVolumesWhereTheFileAPILooks(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("herd-guest binds through /proc/self/fd, which only Linux has; the guest is Linux-only")
+	}
 	l := layout(t)
 	m, _, _, err := boot(t, l, planJSON)
 	if err != nil {
