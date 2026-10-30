@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/link"
@@ -45,6 +46,10 @@ type Config struct {
 	Base vmm.Spec
 	// Guests, if set, is how DialGuest reaches a guest.
 	Guests GuestDialer
+	// Flush, if set, asks the guest to flush before every snapshot (GuestFlush); a flush that fails or does not
+	// answer within FlushTimeout (default DefaultFlushTimeout) fails the snapshot.
+	Flush        Flusher
+	FlushTimeout time.Duration
 }
 
 // Machines boots and tracks one host's actor VMs.
@@ -184,9 +189,10 @@ func (m *Machines) Boot(ctx context.Context, id string, t link.Template) error {
 	return nil
 }
 
-// Snapshot takes a snapshot of the actor's VM at f and writes its bundle to w. With stop (a suspend), the VM is
-// stopped right after the VMM's snapshot and before the volume tree is read, so the tree is the one the actor left
-// and the guest writes nothing more; if writing the bundle then fails, Restart boots it again from its share.
+// Snapshot has the guest flush what it buffered (Config.Flush), takes a snapshot of the actor's VM at f and writes
+// its bundle to w. With stop (a suspend), the VM is stopped right after the VMM's snapshot and before the volume tree
+// is read, so the tree is the one the actor left and the guest writes nothing more; if writing the bundle then fails,
+// Restart boots it again from its share.
 func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop bool, w io.Writer) (vmm.Snapshot, error) {
 	vmID := m.resolve(id)
 	m.mu.Lock()
@@ -198,6 +204,10 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	caps, err := m.cfg.VMM.Capabilities(ctx)
 	if err != nil {
 		return vmm.Snapshot{}, err
+	}
+	if err := m.flush(ctx, vmID); err != nil {
+		// Not %w: the guest's answer is no outcome of the VMM's, and no snapshot was taken.
+		return vmm.Snapshot{}, fmt.Errorf("machine: snapshot %s: flushing the guest: %v", id, err)
 	}
 	snap, err := m.cfg.VMM.Snapshot(ctx, vmID, f)
 	if err != nil {
@@ -218,6 +228,20 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 		return vmm.Snapshot{}, err
 	}
 	return snap, nil
+}
+
+// flush has the guest write back what it buffered, within the flush timeout.
+func (m *Machines) flush(ctx context.Context, vmID string) error {
+	if m.cfg.Flush == nil {
+		return nil
+	}
+	d := m.cfg.FlushTimeout
+	if d <= 0 {
+		d = DefaultFlushTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return m.cfg.Flush.Flush(ctx, vmID)
 }
 
 // Restart cold-boots a VM that Snapshot stopped, from its share as it is.

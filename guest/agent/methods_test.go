@@ -27,6 +27,7 @@ func TestServesEveryMethodUnderItsWireName(t *testing.T) {
 		ateenv.File_ateenv_v1alpha_guest_proto.Services().ByName("ProcessService"),
 		ateenv.File_ateenv_v1alpha_guest_proto.Services().ByName("FileSystemService"),
 		herdext.File_herdext_v1_files_proto.Services().ByName("FileInfoService"),
+		herdext.File_herdext_v1_sync_proto.Services().ByName("SyncService"),
 	} {
 		for i := 0; i < sd.Methods().Len(); i++ {
 			m := sd.Methods().Get(i)

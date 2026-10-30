@@ -1,0 +1,33 @@
+// Copyright 2026 The herd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+syntax = "proto3";
+
+// herd-guest's flush extension (PLT-195). herdlet calls it before every VM snapshot, so a snapshot (and the volume
+// tree a suspend carries) holds what the guest wrote, not only what its page cache had already written back.
+package herd.ext.v1;
+
+option go_package = "github.com/everdict/herd/api/herdext/v1;herdext";
+
+// SyncService flushes the guest's filesystems.
+service SyncService {
+  // Sync writes every container's writable data and the volume share back to their devices and the host, and
+  // answers once they are durable there. An error means some of it may still be only in the guest's memory.
+  rpc Sync(SyncRequest) returns (SyncResponse);
+}
+
+message SyncRequest {}
+
+message SyncResponse {}

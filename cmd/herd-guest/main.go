@@ -110,6 +110,9 @@ func serve(args []string) error {
 		return err
 	}
 	defer g.Close()
+	if *local == "" {
+		g.SyncDirs = []string{initd.DefaultLayout.ShareDir}
+	}
 	l, err := transport.Listen(*listen)
 	if err != nil {
 		return err

@@ -44,6 +44,10 @@ type volume struct {
 
 // Guest serves the API for a set of targets.
 type Guest struct {
+	// SyncDirs are directories Sync flushes besides the containers' roots (herd-guest's volume share). Set it
+	// before serving.
+	SyncDirs []string
+
 	containers []*container
 	byName     map[string]*container
 

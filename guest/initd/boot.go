@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/everdict/herd/guest/oci"
 )
@@ -153,6 +155,11 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 	if err := m.Mount("overlay", rootfs, "overlay", 0, fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)); err != nil {
 		return Booted{}, fmt.Errorf("initd: container %q: overlay: %w", c.Name, err)
 	}
+	for _, vm := range c.VolumeMounts {
+		if err := bindVolume(m, rootfs, vols[vm.Name], vm); err != nil {
+			return Booted{}, fmt.Errorf("initd: container %q: volume %q at %s: %w", c.Name, vm.Name, vm.MountPath, err)
+		}
+	}
 	cfg := oci.Config{
 		Name: c.Name, Rootfs: rootfs, Args: append(append([]string(nil), c.Command...), c.Args...),
 		Cwd: c.Workdir, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary,
@@ -177,6 +184,41 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
 	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted}, nil
+}
+
+// bindVolume binds a volume's share directory onto the guest's own view of the container's rootfs, which is where
+// herd-guest's file API resolves paths (PLT-195). crun's bind of the volume exists only in the container's mount
+// namespace: without this one, a file the API writes under the volume's path lands in the overlay on /run and is lost
+// with the VM, while the container's processes write to the share. The mount point is made and opened through
+// os.Root, so a symlink in the image cannot place it outside the rootfs, and mounted on as /proc/self/fd/<n>.
+func bindVolume(m Mounter, rootfs, source string, v VolumeMount) error {
+	const msRdonly, msRemount, msBind = 0x1, 0x20, 0x1000
+	root, err := os.OpenRoot(rootfs)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	rel := strings.TrimPrefix(path.Clean(v.MountPath), "/")
+	if err := root.MkdirAll(rel, 0o755); err != nil {
+		return err
+	}
+	if err := mountOn(root, rel, func(target string) error { return m.Mount(source, target, "", msBind, "") }); err != nil {
+		return err
+	}
+	if !v.ReadOnly {
+		return nil
+	}
+	// Opened again, the path now resolves to the bind mount's root, which is what the remount must name.
+	return mountOn(root, rel, func(target string) error { return m.Mount("", target, "", msRemount|msBind|msRdonly, "") })
+}
+
+func mountOn(root *os.Root, rel string, mount func(target string) error) error {
+	f, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return mount(fmt.Sprintf("/proc/self/fd/%d", f.Fd()))
 }
 
 // Boot runs the whole sequence after the pseudo filesystems: share, plan, volumes, containers.

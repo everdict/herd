@@ -275,7 +275,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 		if h.Images == nil {
 			return host, nil, "given", nil
 		}
-		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, ShareDir: shares, Images: h.Images, Base: base})
+		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, Flush: h.flusher(h.Guests), ShareDir: shares, Images: h.Images, Base: base})
 		return host, m, "given", err
 	}
 	host, err := h.newHost(ctx)
@@ -291,7 +291,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 		return Backend{}, nil, why, err
 	}
 	m, err := machine.New(machine.Config{
-		VMM: host.VMM, Guests: host.Guests, ShareDir: shares,
+		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), ShareDir: shares,
 		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: &registry.Client{}, Builder: builder,
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}},
 		Base: base,
@@ -451,4 +451,17 @@ func (h *Herdlet) preflight() error {
 		return fmt.Errorf("this host cannot run herd actors (see herdlet doctor):\n  %s", strings.Join(failed, "\n  "))
 	}
 	return nil
+}
+
+// flusher is how machines have a guest flush before a snapshot: herd-guest's Sync on the guest port. Without a
+// guest dialer there is no guest to ask.
+func (h *Herdlet) flusher(g machine.GuestDialer) machine.Flusher {
+	if g == nil {
+		return nil
+	}
+	port := uint32(h.GuestPort)
+	if port == 0 {
+		port = 8080
+	}
+	return machine.GuestFlush{Guests: g, Port: port}
 }
