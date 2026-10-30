@@ -1,0 +1,64 @@
+# herd
+
+herd is a microVM actor runtime that speaks a pinned subset of the [Substrate](https://github.com/agent-substrate/substrate)
+API. It gives hosts that have no Kubernetes what Substrate gives a Kubernetes cluster: actors created from templates,
+suspended and resumed, forked through tags, behind a per-actor egress gateway, deleted with verification.
+
+Status: R0. The repository holds the ADR, the vendored API subset with its Go types, the hypervisor interface with an
+in-memory fake and stub backends, and the guest kernel configuration. Nothing runs actors yet.
+
+## What herd is
+
+- **A Substrate-API server for clusters without Substrate.** `herd-api` serves a pinned subset of Substrate's `Control`
+  service (`substrate.ateapi.v1`, same method names on the wire) plus a capability extension (`herd.ext.v1`), so one
+  client integration drives real Substrate and herd alike.
+- **Linux microVMs, on two hypervisors.** Every actor is a Linux microVM: Cloud Hypervisor on Ubuntu (x86_64, arm64,
+  KVM), Apple Virtualization.framework on macOS hosts (Apple Silicon). Inside the VM, `herd-guest` runs the template's
+  containers with crun and mounts its volumes from one virtio-fs share. One guest kernel and initramfs for both.
+- **Honest about what each host can do.** A host declares how much a suspend keeps (MEMORY or VOLUMES) and which
+  hosts can restore it (its restore family); herd never assumes more.
+- **Three deployment modes, one code path:** all-in-one on one host, several hosts joined with `herdlet join` and no
+  cluster tool, or a Nomad cluster.
+- **A separate product.** Usable without Everdict. Go. Apache-2.0.
+
+Components: `herd-api` (records, scheduler, suspend/resume, snapshot store, authn/authz), `herdlet` (node agent, dials
+out), `herd-router` (resume-on-request ingress over node tunnels), `herd-egress` (default-deny, hostname rules,
+credential injection), `herd-guest` (the in-VM agent).
+
+## What herd is not
+
+- **Not Substrate, and not all of its API.** Methods outside the pinned subset (workers, atespaces, access policies,
+  revert, credential minting, the worker service) are not served; see `api/ateapi/v1/subset.txt`.
+- **Not a container runtime on the host.** No docker, runsc or Seatbelt backends: no microVM, no actor. A host without
+  KVM or Virtualization.framework cannot join.
+- **Not a macOS guest runner.** herd runs Linux guests only. macOS-native work stays outside herd.
+- **Not a live-migration system across platforms.** Memory snapshots never move between a Mac and an Ubuntu host, nor
+  between Cloud Hypervisor hosts of different CPU feature classes; only volumes, image references and the container
+  spec move.
+- **Not a scheduler for arbitrary jobs.** On Nomad, Nomad supervises herd's processes; herd places actors.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `docs/adr/0001-herd.md` | The decisions herd is built on |
+| `api/ateapi/v1` | Vendored Substrate `Control` subset (proto + generated Go), pinned to upstream commit `6d7b3f49` |
+| `api/herdext/v1` | herd's capability extension |
+| `vmm` | The hypervisor boundary; `vmm/fake` (in-memory), `vmm/vmmtest` (the contract every backend keeps), `vmm/cloudhypervisor` (linux), `vmm/vz` (darwin) |
+| `guest` | Guest kernel configuration (one for arm64 and amd64), initramfs list, `build.sh` |
+| `internal/cmd/protosubset` | Cuts the subset out of the upstream proto |
+
+## Developing
+
+```sh
+gofmt -l .        # prints nothing
+go vet ./...
+go test ./...
+go build ./...
+go generate ./api/...   # needs protoc and protoc-gen-go v1.36.12
+```
+
+## License
+
+Apache License 2.0, see `LICENSE`. `api/ateapi/v1` contains a modified subset of Substrate's API definition,
+Copyright 2026 Google LLC, under the same license; see `NOTICE` and `api/ateapi/v1/UPSTREAM.md`.

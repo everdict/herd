@@ -1,0 +1,9 @@
+herd
+Copyright 2026 The herd Authors
+
+This product includes a modified subset of the Substrate API definition
+(api/ateapi/v1/ateapi.proto from https://github.com/agent-substrate/substrate,
+commit 6d7b3f49f6154d52a1de46c94a1481868a5ed042), Copyright 2026 Google LLC,
+licensed under the Apache License, Version 2.0. The unmodified file is kept at
+api/ateapi/v1/testdata/upstream-ateapi.proto; the modifications are described in
+api/ateapi/v1/UPSTREAM.md.
