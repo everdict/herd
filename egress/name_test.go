@@ -24,9 +24,12 @@ func TestNameEnforcedNotAddress(t *testing.T) {
 	w.resolve("pass.listed.example", []string{"198.51.100.30"}, []string{"198.51.100.31"})
 	// evil.unlisted.example shares the listed host's (first) address, as hosts behind one CDN do.
 	w.resolve("evil.unlisted.example", []string{"198.51.100.1"})
+	// cdn.listed.example has a stable address that evil2.unlisted.example shares.
+	w.resolve("cdn.listed.example", []string{"198.51.100.9"})
+	w.resolve("evil2.unlisted.example", []string{"198.51.100.9"})
 	g := newGateway(t, w)
 	bind(t, g, actor1, compile(t,
-		httpRule(nil, "api.listed.example"),
+		httpRule(nil, "api.listed.example", "cdn.listed.example"),
 		httpsRule(nil, "api.listed.example"),
 		passRule(8443, "pass.listed.example")))
 
@@ -53,6 +56,14 @@ func TestNameEnforcedNotAddress(t *testing.T) {
 		if code == 200 || strings.Contains(body, "reached") {
 			t.Errorf("%s at a listed host's address: %d %q, want refused", u, code, body)
 		}
+	}
+	c9 := g.client(t, actor1, "198.51.100.9")
+	if code, body := get(t, c9, "http://cdn.listed.example/", nil); code != 200 {
+		t.Errorf("cdn.listed.example: %d %q", code, body)
+	}
+	before = w.httpUp.hits.Load() + w.httpsUp.hits.Load()
+	if code, body := get(t, c9, "http://evil2.unlisted.example/", nil); code == 200 || strings.Contains(body, "reached") {
+		t.Errorf("evil2.unlisted.example at cdn.listed.example's address: %d %q, want refused", code, body)
 	}
 	// The listed name in the URL with the unlisted name in the Host header: decided on the authority.
 	req, _ := http.NewRequest(http.MethodGet, "http://api.listed.example/", nil)
