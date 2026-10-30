@@ -172,7 +172,12 @@ func counterZero(table, name string) bool {
 	if i < 0 {
 		return true
 	}
-	return strings.Contains(table[i:min(len(table), i+120)], "packets 0 ")
+	// Only this counter's own block: a fixed window spilled into the next counter's "packets 0".
+	block := table[i:]
+	if j := strings.Index(block, "}"); j >= 0 {
+		block = block[:j]
+	}
+	return strings.Contains(block, "packets 0 ")
 }
 
 type probeResults struct {
