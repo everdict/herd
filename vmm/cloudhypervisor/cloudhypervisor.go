@@ -282,7 +282,9 @@ func (v *VMM) vmConfig(spec vmm.Spec, dir string) vmConfig {
 		Console: &consoleConfig{Mode: "File", File: filepath.Join(dir, "console.log")},
 	}
 	for _, r := range spec.Rootfs {
-		c.Disks = append(c.Disks, diskConfig{Path: r, ImageType: "Raw"})
+		// Rootfs images are read-only and shared by every VM of the image (the image cache); the guest puts an overlay
+		// on tmpfs on top (ADR A-10). Read-only also keeps Cloud Hypervisor from asking for a write lock on a file other VMs hold open.
+		c.Disks = append(c.Disks, diskConfig{Path: r, ImageType: "Raw", Readonly: true})
 	}
 	for _, s := range spec.Shares {
 		c.Fs = append(c.Fs, fsConfig{Tag: s.Tag, Socket: fsSocket(dir, s.Tag), NumQueues: 1, QueueSize: 1024})

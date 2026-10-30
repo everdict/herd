@@ -88,6 +88,8 @@ type Work struct {
 	VM string `json:"vm"`
 	// Template is the actor template's uid (a boot may take a warm VM of it).
 	Template string `json:"template,omitempty"`
+	// Spec is the template itself, for a boot.
+	Spec *Template `json:"spec,omitempty"`
 	// Fidelity is what OpSnapshot must keep.
 	Fidelity vmm.Fidelity `json:"fidelity,omitempty"`
 	// SnapshotKey is where OpSnapshot writes its object.
@@ -139,3 +141,38 @@ const (
 	PresenceGone    = "gone"
 	PresencePresent = "present"
 )
+
+// Template is an actor template as a herdlet needs it to turn it into a VM (ADR A-19): herd-api resolves it from the
+// ActorTemplate and sends it with a boot; a herdlet keeps Warm VMs of the templates it was given ahead of time.
+type Template struct {
+	// UID is the actor template's uid.
+	UID        string      `json:"uid"`
+	Containers []Container `json:"containers"`
+	// Volumes are the template's DurableDir volume names.
+	Volumes   []string `json:"volumes,omitempty"`
+	VCPUs     int      `json:"vcpus,omitempty"`
+	MemoryMiB int      `json:"memoryMiB,omitempty"`
+	// Warm is how many booted VMs of this template the herdlet keeps ready for CreateActor.
+	Warm int `json:"warm,omitempty"`
+}
+
+// Container is one container of a Template. Image is an OCI reference; Command and Args follow Substrate's rules
+// (command replaces the image's ENTRYPOINT and CMD; args alone replace CMD).
+type Container struct {
+	Name         string        `json:"name"`
+	Image        string        `json:"image"`
+	Command      []string      `json:"command,omitempty"`
+	Args         []string      `json:"args,omitempty"`
+	Env          []EnvVar      `json:"env,omitempty"`
+	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
+}
+
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type VolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+}

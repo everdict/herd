@@ -1,0 +1,14 @@
+d0755 0:0 0 bin/
+-0755 0:0 9 bin/ash
+-0755 0:0 12 bin/sh
+d0755 0:0 0 etc/
+-0644 0:0 11 etc/passwd
+d0755 0:0 0 home/
+d0700 1000:1000 0 home/app/
+-0644 1000:1000 11 home/app/.profile
+d0755 0:0 0 usr/
+d0755 0:0 0 usr/bin/
+l0644 0:0 0 usr/bin/env -> /bin/sh
+d0755 0:0 0 var/
+d0755 0:0 0 var/cache/
+-0644 0:0 1 var/cache/c

@@ -5,6 +5,7 @@ import (
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -104,4 +105,30 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 		return nil, toStatus(err)
 	}
 	return v, nil
+}
+
+// templateSpec is the template as a herdlet needs it to boot a VM (link.Template). Only DurableDir volumes are
+// herd's; a mount of any other volume kind is left for the herdlet to refuse.
+func templateSpec(uid string, t *ateapi.ActorTemplate) *link.Template {
+	out := &link.Template{UID: uid}
+	for _, c := range t.GetContainers() {
+		lc := link.Container{Name: c.GetName(), Image: c.GetImage(), Command: c.GetCommand(), Args: c.GetArgs()}
+		for _, e := range c.GetEnv() {
+			lc.Env = append(lc.Env, link.EnvVar{Name: e.GetName(), Value: e.GetValue()})
+		}
+		for _, m := range c.GetVolumeMounts() {
+			lc.VolumeMounts = append(lc.VolumeMounts, link.VolumeMount{Name: m.GetName(), MountPath: m.GetMountPath()})
+		}
+		out.Containers = append(out.Containers, lc)
+	}
+	for _, v := range t.GetVolumes() {
+		if v.GetDurableDir() != nil {
+			out.Volumes = append(out.Volumes, v.GetName())
+		}
+	}
+	if l := t.GetResources().GetLimits(); l != nil {
+		out.VCPUs = int((l.GetCpuMillicores() + 999) / 1000)
+		out.MemoryMiB = int(l.GetMemoryBytes() >> 20)
+	}
+	return out
 }

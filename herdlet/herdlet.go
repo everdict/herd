@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/everdict/herd/herdlet/machine"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/tunnel"
@@ -40,6 +41,13 @@ type Agent struct {
 	// Tunnel, if set, is this herdlet's tunnel to herd-router: a suspend or delete cuts the VM's streams with the
 	// reason, and a boot or restore lets the router reach the VM again.
 	Tunnel *Tunnel
+	// Machines, if set, turns templates into VMs (ADR A-19): a boot builds the template's images and lays out its
+	// share, a snapshot object is a bundle carrying the volume tree, a restore unpacks it. Without it the herdlet
+	// boots Boot as is and a snapshot object is the VMM's record only.
+	Machines *machine.Machines
+	// Pool, if set (with Machines), keeps warm VMs per template: a boot takes one first, and Run refills it and
+	// reports its counts to herd-api as capacity.
+	Pool *machine.Pool
 
 	vms sync.Map // VM id → vmLock
 }
@@ -89,11 +97,27 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		},
 		Capacity: link.Capacity{Slots: a.Slots, Warm: a.Warm},
 	}
+	if a.Pool != nil {
+		reg.Capacity.Warm = a.Pool.Counts()
+	}
 	if err := send(link.Up{Register: &reg}); err != nil {
 		return fmt.Errorf("herdlet: register: %w", err)
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	if a.Pool != nil {
+		a.Pool.Changed = func(warm map[string]int) {
+			_ = send(link.Up{Capacity: &link.Capacity{Slots: a.Slots, Warm: warm}})
+		}
+		// The pool stops with the link (before wg.Wait, which waits for it).
+		pctx, stopPool := context.WithCancel(ctx)
+		defer stopPool()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.Pool.Run(pctx)
+		}()
+	}
 	for {
 		b, err := st.Recv()
 		if errors.Is(err, io.EOF) {
@@ -160,6 +184,9 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		return classify(err)
 	}
 	defer release()
+	if a.Machines != nil {
+		return a.doMachine(ctx, w)
+	}
 	switch w.Op {
 	case link.OpBoot:
 		// VM ids are actor uids: a VM already there under this id is this actor's, so a repeated start is done.

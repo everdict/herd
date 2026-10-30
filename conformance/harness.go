@@ -29,6 +29,8 @@ type HerdletSpec struct {
 	Slots  int
 	Labels map[string]string
 	Caps   vmm.Capabilities
+	// Configure, if set, finishes the herdlet before it dials (e.g. gives it Machines over its VMM).
+	Configure func(*herdlet.Agent)
 }
 
 // Herdlet is a running fake herdlet.
@@ -163,6 +165,9 @@ func (e *Env) AddHerdlet(t testing.TB, s HerdletSpec) *Herdlet {
 	h := &Herdlet{Spec: s, VMM: fake.New(s.Caps, e.vms), cancel: cancel, done: make(chan struct{})}
 	a := &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: h.VMM,
 		Snapshots: e.Snapshots, Rewrite: h.answer}
+	if s.Configure != nil {
+		s.Configure(a)
+	}
 	c, err := grpc.NewClient("passthrough:///"+e.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(auth.Bearer(e.TokenFor(t, s.Name, nil, true))))
 	if err != nil {

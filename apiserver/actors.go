@@ -106,7 +106,11 @@ func (s *Server) place(ctx context.Context, ar *actorRec, tpl *ateapi.ActorTempl
 // start boots or restores ar's VM on its reserved worker and records what the herdlet answered. failedState is the
 // state a definite failure returns the actor to (the VM was not started, so the slot is free again).
 func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState ateapi.ActorState) error {
-	w := link.Work{Op: link.OpBoot, VM: vmID(ar), Template: ar.st.TemplateUID}
+	tpl, _, err := s.loadTemplate(ctx, ar.rec.Space, &ateapi.ObjectRef{Name: ar.st.TemplateName})
+	if err != nil {
+		return err
+	}
+	w := link.Work{Op: link.OpBoot, VM: vmID(ar), Template: ar.st.TemplateUID, Spec: templateSpec(ar.st.TemplateUID, tpl)}
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
 	}
