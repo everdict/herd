@@ -1,8 +1,17 @@
 package deploy
 
 import (
+	"bytes"
 	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/everdict/herd/join"
+	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/snapstore/s3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -36,5 +45,35 @@ func TestHerdletKeepsR2cCommandLines(t *testing.T) {
 		if _, err := Parse("herdlet", args, io.Discard); err != nil {
 			t.Errorf("herdlet %v: %v", args[:1], err)
 		}
+	}
+}
+
+// TestGrantStoreWinsOverSnapshotsFlag (criterion no-local-override): with a grant that names an S3 store, -snapshots
+// is ignored with a warning that names it, the store is the grant's and no directory is made; without one,
+// -snapshots is the store.
+func TestGrantStoreWinsOverSnapshotsFlag(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	dir := filepath.Join(t.TempDir(), "snapshots")
+	h := &Herdlet{StateDir: t.TempDir(), Snapshots: dir}
+	g := join.Grant{Snapshots: &s3.Config{Endpoint: "http://127.0.0.1:9", Bucket: "herd", AccessKeyID: "k", SecretAccessKey: "s"}}
+	s, err := h.snapshots(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.(*s3.Store); !ok {
+		t.Errorf("with the join's S3 store and -snapshots %s, the herdlet's store is %T", dir, s)
+	}
+	if want := "-snapshots " + dir + " ignored"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log %q lacks %q", logs.String(), want)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("-snapshots %s was made: %v", dir, err)
+	}
+	if s, err := h.snapshots(join.Grant{}); err != nil {
+		t.Fatal(err)
+	} else if _, ok := s.(*disk.Store); !ok {
+		t.Errorf("without a store in the grant, the herdlet's store is %T, want -snapshots' directory", s)
 	}
 }

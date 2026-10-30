@@ -3,6 +3,7 @@ package deploy_test
 import (
 	"context"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,16 +17,11 @@ import (
 	"github.com/everdict/herd/snapstore/s3/s3test"
 )
 
-// TestJoinedHostsMoveActorsThroughS3: herd-api keeps snapshots in an S3 bucket (-s3) and hands the store to every
-// herdlet in its join grant; two joined hosts, each with only its own state directory and no -snapshots, move an
-// actor between them: suspended on node-1 (herd-api verifies the object node-1 wrote) and resumed on node-2 from the
-// bundle node-2 reads back. Its counterexample is a herdlet that ignores the grant's store and keeps snapshots in a
-// directory of its own: herd-api cannot verify the object and the suspend fails, as a join without a shared mount
-// did before the S3 store.
-func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
+// s3HerdAPI runs herd-api with its snapshots in a fake S3 bucket (-s3 s3://herd/snapshots) and mints a join token.
+func s3HerdAPI(t *testing.T) (srv *s3test.Server, ts *httptest.Server, addr string, key []byte, tok string) {
 	creds := s3.Credentials{AccessKeyID: "herd", SecretAccessKey: "herd-secret"}
-	srv := s3test.New("us-east-1", creds)
-	ts := s3test.Start(t, srv)
+	srv = s3test.New("us-east-1", creds)
+	ts = s3test.Start(t, srv)
 
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "jwt.key")
@@ -48,11 +44,22 @@ func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
 			t.Errorf("herd-api: %v", err)
 		}
 	})
-	addr := ln.Addr().String()
-	tok, err := (&deploy.JoinToken{KeyFile: keyFile, TTL: time.Hour}).Mint()
+	addr = ln.Addr().String()
+	tok, err = (&deploy.JoinToken{KeyFile: keyFile, TTL: time.Hour}).Mint()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return srv, ts, addr, key, tok
+}
+
+// TestJoinedHostsMoveActorsThroughS3: herd-api keeps snapshots in an S3 bucket (-s3) and hands the store to every
+// herdlet in its join grant; two joined hosts, each with only its own state directory and no -snapshots, move an
+// actor between them: suspended on node-1 (herd-api verifies the object node-1 wrote) and resumed on node-2 from the
+// bundle node-2 reads back. Its counterexample is a herdlet that ignores the grant's store and keeps snapshots in a
+// directory of its own: herd-api cannot verify the object and the suspend fails, as a join without a shared mount
+// did before the S3 store.
+func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
+	srv, ts, addr, key, tok := s3HerdAPI(t)
 	for _, w := range []string{"node-1", "node-2"} {
 		h := herdletOn(t, w, nil)
 		h.API, h.Token, h.Labels = addr, tok, "host="+w
@@ -114,5 +121,51 @@ func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
 	}
 	if n, s := rr.GetActor().GetStatus().GetAssignedNode(), rr.GetActor().GetStatus().GetState(); n != "node-2" || s != ateapi.ActorState_ACTOR_STATE_RUNNING {
 		t.Errorf("resumed: %v on %q, want RUNNING on node-2", s, n)
+	}
+}
+
+// TestJoinedHerdletIgnoresSnapshotsFlag (criterion no-local-override): a joined herdlet started as the R2c-era units
+// started it, with -snapshots naming a directory of its own, still keeps snapshots in the S3 store its join handed it:
+// a synchronous suspend succeeds (herd-api verifies the object in the bucket) and nothing is written to the
+// directory. Its counterexample is a herdlet that lets -snapshots win over the grant: the snapshot lands in the
+// directory, and herd-api answers "snapshot not durable: ... snapstore: not found".
+func TestJoinedHerdletIgnoresSnapshotsFlag(t *testing.T) {
+	srv, _, addr, key, tok := s3HerdAPI(t)
+	h := herdletOn(t, "node-1", nil)
+	local := filepath.Join(t.TempDir(), "snapshots")
+	h.API, h.Token, h.Snapshots = addr, tok, local
+	runHerdlet(t, h)
+	ctl := writeToken(t, key)
+	waitWorkers(t, addr, ctl, 1)
+
+	c := conformance.NewClient(addr, ctl)
+	defer c.Close()
+	cctx := ctxT(t)
+	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
+		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
+		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
+	}}); err != nil {
+		t.Fatalf("CreateActorTemplate: %v", err)
+	}
+	ref := &ateapi.ObjectRef{Atespace: space, Name: "a1"}
+	if _, err := c.CreateActor(cctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+		Metadata:      &ateapi.ResourceMetadata{Atespace: space, Name: "a1"},
+		ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: "agent"},
+	}}); err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+	sr, err := c.SuspendActor(cctx, &ateapi.SuspendActorRequest{Actor: ref, Options: &ateapi.SuspendOptions{Mode: ateapi.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS}})
+	if err != nil {
+		t.Fatalf("SuspendActor with -snapshots %s: %v", local, err)
+	}
+	if s := sr.GetActor().GetStatus().GetState(); s != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Errorf("state %v after suspend", s)
+	}
+	if keys := srv.Keys(); len(keys) == 0 || !strings.HasPrefix(keys[0], "/herd/snapshots/") {
+		t.Errorf("the bucket holds %v, want the snapshot under /herd/snapshots/", keys)
+	}
+	if ents, err := os.ReadDir(local); err == nil && len(ents) > 0 {
+		t.Errorf("-snapshots %s holds %d entries; a joined herdlet's snapshots go to the join's store", local, len(ents))
 	}
 }

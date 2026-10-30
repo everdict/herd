@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -160,6 +161,47 @@ func TestMacHerdletJoinsLikeLinux(t *testing.T) {
 	for _, want := range []string{"<key>RunAtLoad</key>\n\t<true/>", "<key>KeepAlive</key>\n\t<true/>", "<string>Interactive</string>", "<key>NumberOfFiles</key>"} {
 		if !bytes.Contains(plist, []byte(want)) {
 			t.Errorf("herdlet's launchd daemon lacks %q", want)
+		}
+	}
+}
+
+// TestJoinedHerdletsPassNoSnapshotDir (criterion units): no artifact runs `herdlet join` with -snapshots, so a joined
+// herdlet keeps snapshots in the store its join hands it, and every herd-api a join mode runs (systemd, Nomad) is
+// given -s3 to hand one out. Its counterexample is the R2c systemd unit and Nomad job, whose herdlets wrote snapshots
+// to /var/lib/herd/snapshots on their own host, where herd-api could not verify them.
+func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joins, apis := map[string]bool{}, map[string]bool{}
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f.Path, err)
+		}
+		for _, inv := range invs {
+			switch {
+			case inv.Binary == "herdlet" && len(inv.Args) > 0 && inv.Args[0] == "join":
+				joins[f.Path] = true
+				for _, a := range inv.Args {
+					if n := strings.TrimLeft(a, "-"); a != n && (n == "snapshots" || strings.HasPrefix(n, "snapshots=")) {
+						t.Errorf("%s runs herdlet join with %s: a joined herdlet's snapshots go to the join's store", f.Path, a)
+					}
+				}
+			case inv.Binary == "herd-api":
+				apis[f.Path] = slices.Contains(inv.Args, "-s3")
+			}
+		}
+	}
+	for _, p := range []string{"systemd/herdlet.service", "launchd/com.everdict.herdlet.plist", "nomad/herdlet.nomad.hcl"} {
+		if !joins[p] {
+			t.Errorf("%s runs no herdlet join", p)
+		}
+	}
+	for _, p := range []string{"systemd/herd-api.service", "nomad/herd-api.nomad.hcl"} {
+		if !apis[p] {
+			t.Errorf("%s does not give herd-api -s3: its joined herdlets would have no snapshot store to share", p)
 		}
 	}
 }

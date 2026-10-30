@@ -83,7 +83,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Labels, "labels", "", "worker labels, k=v,k=v")
 	fs.IntVar(&h.Slots, "slots", 4, "actors this host holds")
 	fs.StringVar(&h.StateDir, "state", "/var/lib/herdlet", "state directory: join grant, VMs, shares, image cache")
-	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's (default: the S3 store herd-api handed out at join, else <state>/snapshots)")
+	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's, for a herd-api without -s3 (default: <state>/snapshots; ignored when the join handed out an S3 store)")
 	fs.StringVar(&h.Router, "router", "", "herd-router tunnel address (default: the one herd-api handed out at join)")
 	fs.StringVar(&h.Kernel, "kernel", "/usr/local/share/herd/kernel", "guest kernel from guest/build.sh (bzImage on amd64, Image on arm64)")
 	fs.StringVar(&h.Initrd, "initrd", "/usr/local/share/herd/initrd.img", "guest initramfs with herd-guest as /init")
@@ -464,13 +464,17 @@ func (h *Herdlet) flusher(g machine.GuestDialer) machine.Flusher {
 	return machine.GuestFlush{Guests: g, Port: port}
 }
 
-// snapshots opens the herdlet's snapshot store: the -snapshots directory if given, else the S3 store herd-api handed
-// out at join (no shared filesystem), else <state>/snapshots.
+// snapshots opens the herdlet's snapshot store: the S3 store herd-api handed out at join (no shared filesystem), else
+// the -snapshots directory, else <state>/snapshots. herd-api verifies every snapshot in its own store, so a grant's
+// store wins over -snapshots, which is ignored with a warning.
 func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
-	if h.Snapshots == "" && g.Snapshots != nil {
+	if g.Snapshots != nil {
 		s, err := s3.New(*g.Snapshots, nil)
 		if err != nil {
 			return nil, fmt.Errorf("the join's snapshot store: %w", err)
+		}
+		if h.Snapshots != "" {
+			log.Printf("herdlet: warning: -snapshots %s ignored: the join's grant names herd-api's S3 store, where herd-api verifies every snapshot (drop -snapshots from this host's unit)", h.Snapshots)
 		}
 		log.Printf("herdlet: snapshots in s3://%s/%s at %s (from the join)", g.Snapshots.Bucket, g.Snapshots.Prefix, g.Snapshots.Endpoint)
 		return s, nil

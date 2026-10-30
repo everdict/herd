@@ -1,6 +1,7 @@
 # herd-api and herd-router as a Nomad service job (docs/runbooks/nomad.md). Nomad supervises the processes; herd
 # places the actors. The bbolt store allows one herd-api, so count = 1 on the node that holds the herd-data host
-# volume. Rendered by deploy/artifacts; edit the template, not this file.
+# volume. Snapshots go to the S3 bucket named in the job's Nomad variable, which joins hand to every herdlet.
+# Rendered by deploy/artifacts; edit the template, not this file.
 variable "release_url" {
   type    = string
   default = "[[.ReleaseURL]]"
@@ -59,6 +60,18 @@ job "herd-api" {
         perms       = "0600"
       }
 
+      template {
+        data        = <<-EOT
+          {{ with nomadVar "nomad/jobs/herd-api" }}HERD_S3={{ .s3 }}
+          HERD_S3_ENDPOINT={{ .s3_endpoint }}
+          AWS_ACCESS_KEY_ID={{ .aws_access_key_id }}
+          AWS_SECRET_ACCESS_KEY={{ .aws_secret_access_key }}{{ end }}
+        EOT
+        destination = "secrets/s3.env"
+        perms       = "0600"
+        env         = true
+      }
+
       config {
         command = "local/herd-api"
         args = [
@@ -67,6 +80,8 @@ job "herd-api" {
           "-store", "bolt:[[.DataDir]]/herd.db",
           "-snapshots", "[[.SnapshotDir]]",
           "-advertise-tunnel", "${NOMAD_ADDR_tunnel}",
+          "-s3", "${HERD_S3}",
+          "-s3-endpoint", "${HERD_S3_ENDPOINT}",
         ]
       }
     }

@@ -1,5 +1,6 @@
 # herdlet on a joined host (docs/runbooks/join.md). HERD_API in /etc/herd/herdlet.env is herd-api's host:port; the
-# join token in /etc/herd/join.token is used once, and later starts reuse the grant in the state directory.
+# join token in /etc/herd/join.token is used once, and later starts reuse the grant in the state directory. No
+# -snapshots: the join hands the herdlet herd-api's S3 snapshot store.
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herdlet
@@ -9,7 +10,7 @@ Wants=network-online.target
 [Service]
 EnvironmentFile=/etc/herd/herdlet.env
 ExecStart=[[.BinDir]]/herdlet join ${HERD_API} -token-file /etc/herd/join.token -state [[.HerdletStateDir]] \
-    -snapshots [[.SnapshotDir]] -kernel [[.GuestDir]]/kernel -initrd [[.GuestDir]]/initrd.img \
+    -kernel [[.GuestDir]]/kernel -initrd [[.GuestDir]]/initrd.img \
     -virtiofsd /usr/libexec/virtiofsd
 Restart=on-failure
 RestartSec=2

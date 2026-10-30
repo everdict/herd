@@ -13,8 +13,10 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
 - On every Linux client: Cloud Hypervisor v54.0 at `/usr/local/bin/cloud-hypervisor` and virtiofsd, as in
   all-in-one.md step 1, and `herdlet doctor` passing. The release archive holds the guest kernel and initramfs; the
   job reads them from the task directory.
-- One client holds the host volume `herd-data` (the bbolt store allows one herd-api), and
-  `/var/lib/herd/snapshots` is one shared directory on every client and inside that volume (see join.md, Snapshots).
+- One client holds the host volume `herd-data` (the bbolt store allows one herd-api).
+- An S3-compatible bucket (e.g. `herd-snapshots`) and an access key for it, on an endpoint every client reaches:
+  herd-api keeps snapshots there and each herdlet's join hands it the store, so no client mounts a shared directory
+  (see join.md, Snapshots).
 
 ## Steps
 
@@ -27,10 +29,12 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    ./herd/herd-api join-token -key-file jwt.key -ttl 24h > join.token
    ```
 
-2. Put them into the jobs' Nomad variables:
+2. Put them, and herd-api's snapshot bucket (`<s3-endpoint>` as every client reaches it, e.g.
+   `http://minio.example:9000`), into the jobs' Nomad variables:
 
    ```sh
-   nomad var put nomad/jobs/herd-api jwt_key="$(cat jwt.key)"
+   nomad var put nomad/jobs/herd-api jwt_key="$(cat jwt.key)" s3=s3://herd-snapshots s3_endpoint=<s3-endpoint> \
+     aws_access_key_id=<access key> aws_secret_access_key=<secret key>
    nomad var put nomad/jobs/herdlet join_token="$(cat join.token)"
    ```
 

@@ -1,5 +1,6 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
-# herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that.
+# herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
+# keeps snapshots in the S3 store the join hands it, so it takes no -snapshots.
 # Rendered by deploy/artifacts; edit the template, not this file.
 variable "release_url" {
   type    = string
@@ -40,7 +41,6 @@ job "herdlet" {
           "join", "${HERD_API}",
           "-token-file", "secrets/join.token",
           "-state", "[[.HerdletStateDir]]",
-          "-snapshots", "[[.SnapshotDir]]",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
           "-virtiofsd", "/usr/libexec/virtiofsd",
