@@ -3,7 +3,9 @@ package oci
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -24,13 +26,24 @@ type Runtime interface {
 // Runner runs one command and returns its combined output. Tests replace it.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// ExecRunner runs commands with os/exec.
+// ExecRunner runs commands with os/exec. Output goes to a temporary file, not a pipe: `crun run --detach` leaves the
+// container holding the stdio it inherited, so with a pipe cmd.Run would wait for an EOF that comes only when the
+// container exits (herd-guest hung at boot on real Cloud Hypervisor VMs, never serving its API).
 func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	var out bytes.Buffer
+	f, err := os.CreateTemp("", "herd-oci-out-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	return out.Bytes(), err
+	cmd.Stdout, cmd.Stderr = f, f
+	runErr := cmd.Run()
+	out, err := os.ReadFile(f.Name())
+	if err != nil {
+		return nil, errors.Join(runErr, err)
+	}
+	return out, runErr
 }
 
 // Crun is Runtime over the crun binary.
