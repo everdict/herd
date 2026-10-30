@@ -176,7 +176,9 @@ func (m *nativeMachine) ConnectVsock(port uint32) (net.Conn, error) {
 	return c, nil
 }
 
-func (m *nativeMachine) ValidateSaveRestore() (bool, error) { return m.conf.ValidateSaveRestoreSupport() }
+func (m *nativeMachine) ValidateSaveRestore() (bool, error) {
+	return m.conf.ValidateSaveRestoreSupport()
+}
 
 func (m *nativeMachine) SaveState(path string) error { return m.vm.SaveMachineStateToPath(path) }
 

@@ -63,7 +63,7 @@ func newTarget(t *testing.T, name string) *agent.Local {
 
 func startGuest(t *testing.T, targets ...agent.Target) *guestUnderTest {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "guest.sock")
+	sock := sockPath(t, "guest.sock")
 	h := &guestUnderTest{t: t, targets: targets, sock: sock}
 	h.start()
 	t.Cleanup(h.stop)
@@ -516,4 +516,16 @@ func dialGuest(t testing.TB, sock string) *guestclient.Conn {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// sockPath returns a unix socket path in a short temporary directory: t.TempDir() on macOS exceeds the 104-byte
+// sun_path limit (bind: invalid argument).
+func sockPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
 }

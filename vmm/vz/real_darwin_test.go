@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,7 +37,8 @@ func TestReal(t *testing.T) {
 	defer cancel()
 
 	state := t.TempDir()
-	v, err := vz.New(vz.Config{StateDir: state, Host: host, Probe: vz.ProbeConfig{Kernel: kernel, Initrd: initrd}}, vz.Native())
+	hv := &recorder{Hypervisor: vz.Native()}
+	v, err := vz.New(vz.Config{StateDir: state, Host: host, Probe: vz.ProbeConfig{Kernel: kernel, Initrd: initrd}}, hv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +62,7 @@ func TestReal(t *testing.T) {
 	}
 	t.Logf("boot to guest answering on vsock: %v", time.Since(start))
 	t.Cleanup(func() { _, _ = v.Delete(context.Background(), "real1") })
+	booted := hv.last()
 
 	// virtio-fs, host to guest and back.
 	if got := request(t, ctx, v, "read in.txt\n"); got != token {
@@ -106,16 +109,80 @@ func TestReal(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(state, "vms", "real1")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("gone, but the VM's files remain: %v", err)
 	}
+	assertReallyStopped(t, "Delete after Boot", booted)
 
 	// Resume: the volume is still there.
 	if _, err := v.Restore(ctx, snap, spec); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
+	restored := hv.last()
 	if got := request(t, ctx, v, "read out.txt\n"); got != "from-guest-"+token {
 		t.Errorf("after restore, guest read out.txt = %q", got)
 	}
 	if p, err := v.Delete(ctx, "real1"); p != vmm.PresenceGone || err != nil {
 		t.Errorf("Delete after restore = %v (%v), want gone", p, err)
+	}
+	assertReallyStopped(t, "Delete after Restore", restored)
+}
+
+// recorder keeps every machine the backend builds, so the test can ask Virtualization.framework about a VM
+// directly instead of trusting the backend's own answers.
+type recorder struct {
+	vz.Hypervisor
+
+	mu       sync.Mutex
+	machines []vz.Machine
+}
+
+func (r *recorder) NewMachine(cfg vz.MachineConfig) (vz.Machine, error) {
+	m, err := r.Hypervisor.NewMachine(cfg)
+	if err == nil {
+		r.mu.Lock()
+		r.machines = append(r.machines, m)
+		r.mu.Unlock()
+	}
+	return m, err
+}
+
+// last is the machine built most recently.
+func (r *recorder) last() vz.Machine {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.machines) == 0 {
+		return nil
+	}
+	return r.machines[len(r.machines)-1]
+}
+
+// assertReallyStopped checks, independently of Delete's answer, that a VM Delete called gone is not running:
+// Virtualization.framework reports it stopped (or in error) and its guest no longer accepts vsock connections.
+func assertReallyStopped(t *testing.T, what string, m vz.Machine) {
+	t.Helper()
+	if m == nil {
+		t.Errorf("%s: no machine was recorded", what)
+		return
+	}
+	st, err := m.State()
+	if err != nil || (st != vz.MachineStopped && st != vz.MachineError) {
+		t.Errorf("%s: Delete answered gone, but Virtualization.framework reports the VM %v (%v): a running VM was leaked", what, st, err)
+	}
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := m.ConnectVsock(vz.DefaultGuestPort)
+		ch <- result{c, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err == nil {
+			r.c.Close()
+			t.Errorf("%s: Delete answered gone, but the guest still accepts vsock connections on port %d: a running VM was leaked", what, vz.DefaultGuestPort)
+		}
+	case <-time.After(5 * time.Second):
+		// A connect that never completes did not reach a guest.
 	}
 }
 

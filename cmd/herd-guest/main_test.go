@@ -59,7 +59,7 @@ func TestKilledGuestProcessIsRefollowedByTheNextOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	sock := filepath.Join(t.TempDir(), "g.sock")
+	sock := sockPath(t, "g.sock")
 	first := startServe(t, root, sock)
 	conn := dialGuest(t, sock)
 	p := new(ateenv.Process)
@@ -143,4 +143,16 @@ func dialGuest(t testing.TB, sock string) *guestclient.Conn {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// sockPath returns a unix socket path in a short temporary directory: t.TempDir() on macOS exceeds the 104-byte
+// sun_path limit (bind: invalid argument).
+func sockPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
 }
