@@ -34,6 +34,19 @@ type Options struct {
 	MoveTo          string
 	Prefix          string
 	Wait            time.Duration
+	EgressWalk      string
+	EchoListen      string
+	EchoURL         string
+	HostSide        string
+	EgressBound     time.Duration
+	Wget            string
+	CredentialURI   string
+	CredentialFile  string
+	LongStream      bool
+	StreamFor       time.Duration
+	StreamGap       time.Duration
+	Template2       string
+	ContainerHeader string
 }
 
 // Flags registers the flags on fs.
@@ -59,6 +72,19 @@ func (o *Options) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&o.MoveTo, "move-to", "", "worker selector k=v,... of the pool the move case resumes on")
 	fs.StringVar(&o.Prefix, "prefix", "", "prefix of every name the suite creates (default: cf-<random>)")
 	fs.DurationVar(&o.Wait, "wait", 3*time.Minute, "how long each wait for a state may take")
+	fs.StringVar(&o.EgressWalk, "egress-walk", "", "egress-walk case: URL of a host the actor's EgressPolicy lists (http:// or https://); needs -echo-listen and -echo-url")
+	fs.StringVar(&o.EchoListen, "echo-listen", "", "address the suite's echo server listens on (egress-walk, credential-header)")
+	fs.StringVar(&o.EchoURL, "echo-url", "", "http:// URL at which a guest reaches the echo server through the target's egress: a name the gateway resolves to this host, at an address it does not count host-side")
+	fs.StringVar(&o.HostSide, "host-side", "", "more URLs, comma-separated, the egress walk wants refused (besides the Control and router endpoints and the metadata targets)")
+	fs.DurationVar(&o.EgressBound, "egress-bound", 15*time.Second, "how long a created or updated EgressPolicy may take to apply to the live actor")
+	fs.StringVar(&o.Wget, "wget", "wget", "the guest's wget (busybox)")
+	fs.StringVar(&o.CredentialURI, "credential-uri", "", "credential-header case: credential_uri the gateway resolves (e.g. ate-secret://dir/conformance/token)")
+	fs.StringVar(&o.CredentialFile, "credential-file", "", "file holding the value -credential-uri resolves to, which the echo server must see")
+	fs.BoolVar(&o.LongStream, "long-stream", false, "run the long-stream case")
+	fs.DurationVar(&o.StreamFor, "stream-for", 30*time.Minute, "long-stream: how long the streamed exec is held open through the router")
+	fs.DurationVar(&o.StreamGap, "stream-gap", time.Minute, "long-stream: the idle gap between the exec's outputs")
+	fs.StringVar(&o.Template2, "template2", "", "two-containers case: a template in -atespace whose two containers mount one DurableDir volume")
+	fs.StringVar(&o.ContainerHeader, "container-header", "", "two-containers: request metadata key the target's guest picks a container by (herd: x-herd-container)")
 }
 
 func readToken(path string) (string, error) {
@@ -126,5 +152,19 @@ func (o *Options) Config() (Config, error) {
 	if (cfg.MoveFrom == nil) != (cfg.MoveTo == nil) {
 		return Config{}, errors.New("-move-from and -move-to go together")
 	}
+	cfg.EgressListed, cfg.EchoListen, cfg.EchoURL, cfg.EgressBound, cfg.Wget = o.EgressWalk, o.EchoListen, o.EchoURL, o.EgressBound, o.Wget
+	if o.HostSide != "" {
+		cfg.HostSide = strings.Split(o.HostSide, ",")
+	}
+	cfg.CredentialURI = o.CredentialURI
+	if o.CredentialFile != "" {
+		b, err := os.ReadFile(o.CredentialFile)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Credential = strings.TrimRight(string(b), "\r\n")
+	}
+	cfg.LongStream, cfg.StreamFor, cfg.StreamGap = o.LongStream, o.StreamFor, o.StreamGap
+	cfg.Template2, cfg.ContainerHeader = o.Template2, o.ContainerHeader
 	return cfg, nil
 }

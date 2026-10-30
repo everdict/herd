@@ -73,6 +73,9 @@ type Herdlet struct {
 	VMM    vmm.VMM
 	Guests herdlet.GuestDialer
 	Images machine.Images
+	// OnActor, if set with VMM, is told which actor a VM is before its boot or restore, as a Mac's in-process herd-egress
+	// is (Backend.OnActor): tests give the fake's VMs a network served under the actor's egress policy.
+	OnActor func(vm string, a link.ActorRef)
 	// Retry is how long the herdlet waits before it dials again after its link or tunnel broke (default 2 s).
 	Retry time.Duration
 }
@@ -273,7 +276,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 	base := vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}
 	shares := filepath.Join(h.StateDir, "shares")
 	if h.VMM != nil {
-		host := Backend{VMM: h.VMM, Guests: h.Guests}
+		host := Backend{VMM: h.VMM, Guests: h.Guests, OnActor: h.OnActor}
 		if h.Images == nil {
 			return host, nil, "given", nil
 		}

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/everdict/herd/guest/agent"
+	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/guest/transport"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
@@ -43,6 +44,9 @@ type VMM struct {
 	// GuestDelay, if set, is how long a VM's herd-guest takes to serve after its boot or restore was answered, as
 	// under Cloud Hypervisor, which answers a boot before the guest's init runs: until then DialGuest refuses.
 	GuestDelay time.Duration
+	// ShimFor, if set, is the shim command of vm's guest in place of Shim (e.g. one that gives its processes the VM's
+	// network).
+	ShimFor func(vm string) []string
 	// SyncFS, if set, is each guest's flush of one directory (agent.Guest.SyncFS); nil flushes nothing.
 	SyncFS func(*os.File) error
 
@@ -93,6 +97,10 @@ func (v *VMM) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
 	if err != nil {
 		return vm, err
 	}
+	// A booted guest's memory is new: its containers' roots start empty.
+	if err := os.RemoveAll(filepath.Join(v.Dir, spec.ID, "containers")); err != nil {
+		return vm, fmt.Errorf("fakeguest: %w", err)
+	}
 	return vm, v.start(spec.ID)
 }
 
@@ -121,6 +129,32 @@ func (v *VMM) Root(vm string) string {
 	return filepath.Join(v.Dir, vm, "root")
 }
 
+// targets are the guest's containers. A VM whose share holds a plan (herdlet's machines wrote it) gets one per
+// container of the plan, each with its volumes where guest/initd binds them and a root directory of its own outside
+// the share, as a real guest's containers have their rootfs in guest memory: a MEMORY restore under the VM's id
+// keeps it (and the exec records in it), a boot starts it empty. Any other VM has one container, "main", whose root
+// is the share itself.
+func (v *VMM) targets(id, root string, shim []string) ([]agent.Target, error) {
+	l := initd.Layout{ShareDir: root}
+	p, err := initd.ReadPlan(l)
+	if err != nil {
+		return []agent.Target{&agent.Local{ContainerName: "main", Root: root, Dir: "/workspace", Shim: shim}}, nil
+	}
+	vols, err := initd.Volumes(l, p)
+	if err != nil {
+		return nil, fmt.Errorf("fakeguest: %w", err)
+	}
+	var out []agent.Target
+	for _, c := range p.Containers {
+		r := filepath.Join(v.Dir, id, "containers", c.Name)
+		if err := os.MkdirAll(filepath.Join(r, "workspace"), 0o755); err != nil {
+			return nil, fmt.Errorf("fakeguest: %w", err)
+		}
+		out = append(out, &agent.Local{ContainerName: c.Name, Root: r, Dir: "/workspace", Volumes: c.Mounts(vols), Shim: shim})
+	}
+	return out, nil
+}
+
 func (v *VMM) start(id string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -133,7 +167,15 @@ func (v *VMM) start(id string) error {
 			return fmt.Errorf("fakeguest: %w", err)
 		}
 	}
-	g, err := agent.New(&agent.Local{ContainerName: "main", Root: root, Dir: "/workspace", Shim: v.Shim})
+	shim := v.Shim
+	if v.ShimFor != nil {
+		shim = v.ShimFor(id)
+	}
+	targets, err := v.targets(id, root, shim)
+	if err != nil {
+		return err
+	}
+	g, err := agent.New(targets...)
 	if err != nil {
 		return fmt.Errorf("fakeguest: %w", err)
 	}

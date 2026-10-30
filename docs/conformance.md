@@ -22,12 +22,75 @@ herder (PLT-107) runs the same command.
 | `suspend-async` | `SuspendActor{options.mode: DURABILITY_MODE_ASYNCHRONOUS}` of a running actor answers SUSPENDING or SUSPENDED; the actor becomes SUSPENDED with no worker and a snapshot of its own at an allowed fidelity. Durability is not asserted: the mode does not promise it at return. |
 | `refuse-unknown-actor` | `GetActor`, `SuspendActor`, `ResumeActor`, `DeleteActor` of an actor that does not exist answer `NotFound` |
 | `move` | with `--move-from` and `--move-to` (worker selectors of two pools): an actor suspended on the first resumes on the second after an `UpdateActor` of its `worker_selector`, answers, and keeps its volume file |
+| `egress-walk` | optional, below: from inside the guest a listed host answers, an unlisted one and host-side targets are refused, and an `UpdateActorEgressPolicy` flips them on the live actor within a bound |
+| `credential-header` | optional, below: a `replace_headers` credential reaches the suite's echo server in place of the guest's placeholder; the guest never holds it |
+| `long-stream` | optional, below: a streamed exec stays open through the router for `--stream-for` across idle gaps; a suspend cuts it with a status; after the resume a re-attach by exec id reads the rest |
+| `two-containers` | optional, below: two containers of one template sharing a DurableDir volume read each other's writes, before and after suspend/resume and a move |
+
+The four optional cases each run only when their flags are given, and are otherwise a `not configured` skip (like
+`move`), so a run without them stays green. They assume only the Control API, Substrate's `EgressPolicy` and env's
+guest API, so they run against Substrate too wherever it has the feature.
 
 A case is skipped only when the server declared why: it answered the call `Unimplemented` with a reason, which the
 report prints. `Unimplemented` with no reason, or any other refusal, fails the case. The one other skip is `move`
 without `--move-from/--move-to` (a target with one worker pool), printed as `not configured`. The report ends with the
 target's skip list and `N passed, M failed, K skipped`; the command exits 1 unless the run is green. Every name the
 suite creates starts with `--prefix` (default `cf-<random>`) and is deleted at the end.
+
+## Optional cases
+
+They need a probe that runs commands in the guest (`env-exec`, or `sandbox-process` for the egress cases) and, for the
+egress cases, `wget` in the guest image (busybox's; `--wget` names another). Every wget is `wget -q -O - -T 10
+[--header h] URL`; it "answers" when it exits 0 and is "refused" when it exits non-zero, which is how a refusal looks from
+inside the guest whatever the gateway did (an HTTP 403, a closed connection, a timeout).
+
+**The echo server.** `--echo-listen <addr>` makes the suite serve a tiny HTTP server on the machine it runs on. It
+answers every request `200 conformance-echo` and keeps, for the suite only, each request's host, its `cf` query mark
+and its `X-Conformance-Credential` header; it never echoes a header back, so the guest learns nothing from it.
+`--echo-url` is the `http://` URL a guest reaches it at **through the target's egress**: a DNS name the target's
+gateway resolves to the suite's machine, at an address the gateway does not count host-side (herd-egress refuses
+loopback, private, link-local, CGNAT and metadata addresses whatever the policy says, so on a LAN the suite must run
+where the gateway sees a public address, or behind a port forward that has one).
+
+**`egress-walk`** (`--egress-walk <URL>`, with `--echo-listen`, `--echo-url`; `--egress-bound`, default 15 s;
+`--host-side u1,u2` adds targets). The suite creates an actor, resumes it, and creates its `EgressPolicy` listing only
+the `--egress-walk` URL's host (an `http` rule for `http://`, an `https` rule for `https://`, with the URL's port).
+Then, from inside the guest: the listed URL answers within the bound (that is how long the policy took to apply); the
+echo URL is refused and the echo server saw no such request; and the host-side targets are refused: the Control and
+router endpoints (`http://<--endpoint>/`, `http://<--router>/`), `http://169.254.169.254/latest/meta-data/` and
+`http://metadata.google.internal/computeMetadata/v1/`. Give `--endpoint` and `--router` as addresses the guest would
+route to the host (not 127.0.0.1, which is the guest itself), or add the host's own address with `--host-side`. An
+`UpdateActorEgressPolicy` on the running actor then lists the echo host instead: within the bound the echo URL answers
+(and the echo server saw the request) and the formerly listed URL is refused. The report gives both times. With
+herd-egress bypassed the case is red (`TestEgressCasesRedWhenEgressBypassed`: the unlisted echo host answers).
+
+**`credential-header`** (`--credential-uri ate-secret://...`, `--credential-file <file holding the value it resolves
+to>`, `--echo-listen`, `--echo-url`). The policy lists the echo host with `effects.replace_headers:
+[{header: X-Conformance-Credential, credential_uri}]`. The guest sends `X-Conformance-Credential:
+conformance-placeholder`; the echo server must see exactly the credential in its place (not the placeholder, and the
+value is never printed). The guest's answer and its `env` must not contain the credential, and a request without the
+header reaches the echo server without one. herd-egress resolves `ate-secret://dir/<name>/<tail>` from its `-secrets`
+directory. Without injection the case is red (the echo server sees the placeholder).
+
+**`long-stream`** (`--long-stream`; `--stream-for`, default 30m; `--stream-gap`, default 60s). The suite starts
+`/bin/sh -c` printing `tick i` every `--stream-gap` for `--stream-for`, then 20 `tail i` lines up to 1 s apart and
+`end`, and follows its output (env's `StreamProcessOutput`, `follow: true`) through the router. The stream must stay
+open for the whole duration, across every idle gap, and deliver every tick in order. A `SuspendActor`
+(SYNCHRONOUS) then must end the open stream with a gRPC status that carries a reason (a clean end fails). After
+`ResumeActor`, a new `StreamProcessOutput` for the same process id from the byte offset already read must read the
+rest to exit 0, so that the two halves are exactly the output. A suspend below MEMORY keeps no process, so there the
+re-attach is not checked and the report says so. Under a router path that cuts idle connections the case is red
+(`TestLongStreamRedUnderRouterIdleTimeout`). `go test` runs it for 1.5 s with 300 ms gaps; a real run uses the
+defaults.
+
+**`two-containers`** (`--template2 <template>`, `--container-header <key>`). The template must have two containers
+that mount one DurableDir volume (at any mount paths); the suite finds them. env's guest API has no way to name a
+container, so the case needs the request metadata key by which the target's guest picks one (herd-guest:
+`x-herd-container`); without it the case is a `not configured` skip. Each container writes a file in the volume
+(env's `WriteFile`) and the other must read it (`ReadFile`) at its own mount path; after a SYNCHRONOUS suspend and a
+resume both still read both files and write again; with `--move-from`/`--move-to` the actor starts in the first pool
+and, after a suspend and an `UpdateActor` of its `worker_selector`, must resume in the other with both files and write
+again. If each container got its own copy of the volume, the case is red.
 
 ## Probes
 
@@ -134,8 +197,26 @@ herd conformance --target herd-all-in-one --endpoint 127.0.0.1:7443 --token-file
 herd conformance --target herd-join --endpoint herd-api.internal:7443 --token-file /tmp/herd.token --atespace conformance --template agent --router herd-api.internal:8443 --probe env-exec --volume-path /work/conformance.txt --expect-fidelity VOLUMES --move-from pool=mac --move-to pool=ubuntu
 ```
 
+The optional cases on a real host (here herd-api and herd-router on the host's LAN address; the template `pair` has two containers mounting one DurableDir volume; the
+secret file sits in herd-egress's `-secrets` directory as `conformance/token`, and `/tmp/cred` holds the same value):
+
+```sh
+herd conformance --target herd-all-in-one --endpoint 192.168.1.10:7443 --token-file /tmp/herd.token --atespace conformance --template agent --router 192.168.1.10:8443 --probe env-exec \
+  --egress-walk https://example.com/ --echo-listen :18080 --echo-url http://echo.example.net:18080/ \
+  --credential-uri ate-secret://dir/conformance/token --credential-file /tmp/cred \
+  --long-stream --stream-for 30m --stream-gap 60s --template2 pair --container-header x-herd-container
+```
+
+The egress cases need the VM's network to go through herd-egress: on a Mac that is the in-process gateway (ADR A-21);
+on Ubuntu it is the VM's TAP and nftables table (A-18), which the Cloud Hypervisor backend must have attached for the
+listed host to answer at all.
+
 `go test ./conformance/substrateapi/` runs exactly this against herd all-in-one and against the join mode with two
 herdlets of different families (a VZ host declaring VOLUMES and a Cloud Hypervisor host declaring MEMORY), on the fake
-hypervisor with the real herd-guest in every VM, and once more through `herd conformance` itself. The Nomad mode runs
+hypervisor with the real herd-guest in every VM, and once more through `herd conformance` itself. In the all-in-one run every optional case is configured: the fake VMs' processes reach out only through
+herd-egress's gateway (each VM gets an explicit-proxy listener whose connections the gateway serves as the VM's actor,
+and the test binary is the guest's `wget`), the gateway's policies come from herd-api over the Control API as
+herd-egress reads them, and its resolver maps `listed.test`/`echo.test` to TEST-NET-3 addresses that its dialer
+reaches on loopback, so its Guard is the real host's. The join run adds `two-containers` with the VOLUMES move. The Nomad mode runs
 the same binaries as the join mode (dist/nomad), so its run is the join invocation against the Nomad service
 addresses; it needs the supervisor's cluster.

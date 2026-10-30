@@ -160,10 +160,9 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 	for _, e := range c.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
 	}
-	mounted := map[string]string{}
+	mounted := c.Mounts(vols)
 	for _, vm := range c.VolumeMounts {
-		cfg.Volumes = append(cfg.Volumes, oci.VolumeMount{Source: vols[vm.Name], Destination: vm.MountPath, ReadOnly: vm.ReadOnly})
-		mounted[vm.MountPath] = vols[vm.Name]
+		cfg.Volumes = append(cfg.Volumes, oci.VolumeMount{Source: mounted[vm.MountPath], Destination: vm.MountPath, ReadOnly: vm.ReadOnly})
 	}
 	spec, err := oci.Build(cfg)
 	if err != nil {
@@ -177,6 +176,16 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
 	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted}, nil
+}
+
+// Mounts maps each of c's volume mount paths to the volume's directory in vols (from Volumes): every container that
+// mounts a volume binds the same directory, so they share it.
+func (c Container) Mounts(vols map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, vm := range c.VolumeMounts {
+		out[vm.MountPath] = vols[vm.Name]
+	}
+	return out
 }
 
 // Boot runs the whole sequence after the pseudo filesystems: share, plan, volumes, containers.

@@ -43,6 +43,35 @@ type Config struct {
 	// MoveFrom and MoveTo are worker selectors of two different worker pools; with both set, the move case
 	// creates an actor on MoveFrom, suspends it and resumes it on MoveTo.
 	MoveFrom, MoveTo map[string]string
+
+	// The optional cases below each run only when configured; otherwise they are a "not configured" skip.
+
+	// EgressListed is the URL of a host the egress walk lists in the actor's EgressPolicy (--egress-walk); a GET of
+	// it from inside the guest must answer.
+	EgressListed string
+	// Echo is the suite's echo server (Run starts one on EchoListen when Echo is nil); EchoURL is where the guest
+	// reaches it through the target's egress: a name the target's gateway resolves to the echo server's host.
+	Echo       *Echo
+	EchoListen string
+	EchoURL    string
+	// HostSide are URLs the egress walk wants refused besides its own (the Control and router endpoints, the
+	// link-local metadata address, metadata.google.internal).
+	HostSide []string
+	// EgressBound bounds how long a created or updated policy may take to apply to the live actor (default 15 s).
+	EgressBound time.Duration
+	// Wget is the guest's wget (default "wget", busybox's).
+	Wget string
+	// CredentialURI and Credential: the credential-header case lists the echo host with a replace_headers effect
+	// filling CredentialHeader from CredentialURI; Credential is the value the echo server must see and the guest
+	// must not.
+	CredentialURI, Credential string
+	// LongStream runs the long-stream case: an exec streamed through the router for StreamFor (default 30 min) with
+	// its output StreamGap apart (default 60 s), then cut by a suspend and re-attached by its id after the resume.
+	LongStream           bool
+	StreamFor, StreamGap time.Duration
+	// Template2 is a template with two containers mounting one DurableDir volume (the two-containers case);
+	// ContainerHeader is the request metadata key by which the target's guest picks the container a call acts on.
+	Template2, ContainerHeader string
 }
 
 // Outcome is a case's result.
@@ -72,6 +101,7 @@ type Report struct {
 var Cases = []string{
 	"create-from-template", "resume", "request", "suspend", "resume-on-request", "fork-via-tag", "delete-verified",
 	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "move",
+	"egress-walk", "credential-header", "long-stream", "two-containers",
 }
 
 // OK is true when no case failed and every skip carries the server's declared reason.
@@ -200,6 +230,12 @@ func Run(ctx context.Context, cfg Config) Report {
 		return fail(fmt.Errorf("GetActorTemplate %s/%s: %w", cfg.Atespace, cfg.Template, err))
 	}
 	defer r.cleanup()
+	if cfg.Echo == nil && cfg.EchoListen != "" {
+		if r.cfg.Echo, err = StartEcho(cfg.EchoListen); err != nil {
+			return fail(fmt.Errorf("echo server: %w", err))
+		}
+		defer r.cfg.Echo.Close()
+	}
 
 	record := func(name string, err error, detail string) {
 		var d declared
@@ -250,6 +286,10 @@ func Run(ctx context.Context, cfg Config) Report {
 		{"suspend-async", r.suspendAsync},
 		{"refuse-unknown-actor", r.unknownActor},
 		{"move", r.move},
+		{"egress-walk", r.egressWalk},
+		{"credential-header", r.credentialHeader},
+		{"long-stream", r.longStream},
+		{"two-containers", r.twoContainers},
 	} {
 		detail, err := s.f(ctx)
 		record(s.name, err, detail)
@@ -262,9 +302,13 @@ func (r *run) name(role string) string { return r.cfg.Prefix + "-" + role }
 func (r *run) target(name string) string { return r.cfg.Atespace + "/" + name }
 
 func (r *run) newActor(ctx context.Context, name string, selector map[string]string, tag string) (*ateapi.Actor, error) {
+	return r.newActorOf(ctx, r.cfg.Template, name, selector, tag)
+}
+
+func (r *run) newActorOf(ctx context.Context, template, name string, selector map[string]string, tag string) (*ateapi.Actor, error) {
 	a := &ateapi.Actor{
 		Metadata:      &ateapi.ResourceMetadata{Atespace: r.cfg.Atespace, Name: name},
-		ActorTemplate: ref(r.cfg.Atespace, r.cfg.Template),
+		ActorTemplate: ref(r.cfg.Atespace, template),
 	}
 	if selector != nil {
 		a.WorkerSelector = &ateapi.Selector{MatchLabels: selector}
@@ -277,7 +321,7 @@ func (r *run) newActor(ctx context.Context, name string, selector map[string]str
 		return nil, fmt.Errorf("CreateActor %s: %w", name, err)
 	}
 	r.made = append(r.made, name)
-	if got.GetMetadata().GetUid() == "" || got.GetActorTemplate().GetName() != r.cfg.Template {
+	if got.GetMetadata().GetUid() == "" || got.GetActorTemplate().GetName() != template {
 		return got, fmt.Errorf("CreateActor %s: answered uid %q template %v", name, got.GetMetadata().GetUid(), got.GetActorTemplate())
 	}
 	if tag != "" && got.GetSourceTag().GetName() != tag {

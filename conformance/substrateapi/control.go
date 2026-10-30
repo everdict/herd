@@ -169,3 +169,11 @@ func (c *Control) DeleteTag(ctx context.Context, space, name string) (*ateapi.Ta
 }
 
 func ref(space, name string) *ateapi.ObjectRef { return &ateapi.ObjectRef{Atespace: space, Name: name} }
+
+func (c *Control) CreateActorEgressPolicy(ctx context.Context, space, actor string, p *ateapi.EgressPolicy) (*ateapi.EgressPolicy, error) {
+	return invoke(ctx, c, "CreateActorEgressPolicy", &ateapi.CreateActorEgressPolicyRequest{Actor: ref(space, actor), EgressPolicy: p}, &ateapi.EgressPolicy{})
+}
+
+func (c *Control) UpdateActorEgressPolicy(ctx context.Context, space, actor string, p *ateapi.EgressPolicy) (*ateapi.EgressPolicy, error) {
+	return invoke(ctx, c, "UpdateActorEgressPolicy", &ateapi.UpdateActorEgressPolicyRequest{Actor: ref(space, actor), EgressPolicy: p}, &ateapi.EgressPolicy{})
+}

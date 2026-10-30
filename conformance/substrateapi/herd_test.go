@@ -14,6 +14,7 @@ import (
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/conformance/substrateapi"
 	"github.com/everdict/herd/deploy"
+	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/execrec"
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/imagetest"
@@ -27,6 +28,13 @@ import (
 
 // The test binary doubles as herd-guest's in-container shim.
 func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "wget" {
+		os.Exit(wgetMain(os.Args[1:]))
+	}
+	if len(os.Args) == 5 && os.Args[1] == "netshim" {
+		netshim(os.Args[2], os.Args[3])
+		os.Args = []string{os.Args[0], "shim", os.Args[4]}
+	}
 	if len(os.Args) == 3 && os.Args[1] == "shim" {
 		if err := execrec.Shim(os.Args[2]); err != nil {
 			os.Stderr.WriteString(err.Error() + "\n")
@@ -117,6 +125,39 @@ func template(t *testing.T, addr, tok string, f ateapi.SnapshotFidelity) {
 	}
 }
 
+// template2 is the two-containers case's template: containers left and right mount the DurableDir volume shared at
+// /left and /right.
+func template2(t *testing.T, addr, tok string, f ateapi.SnapshotFidelity) {
+	t.Helper()
+	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: addr}, tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.CreateActorTemplate(ctx, &ateapi.ActorTemplate{
+		Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "pair"},
+		Containers: []*ateapi.Container{
+			{Name: "left", Image: "ghcr.io/everdict/agent:1", VolumeMounts: []*ateapi.VolumeMount{{Name: "shared", MountPath: "/left"}}},
+			{Name: "right", Image: "ghcr.io/everdict/agent:1", VolumeMounts: []*ateapi.VolumeMount{{Name: "shared", MountPath: "/right"}}},
+		},
+		Volumes:        []*ateapi.Volume{{Name: "shared", DurableDir: &ateapi.DurableDirVolumeSource{}}},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f},
+	}); err != nil {
+		t.Fatalf("CreateActorTemplate: %v", err)
+	}
+}
+
+// optional configures the optional cases on cfg: the egress walk and the credential header against e, echoURL and
+// listedURL; a short long stream; the two-container template.
+func optional(cfg *substrateapi.Config, e *substrateapi.Echo, echoURL, listedURL string) {
+	cfg.Echo, cfg.EchoURL, cfg.EgressListed, cfg.EgressBound = e, echoURL, listedURL, 10*time.Second
+	cfg.CredentialURI, cfg.Credential = secretURI, secret
+	cfg.LongStream, cfg.StreamFor, cfg.StreamGap = true, 1500*time.Millisecond, 300*time.Millisecond
+	cfg.Template2, cfg.ContainerHeader = "pair", agent.ContainerHeader
+}
+
 func suiteConfig(target, api, router, tok string) substrateapi.Config {
 	return substrateapi.Config{Target: target, Control: substrateapi.Endpoint{Addr: api},
 		Router: substrateapi.Router{Endpoint: substrateapi.Endpoint{Addr: router}, Token: tok}, Token: tok,
@@ -166,10 +207,22 @@ func wantSkips(t *testing.T, rep substrateapi.Report, cases ...string) {
 // over loopback, on the fake hypervisor with the real herd-guest in each VM. It returns the addresses and a token
 // that writes in the suite's atespace, once the herdlet is a worker and the suite's MEMORY template exists.
 func startAllInOne(t *testing.T) (deploy.Addrs, string) {
+	return startAllInOneWith(t, nil)
+}
+
+// startAllInOneWith is startAllInOne whose herdlet's fake VMs, given n, have n's network: their processes reach out
+// only through n (herd-egress's gateway, or a proxy that decides nothing with n.bypass). It also creates the
+// two-container template.
+func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	t.Helper()
 	data := t.TempDir()
+	h := herdlet(t, filepath.Join(data, "herdlet"), "aio", "", ubuntu, nil)
+	if n != nil {
+		h.VMM.(*fakeguest.VMM).ShimFor = n.ShimFor
+		h.OnActor = n.OnActor
+	}
 	a := &deploy.AllInOne{Data: data, Listen: "127.0.0.1:0", RouterListen: "127.0.0.1:0", TunnelListen: "127.0.0.1:0",
-		EgressListen: "127.0.0.1:0", DNSListen: "127.0.0.1:0", Egress: true, Herdlet: herdlet(t, filepath.Join(data, "herdlet"), "aio", "", ubuntu, nil)}
+		EgressListen: "127.0.0.1:0", DNSListen: "127.0.0.1:0", Egress: true, Herdlet: h}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan deploy.Addrs, 1)
 	done := make(chan error, 1)
@@ -195,14 +248,25 @@ func startAllInOne(t *testing.T) (deploy.Addrs, string) {
 	tok := token(t, key)
 	waitWorkers(t, addrs.API, tok, 1)
 	template(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	template2(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	if n != nil {
+		n.sync(addrs.API, tok)
+	}
 	return addrs, tok
 }
 
 // TestSuiteGreenOnAllInOne runs the suite against herd all-in-one (startAllInOne). Its one skip is the move case,
 // which needs two worker pools.
+//
+// Every optional case is configured: the egress walk and the credential header go through herd-egress's gateway
+// (the VMs' network, vmNet), the long stream through herd-router, and the two containers share their volume across
+// a MEMORY suspend.
 func TestSuiteGreenOnAllInOne(t *testing.T) {
-	addrs, tok := startAllInOne(t)
+	n := newVMNet(t, false)
+	addrs, tok := startAllInOneWith(t, n)
 	cfg := suiteConfig("herd-all-in-one", addrs.API, addrs.Router, tok)
+	e, echoURL, listedURL := echoes(t)
+	optional(&cfg, e, echoURL, listedURL)
 	cfg.ExpectFidelity = ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
 	rep := runSuite(t, cfg)
 	wantSkips(t, rep, "move")
@@ -272,13 +336,17 @@ func TestSuiteGreenOnJoin(t *testing.T) {
 	tok := token(t, key)
 	waitWorkers(t, apiLn.Addr().String(), tok, 2)
 	template(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
+	template2(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
 	cfg := suiteConfig("herd-join", apiLn.Addr().String(), cl.Addr().String(), tok)
 	cfg.ExpectFidelity = ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 	cfg.MoveFrom, cfg.MoveTo = map[string]string{"pool": "mac"}, map[string]string{"pool": "ubuntu"}
+	cfg.Template2, cfg.ContainerHeader = "pair", agent.ContainerHeader
 	rep := runSuite(t, cfg)
-	wantSkips(t, rep)
-	if mv, _ := rep.Get("move"); mv.Outcome != substrateapi.Pass {
-		t.Errorf("move: %v", mv)
+	wantSkips(t, rep, "egress-walk", "credential-header", "long-stream")
+	for _, c := range []string{"move", "two-containers"} {
+		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
+			t.Errorf("%s: %v", c, r)
+		}
 	}
 }
 

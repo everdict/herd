@@ -45,6 +45,26 @@ type FileProbe interface {
 	ReadFile(ctx context.Context, r Router, actor, path string) (string, error)
 }
 
+// ExecResult is what a command run in the actor left.
+type ExecResult struct {
+	Stdout, Stderr string
+	ExitCode       int
+}
+
+// ExecProbe is a probe that can also run a command in the actor (the egress cases run busybox wget in the guest
+// through it). A command that ran and failed is a result with its exit code, not an error.
+type ExecProbe interface {
+	Probe
+	Exec(ctx context.Context, r Router, actor string, argv ...string) (ExecResult, error)
+}
+
+// ContainerProbe is a file probe that can address one named container of a multi-container actor, for a target
+// whose guest picks the container by a request metadata key (header).
+type ContainerProbe interface {
+	FileProbe
+	InContainer(header, container string) FileProbe
+}
+
 // ParseProbe reads a probe name: "http-get:<path>" (any HTTP server, e.g. Substrate's counter demo: http-get:/),
 // "sandbox-process" (Substrate's sandbox demo, POST /process) or "env-exec" (agent-substrate/env's guest API over
 // gRPC, which herd-guest serves on herd-router's default port).
@@ -148,6 +168,31 @@ func (SandboxProcess) run(ctx context.Context, r Router, actor string, cmd ...st
 	return out.Stdout, nil
 }
 
+// Exec implements ExecProbe: the demo answers the command's exit code with its output.
+func (SandboxProcess) Exec(ctx context.Context, r Router, actor string, argv ...string) (ExecResult, error) {
+	body, err := json.Marshal(map[string]any{"command": argv})
+	if err != nil {
+		return ExecResult{}, err
+	}
+	b, err := r.do(ctx, http.MethodPost, "/process", actor, body)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	var out struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exitCode"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return ExecResult{}, fmt.Errorf("POST /process: %w", err)
+	}
+	if out.Error != "" && out.ExitCode == 0 {
+		return ExecResult{}, fmt.Errorf("POST /process %q: %s", argv, out.Error)
+	}
+	return ExecResult{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode}, nil
+}
+
 func (p SandboxProcess) Request(ctx context.Context, r Router, actor string) error {
 	out, err := p.run(ctx, r, actor, "sh", "-c", "echo conformance")
 	if err == nil && out != "conformance\n" {
@@ -167,7 +212,17 @@ func (p SandboxProcess) ReadFile(ctx context.Context, r Router, actor, path stri
 
 // EnvExec speaks agent-substrate/env's guest API (ateenv.v1alpha) over gRPC through the router: it starts
 // `echo conformance` and follows its output to the exit.
-type EnvExec struct{}
+type EnvExec struct {
+	// Header and Container, if both set, send Header: Container as request metadata, for a target whose guest picks
+	// the container a call acts on by a metadata key (env's API names none; ContainerProbe).
+	Header, Container string
+}
+
+// InContainer implements ContainerProbe.
+func (e EnvExec) InContainer(header, container string) FileProbe {
+	e.Header, e.Container = header, container
+	return e
+}
 
 func (EnvExec) Name() string { return "env-exec" }
 
@@ -179,7 +234,7 @@ const (
 	maxEnvFileAnswer = 1 << 20
 )
 
-func (EnvExec) conn(ctx context.Context, r Router, actor string) (*grpc.ClientConn, context.Context, error) {
+func (e EnvExec) conn(ctx context.Context, r Router, actor string) (*grpc.ClientConn, context.Context, error) {
 	tr, err := r.transport()
 	if err != nil {
 		return nil, nil, err
@@ -192,48 +247,75 @@ func (EnvExec) conn(ctx context.Context, r Router, actor string) (*grpc.ClientCo
 	if r.Token != "" {
 		md.Set("authorization", "Bearer "+r.Token)
 	}
+	if e.Header != "" && e.Container != "" {
+		md.Set(e.Header, e.Container)
+	}
 	return cc, metadata.NewOutgoingContext(ctx, md), nil
 }
 
 func (e EnvExec) Request(ctx context.Context, r Router, actor string) error {
-	cc, ctx, err := e.conn(ctx, r, actor)
+	res, err := e.Exec(ctx, r, actor, "/bin/sh", "-c", "echo conformance")
 	if err != nil {
 		return err
 	}
+	if res.ExitCode != 0 || res.Stdout != "conformance\n" {
+		return fmt.Errorf("exec: stdout %q, exit %d; want %q and exit 0", res.Stdout, res.ExitCode, "conformance\n")
+	}
+	return nil
+}
+
+// Exec implements ExecProbe: StartProcess, then StreamProcessOutput followed to the exit.
+func (e EnvExec) Exec(ctx context.Context, r Router, actor string, argv ...string) (ExecResult, error) {
+	cc, ctx, err := e.conn(ctx, r, actor)
+	if err != nil {
+		return ExecResult{}, err
+	}
 	defer cc.Close()
 	p := &ateenv.Process{}
-	if err := cc.Invoke(ctx, envStartProcess, &ateenv.StartProcessRequest{Command: []string{"/bin/sh", "-c", "echo conformance"}}, p); err != nil {
-		return fmt.Errorf("StartProcess: %w", err)
+	if err := cc.Invoke(ctx, envStartProcess, &ateenv.StartProcessRequest{Command: argv}, p); err != nil {
+		return ExecResult{}, fmt.Errorf("StartProcess: %w", err)
 	}
+	var stdout, stderr strings.Builder
+	exit, err := e.follow(ctx, cc, p.GetProcessId(), 0, func(m *ateenv.ProcessOutput) {
+		stdout.Write(m.GetStdout())
+		stderr.Write(m.GetStderr())
+	})
+	if err != nil {
+		return ExecResult{}, err
+	}
+	if exit == nil {
+		return ExecResult{}, fmt.Errorf("exec %q: the output stream ended without the exit (stdout %q)", argv, stdout.String())
+	}
+	return ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: int(exit.GetExitCode())}, nil
+}
+
+// follow streams process id's output from stdout offset, following it, and hands each message to each until the
+// stream ends; it answers the exit if the stream carried it. A stream that ends with an error answers the error.
+func (EnvExec) follow(ctx context.Context, cc *grpc.ClientConn, id string, offset int64, each func(*ateenv.ProcessOutput)) (*ateenv.Process, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cs, err := cc.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, envStreamOutput)
 	if err != nil {
-		return fmt.Errorf("StreamProcessOutput: %w", err)
+		return nil, fmt.Errorf("StreamProcessOutput: %w", err)
 	}
-	if err := cs.SendMsg(&ateenv.StreamProcessOutputRequest{ProcessId: p.GetProcessId(), Follow: true}); err != nil {
-		return fmt.Errorf("StreamProcessOutput: %w", err)
+	if err := cs.SendMsg(&ateenv.StreamProcessOutputRequest{ProcessId: id, StdoutOffset: offset, Follow: true}); err != nil {
+		return nil, fmt.Errorf("StreamProcessOutput: %w", err)
 	}
 	_ = cs.CloseSend()
-	var out strings.Builder
 	var exit *ateenv.Process
 	for {
 		m := &ateenv.ProcessOutput{}
 		if err := cs.RecvMsg(m); err != nil {
-			if !errors.Is(err, io.EOF) {
-				return fmt.Errorf("StreamProcessOutput: %w", err)
+			if errors.Is(err, io.EOF) {
+				return exit, nil
 			}
-			break
+			return exit, fmt.Errorf("StreamProcessOutput: %w", err)
 		}
-		out.Write(m.GetStdout())
+		each(m)
 		if m.GetExit() != nil {
 			exit = m.GetExit()
 		}
 	}
-	if exit == nil || exit.GetExitCode() != 0 || out.String() != "conformance\n" {
-		return fmt.Errorf("exec: stdout %q, exit %v; want %q and exit 0", out.String(), exit, "conformance\n")
-	}
-	return nil
 }
 
 func (e EnvExec) WriteFile(ctx context.Context, r Router, actor, path, body string) error {
