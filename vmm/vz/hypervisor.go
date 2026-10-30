@@ -31,6 +31,8 @@ type MachineConfig struct {
 	// Network, if set, is one end of a datagram socket pair: the VM's NIC is a file-handle attachment on it, and
 	// herd-egress's userspace stack holds the other end. Nil means no NIC.
 	Network *os.File
+	// NetworkMAC, if set, is the NIC's MAC (xx:xx:xx:xx:xx:xx); empty lets the framework pick one.
+	NetworkMAC string
 	// Console, if set, is a file the guest's hvc0 console is appended to.
 	Console string
 	// MachineID is the generic platform's machine identifier (opaque bytes). A save file restores only into a VM

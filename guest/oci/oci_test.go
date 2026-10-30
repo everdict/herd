@@ -85,3 +85,32 @@ func TestCrunCommands(t *testing.T) {
 		t.Fatalf("crun calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+func TestSpecFileMounts(t *testing.T) {
+	c := mainConfig()
+	c.Files = []oci.FileMount{{Source: "/run/herd/net/resolv.conf", Destination: "/etc/resolv.conf"}}
+	s, err := oci.Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := s.Mounts[len(s.Mounts)-1]
+	want := oci.Mount{Destination: "/etc/resolv.conf", Type: "bind", Source: "/run/herd/net/resolv.conf", Options: []string{"bind", "ro", "nosuid", "nodev"}}
+	if last.Destination != want.Destination || last.Type != want.Type || last.Source != want.Source || strings.Join(last.Options, ",") != strings.Join(want.Options, ",") {
+		t.Errorf("file mount = %+v, want %+v", last, want)
+	}
+	for _, f := range []oci.FileMount{
+		{Source: "run/herd/net/resolv.conf", Destination: "/etc/resolv.conf"},
+		{Source: "/run/herd/../etc/shadow", Destination: "/etc/resolv.conf"},
+		{Source: "/run/herd/net/resolv.conf", Destination: "etc/resolv.conf"},
+		{Source: "/run/herd/net/resolv.conf", Destination: "/etc/../resolv.conf"},
+		{Source: "/run/herd/net/resolv.conf", Destination: "/"},
+		{Source: "/run/herd/net/resolv.conf", Destination: "/.herd/herd-guest"},
+		{Source: "/run/herd/net/resolv.conf", Destination: "/workspace"},
+	} {
+		c := mainConfig()
+		c.Files = []oci.FileMount{f}
+		if _, err := oci.Build(c); err == nil {
+			t.Errorf("file mount %+v accepted", f)
+		}
+	}
+}

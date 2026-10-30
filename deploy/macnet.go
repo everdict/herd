@@ -11,7 +11,9 @@ import (
 
 	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/egress/gvstack"
+	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/vz"
 	"google.golang.org/grpc"
 )
@@ -54,13 +56,14 @@ func (h *Herdlet) macHost(api string, hv vz.Hypervisor, s vz.Session) (Backend, 
 	v, err := vz.New(vz.Config{
 		StateDir: filepath.Join(h.StateDir, "vms"), SnapshotDir: filepath.Join(h.StateDir, "vm-snapshots"), Host: label,
 		Probe:   vz.ProbeConfig{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline},
-		Session: s, Network: nw.Attach, ReleaseNetwork: nw.Release,
+		Session: s, Network: nw.Attach, ReleaseNetwork: nw.Release, NetworkMAC: egress.StackMAC,
 	}, hv)
 	if err != nil {
 		return Backend{}, fmt.Errorf("vz: %w", err)
 	}
 	return Backend{
 		VMM: v, Guests: v, Version: "virtualization.framework",
+		Network: stackLink{ca: ca.CertPEM()},
 		OnActor: func(vm string, a link.ActorRef) {
 			nw.Assign(vm, egress.Actor{Space: a.Space, Name: a.Name, UID: a.UID})
 		},
@@ -71,3 +74,25 @@ func (h *Herdlet) macHost(api string, hv vz.Hypervisor, s vz.Session) (Backend, 
 		},
 	}, nil
 }
+
+// stackLink is a Mac's machine.Network (ADR A-21): every VM's link is the same fixed link into a stack of its own, so
+// a lease differs between VMs only in its MAC (egress.StackMAC, which vz gives the NIC and by which the guest finds
+// it), and the host has nothing to bring up or take down (vz releases the stack).
+type stackLink struct {
+	ca []byte
+}
+
+func (s stackLink) Lease(ctx context.Context, id string, want *initd.Network) (initd.Network, *vmm.NIC, error) {
+	gw := egress.DefaultStackGateway.String()
+	g := initd.Network{MAC: egress.StackMAC(id), Address: egress.DefaultStackVM.String() + "/24", Gateway: gw, DNS: []string{gw}, CA: string(s.ca)}
+	if want != nil && (want.Address != g.Address || want.Gateway != g.Gateway) {
+		return initd.Network{}, nil, fmt.Errorf("deploy: %s: a Mac's VMs are on %s via %s, not %s via %s", id, g.Address, gw, want.Address, want.Gateway)
+	}
+	return g, nil, nil
+}
+
+func (stackLink) Up(context.Context, string) error { return nil }
+
+func (stackLink) Down(context.Context, string) (vmm.Presence, error) { return vmm.PresenceGone, nil }
+
+func (stackLink) Release(context.Context, string) (vmm.Presence, error) { return vmm.PresenceGone, nil }

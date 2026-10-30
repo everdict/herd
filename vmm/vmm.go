@@ -50,6 +50,8 @@ const PortableRestoreFamily = "microvm-volumes"
 var (
 	archRE  = regexp.MustCompile(`^(amd64|arm64)$`)
 	labelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	tapRE   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	macRE   = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 )
 
 // CloudHypervisorRestoreFamily names the family a Cloud Hypervisor MEMORY snapshot restores within:
@@ -102,6 +104,17 @@ type Spec struct {
 	VCPUs     int
 	MemoryMiB int
 	Shares    []Share
+	// NIC, if set, is the VM's one network device on a host TAP (Cloud Hypervisor on Ubuntu, ADR A-18): the TAP must exist,
+	// with its egress table loaded, before Boot or Restore. A backend whose NICs are not TAPs (vz) refuses it.
+	NIC *NIC
+}
+
+// NIC is a VM's network device on a host TAP.
+type NIC struct {
+	// TAP is the host's TAP device (at most 15 characters).
+	TAP string
+	// MAC is the guest's address on it, xx:xx:xx:xx:xx:xx.
+	MAC string
 }
 
 // Validate reports ErrInvalidSpec for a spec no backend could boot.
@@ -113,6 +126,8 @@ func (s Spec) Validate() error {
 		return fmt.Errorf("%w: no kernel", ErrInvalidSpec)
 	case s.VCPUs < 1 || s.MemoryMiB < 1:
 		return fmt.Errorf("%w: %d vCPU, %d MiB", ErrInvalidSpec, s.VCPUs, s.MemoryMiB)
+	case s.NIC != nil && (!tapRE.MatchString(s.NIC.TAP) || !macRE.MatchString(s.NIC.MAC)):
+		return fmt.Errorf("%w: nic tap %q mac %q", ErrInvalidSpec, s.NIC.TAP, s.NIC.MAC)
 	}
 	return nil
 }

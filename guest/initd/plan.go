@@ -1,12 +1,17 @@
 // Package initd is what herd-guest does as PID 1 of the microVM, in order: mount the guest's pseudo filesystems,
-// mount the virtio-fs share, create every DurableDir volume as a subdirectory of the share, then — only after all
-// volumes exist — write each container's OCI bundle and start it. The plan (which containers, which volumes) is
-// written by herdlet from the ActorTemplate into the share at .herd/actor.json.
+// mount the virtio-fs share, configure the VM's network link to herd-egress if the plan has one (address, default
+// route, and the resolver and CA every container is given), create every DurableDir volume as a subdirectory of the
+// share, then — only after all volumes exist — write each container's OCI bundle and start it. The plan (which
+// containers, which volumes) is written by herdlet from the ActorTemplate into the share at .herd/actor.json.
 package initd
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"net"
+	"net/netip"
 	"path"
 	"regexp"
 	"strings"
@@ -20,6 +25,25 @@ const PlanPath = ".herd/actor.json"
 type Plan struct {
 	Volumes    []Volume    `json:"volumes"`
 	Containers []Container `json:"containers"`
+	// Network, if set, is the VM's one NIC: herd-guest configures it before any container starts.
+	Network *Network `json:"network,omitempty"`
+}
+
+// Network is the VM's link to herd-egress as herdlet leased it (ADR A-18 on Ubuntu: the VM's address on its TAP's
+// /30; A-21 on a Mac: the userspace stack's fixed link). Every TCP connection and DNS query leaves through
+// herd-egress whatever the VM addresses, so the guest needs only an address, a default route and a resolver, plus
+// herd-egress's CA for the connections it intercepts.
+type Network struct {
+	// MAC names the interface; empty means the guest's only non-loopback interface.
+	MAC string `json:"mac,omitempty"`
+	// Address is the VM's address with the link's prefix length, e.g. 10.88.0.2/30.
+	Address string `json:"address"`
+	// Gateway is the default route's next hop: the host's side of the link.
+	Gateway string `json:"gateway"`
+	// DNS are the resolvers every container gets in /etc/resolv.conf.
+	DNS []string `json:"dns,omitempty"`
+	// CA is herd-egress's CA certificate (PEM), added to every container's trust store.
+	CA string `json:"ca,omitempty"`
 }
 
 // Volume is a DurableDir volume: a directory of the share named after the volume.
@@ -130,5 +154,65 @@ func (p *Plan) Validate() error {
 			at[m.MountPath] = true
 		}
 	}
+	if p.Network != nil {
+		return p.Network.Validate()
+	}
 	return nil
+}
+
+// Validate checks the link: Address is an IPv4 host address (neither the network's nor the broadcast address) on a
+// /30 or wider, Gateway another host address of that prefix, every DNS entry an IP, MAC a hardware address, and CA,
+// if set, one or more PEM certificates and nothing else.
+func (n *Network) Validate() error {
+	pfx, err := netip.ParsePrefix(n.Address)
+	if err != nil || !pfx.Addr().Is4() || pfx.Bits() < 1 || pfx.Bits() > 30 {
+		return fmt.Errorf("initd: network: address %q is not an IPv4 address on a /30 or wider", n.Address)
+	}
+	host := func(a netip.Addr) bool { return a != pfx.Masked().Addr() && a != broadcast(pfx) }
+	if !host(pfx.Addr()) {
+		return fmt.Errorf("initd: network: address %q is its network's or broadcast address", n.Address)
+	}
+	gw, err := netip.ParseAddr(n.Gateway)
+	if err != nil || !gw.Is4() || !pfx.Contains(gw) || !host(gw) || gw == pfx.Addr() {
+		return fmt.Errorf("initd: network: gateway %q is not another host address of %s", n.Gateway, pfx.Masked())
+	}
+	for _, d := range n.DNS {
+		if a, err := netip.ParseAddr(d); err != nil || a.Zone() != "" {
+			return fmt.Errorf("initd: network: DNS server %q is not an IP address", d)
+		}
+	}
+	if n.MAC != "" {
+		if _, err := net.ParseMAC(n.MAC); err != nil {
+			return fmt.Errorf("initd: network: mac %q: %w", n.MAC, err)
+		}
+	}
+	if n.CA != "" {
+		rest, certs := []byte(n.CA), 0
+		for {
+			var b *pem.Block
+			if b, rest = pem.Decode(rest); b == nil {
+				break
+			}
+			if b.Type != "CERTIFICATE" {
+				return fmt.Errorf("initd: network: CA holds a PEM %s block, not a CERTIFICATE", b.Type)
+			}
+			if _, err := x509.ParseCertificate(b.Bytes); err != nil {
+				return fmt.Errorf("initd: network: CA: %w", err)
+			}
+			certs++
+		}
+		if certs == 0 || strings.TrimSpace(string(rest)) != "" {
+			return fmt.Errorf("initd: network: CA is not a PEM certificate bundle")
+		}
+	}
+	return nil
+}
+
+// broadcast is p's last address (p IPv4).
+func broadcast(p netip.Prefix) netip.Addr {
+	a := p.Masked().Addr().As4()
+	for i := p.Bits(); i < 32; i++ {
+		a[i/8] |= 0x80 >> (i % 8)
+	}
+	return netip.AddrFrom4(a)
 }

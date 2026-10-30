@@ -36,6 +36,8 @@ type Manifest struct {
 	// Platform is the producing host's.
 	Platform vmm.Platform `json:"platform"`
 	Arch     string       `json:"arch"`
+	// Network is the link a MEMORY snapshot's VM ran on (Config.Network): its memory keeps the address.
+	Network *initd.Network `json:"network,omitempty"`
 }
 
 func marshalPlan(p *initd.Plan) ([]byte, error) {

@@ -132,3 +132,13 @@ func serial() *big.Int {
 	}
 	return n
 }
+
+// KeyPEM is the CA's private key (PKCS#8 PEM), for a herd-egress that keeps its CA across restarts: a guest booted
+// before a restart trusts only the CA it was given.
+func (c *CA) KeyPEM() ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(c.key)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}

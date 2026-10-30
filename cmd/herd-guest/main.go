@@ -1,8 +1,10 @@
 // Command herd-guest is the microVM's init and agent (spec herd.md R5, ADR 0001 A-7: it is /init of the guest
-// initramfs). As PID 1 it mounts the guest's pseudo filesystems and the virtio-fs share, creates the DurableDir
-// volumes, starts the template's containers with crun, and serves agent-substrate/env's ProcessService and
-// FileSystemService (plus herd's FileInfoService) over vsock. The same binary is bound into every container, where
-// it runs as the container's init (cinit), as the detached-exec shim (shim) and as the signal helper (signal).
+// initramfs). As PID 1 it mounts the guest's pseudo filesystems and the virtio-fs share, configures the VM's
+// network link to herd-egress from the plan (address, default route, resolver and CA for the containers), creates
+// the DurableDir volumes, starts the template's containers with crun, and serves agent-substrate/env's
+// ProcessService and FileSystemService (plus herd's FileInfoService) over vsock. The same binary is bound into every
+// container, where it runs as the container's init (cinit), as the detached-exec shim (shim) and as the signal
+// helper (signal).
 //
 //	herd-guest [serve] [-listen vsock://:8080] [-share-tag herd]     PID 1 of the microVM
 //	herd-guest serve -local <dir> [-listen unix:///path]              no VM: one local "container" rooted at dir
@@ -95,9 +97,18 @@ func serve(args []string) error {
 			return err
 		}
 		rt := &oci.Crun{Runner: reapedRunner}
-		log.Printf("herd-guest: booting: share %q, then volumes and containers", *shareTag)
-		_, booted, err := initd.Boot(ctx, m, rt, initd.DefaultLayout, *shareTag)
+		log.Printf("herd-guest: booting: share %q, then network, volumes and containers", *shareTag)
+		_, booted, err := initd.Boot(ctx, m, initd.KernelNetlinker{}, rt, initd.DefaultLayout, *shareTag)
 		if err != nil {
+			// The host reads why from the share and fails the boot at once (machine.ErrGuestBoot); the VM ends rather
+			// than leave the host waiting for a guest that will never answer.
+			log.Printf("herd-guest: boot failed: %v", err)
+			if werr := initd.WriteBootError(initd.DefaultLayout, err); werr != nil {
+				log.Printf("herd-guest: recording the boot failure in the share: %v", werr)
+			}
+			if eerr := endVM(); eerr != nil {
+				log.Printf("herd-guest: ending the VM: %v", eerr)
+			}
 			return err
 		}
 		log.Printf("herd-guest: %d container(s) started", len(booted))

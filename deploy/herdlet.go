@@ -18,6 +18,8 @@ import (
 
 	"github.com/everdict/herd/apiserver"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/egress/nft"
+	"github.com/everdict/herd/egress/tapnet"
 	"github.com/everdict/herd/herdlet"
 	"github.com/everdict/herd/herdlet/machine"
 	"github.com/everdict/herd/image"
@@ -72,11 +74,23 @@ type Herdlet struct {
 	// On a Linux host that runs herd-egress apart, give herd-egress the same flag.
 	EgressAllow list
 
+	// EgressBindings, EgressCA, EgressProxyPort, EgressDNSPort and NetPool are a Linux host's VM networks (ADR A-18,
+	// linuxNet): herd-egress's bindings file and CA, its transparent and DNS ports, and the pool VM links are leased from.
+	EgressBindings  string
+	EgressCA        string
+	EgressProxyPort uint
+	EgressDNSPort   uint
+	NetPool         string
+	HostFirewall    string
+
 	// VMM and Guests, if set, replace the host's hypervisor (tests run the fake here); Images, if set with them,
 	// gives the herdlet machines over that VMM, as the real host has.
 	VMM    vmm.VMM
 	Guests herdlet.GuestDialer
 	Images machine.Images
+	// NetHost, if set with VMM, gives the VMs a Linux host's networks (linuxNet) through it in place of ip(8) and
+	// nft(8): tests run a fake, so leases, bindings and teardown are the host's own.
+	NetHost nft.Host
 	// OnActor, if set with VMM, is told which actor a VM is before its boot or restore, as a Mac's in-process herd-egress
 	// is (Backend.OnActor): tests give the fake's VMs a network served under the actor's egress policy.
 	OnActor func(vm string, a link.ActorRef)
@@ -103,6 +117,12 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Virtiofsd, "virtiofsd", "/usr/libexec/virtiofsd", "virtiofsd binary (Linux)")
 	fs.StringVar(&h.VirtiofsdArgs, "virtiofsd-args", "", "extra virtiofsd arguments, space-separated (Linux)")
 	fs.StringVar(&h.MacHost, "host", "", "this Mac's label for its MEMORY restore family (macOS; default: the hostname)")
+	fs.StringVar(&h.EgressBindings, "egress-bindings", DefaultEgressBindings, "herd-egress's bindings file (its -bindings): the herdlet binds each VM's address to its actor there (Linux)")
+	fs.StringVar(&h.EgressCA, "egress-ca", "", "herd-egress's CA certificate (its -ca-out) the guests trust (Linux; default <state>/egress-ca.pem)")
+	fs.UintVar(&h.EgressProxyPort, "egress-proxy-port", 15001, "herd-egress's transparent TCP port each VM's table redirects to (Linux)")
+	fs.UintVar(&h.EgressDNSPort, "egress-dns-port", 15053, "herd-egress's DNS port each VM's table redirects UDP 53 to (Linux)")
+	fs.StringVar(&h.NetPool, "net-pool", tapnet.DefaultPool.String(), "IPv4 pool each VM's /30 link is leased from (Linux)")
+	fs.StringVar(&h.HostFirewall, "host-firewall", tapnet.FirewallInsert, "when another table's input chain drops by policy (ufw, Tailscale): insert each VM's accepts for exactly its flows to herd-egress there and remove them with the VM, or refuse to start VMs (Linux: insert|refuse)")
 	fs.Var(&h.EgressAllow, "egress-allow-prefix", egressAllowUsage)
 }
 
@@ -272,6 +292,8 @@ type Backend struct {
 	// ends. Nil on Linux, whose herd-egress is its own process.
 	OnActor func(vm string, a link.ActorRef)
 	Serve   func(ctx context.Context, policies grpc.ClientConnInterface)
+	// Network gives each VM its link (machine.Network): TAPs on Linux, the stack's fixed link on a Mac.
+	Network machine.Network
 }
 
 // build makes the host's backend and the machines that turn templates into VMs on it: the image cache (OCI
@@ -282,10 +304,17 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 	shares := filepath.Join(h.StateDir, "shares")
 	if h.VMM != nil {
 		host := Backend{VMM: h.VMM, Guests: h.Guests, OnActor: h.OnActor}
+		if h.NetHost != nil {
+			n, err := h.linuxNet(h.NetHost)
+			if err != nil {
+				return Backend{}, nil, "", err
+			}
+			host.Network, host.OnActor = n, assign(n, h.OnActor)
+		}
 		if h.Images == nil {
 			return host, nil, "given", nil
 		}
-		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, Flush: h.flusher(h.Guests), ShareDir: shares, Images: h.Images, Base: base})
+		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, Flush: h.flusher(h.Guests), ShareDir: shares, Images: h.Images, Base: base, Network: host.Network})
 		return host, m, "given", err
 	}
 	host, err := h.newHost(ctx)
@@ -302,6 +331,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 	}
 	m, err := machine.New(machine.Config{
 		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), ShareDir: shares,
+		Network: host.Network,
 		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: &registry.Client{}, Builder: builder,
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}},
 		Base: base,

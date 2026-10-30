@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/everdict/herd/guest/oci"
 )
@@ -24,10 +27,15 @@ type Layout struct {
 	RunDir string
 	// GuestBinary is herd-guest's own path (/init).
 	GuestBinary string
+	// SysClassNet is sysfs's list of network interfaces (SysClassNet), where the plan's NIC is found by MAC.
+	SysClassNet string
+	// ProbeDNS, if set, is asked once the network is up for a name through the plan's first resolver; its answer is
+	// logged, never fatal (DefaultLayout: the real query, so the console shows whether herd-egress's DNS answers).
+	ProbeDNS func(server, name string, d time.Duration) (netip.Addr, error)
 }
 
 // DefaultLayout is the initramfs's layout.
-var DefaultLayout = Layout{ShareDir: "/mnt/volumes", RunDir: "/run/herd", GuestBinary: "/init"}
+var DefaultLayout = Layout{ShareDir: "/mnt/volumes", RunDir: "/run/herd", GuestBinary: "/init", SysClassNet: SysClassNet, ProbeDNS: ProbeDNS}
 
 // Booted is a started container.
 type Booted struct {
@@ -124,7 +132,7 @@ func Containers(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, p *Pla
 	}
 	var booted []Booted
 	for _, c := range p.Containers {
-		b, err := prepare(m, l, c, vols)
+		b, err := prepare(m, l, c, vols, p.Network)
 		if err != nil {
 			return booted, err
 		}
@@ -137,7 +145,8 @@ func Containers(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, p *Pla
 }
 
 // prepare mounts the container's image read-only, puts a writable overlay on top, and writes its config.json.
-func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, error) {
+// With a network, the container also gets the guest's resolver and herd-egress's CA in its trust bundles (netFiles).
+func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Network) (Booted, error) {
 	dir := filepath.Join(l.RunDir, "containers", c.Name)
 	lower, upper, work := filepath.Join(dir, "image"), filepath.Join(dir, "upper"), filepath.Join(dir, "work")
 	rootfs := filepath.Join(dir, "rootfs")
@@ -164,6 +173,11 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 	for _, vm := range c.VolumeMounts {
 		cfg.Volumes = append(cfg.Volumes, oci.VolumeMount{Source: mounted[vm.MountPath], Destination: vm.MountPath, ReadOnly: vm.ReadOnly})
 	}
+	files, err := netFiles(l, n, rootfs, dir)
+	if err != nil {
+		return Booted{}, fmt.Errorf("initd: container %q: %w", c.Name, err)
+	}
+	cfg.Files = files
 	spec, err := oci.Build(cfg)
 	if err != nil {
 		return Booted{}, err
@@ -188,14 +202,35 @@ func (c Container) Mounts(vols map[string]string) map[string]string {
 	return out
 }
 
-// Boot runs the whole sequence after the pseudo filesystems: share, plan, volumes, containers.
-func Boot(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, shareTag string) (*Plan, []Booted, error) {
+// Boot runs the whole sequence after the pseudo filesystems: share, plan, network (if the plan has one, through nl,
+// with the guest files the containers are given), volumes, containers.
+func Boot(ctx context.Context, m Mounter, nl Netlinker, rt oci.Runtime, l Layout, shareTag string) (*Plan, []Booted, error) {
 	if err := MountShare(m, l, shareTag); err != nil {
 		return nil, nil, err
 	}
 	p, err := ReadPlan(l)
 	if err != nil {
 		return nil, nil, err
+	}
+	if p.Network != nil {
+		sys := l.SysClassNet
+		if sys == "" {
+			sys = SysClassNet
+		}
+		if err := ConfigureNetwork(nl, sys, p.Network); err != nil {
+			return p, nil, err
+		}
+		if err := WriteNetFiles(l, p.Network); err != nil {
+			return p, nil, err
+		}
+		if l.ProbeDNS != nil && len(p.Network.DNS) > 0 {
+			start := time.Now()
+			if a, err := l.ProbeDNS(p.Network.DNS[0], "herd-guest.probe", 2*time.Second); err != nil {
+				log.Printf("herd-guest: network: DNS probe via %s: %v: names will not resolve in the containers", p.Network.DNS[0], err)
+			} else {
+				log.Printf("herd-guest: network: DNS probe via %s answered %s in %v", p.Network.DNS[0], a, time.Since(start).Round(time.Millisecond))
+			}
+		}
 	}
 	vols, err := Volumes(l, p)
 	if err != nil {
@@ -208,4 +243,33 @@ func Boot(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, shareTag str
 // Target is the started container as herd-guest's API serves it, with its volumes where the container sees them.
 func (b Booted) Target(rt oci.Runtime) *oci.Target {
 	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes}
+}
+
+// BootErrorPath is where herd-guest leaves, relative to the share, why its boot failed, before it ends the VM: the
+// host reads it (machine.Machines) and fails the boot with the reason at once, instead of waiting for a guest that
+// will never answer.
+const BootErrorPath = ".herd/boot-error"
+
+// WriteBootError records err at BootErrorPath in the share, synced, so the host sees it once the VM has ended.
+func WriteBootError(l Layout, err error) error {
+	root, rerr := os.OpenRoot(l.ShareDir)
+	if rerr != nil {
+		return fmt.Errorf("initd: %w", rerr)
+	}
+	defer root.Close()
+	if rerr := root.MkdirAll(filepath.Dir(BootErrorPath), 0o755); rerr != nil {
+		return fmt.Errorf("initd: %w", rerr)
+	}
+	f, rerr := root.OpenFile(BootErrorPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if rerr != nil {
+		return fmt.Errorf("initd: %w", rerr)
+	}
+	_, rerr = f.WriteString(err.Error() + "\n")
+	if rerr == nil {
+		rerr = f.Sync()
+	}
+	if cerr := f.Close(); rerr == nil {
+		rerr = cerr
+	}
+	return rerr
 }

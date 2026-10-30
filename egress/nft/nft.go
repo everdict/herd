@@ -224,3 +224,31 @@ func Remove(ctx context.Context, h Host, v VM) error {
 	}
 	return first
 }
+
+// Present reports whether the VM's TAP and its table exist on the host, as ip(8) and nft(8) answer: a command that
+// fails saying the object does not exist is an absent answer; any other failure is no answer (the error).
+func Present(ctx context.Context, h Host, v VM) (tap, table bool, err error) {
+	if err := v.validate(); err != nil {
+		return false, false, err
+	}
+	tap, err = present(ctx, h, Command{Name: "ip", Args: []string{"link", "show", "dev", v.TAP}}, "does not exist")
+	if err != nil {
+		return false, false, err
+	}
+	table, err = present(ctx, h, Command{Name: "nft", Args: []string{"list", "table", "inet", v.Table()}}, "No such file or directory")
+	if err != nil {
+		return tap, false, err
+	}
+	return tap, table, nil
+}
+
+func present(ctx context.Context, h Host, c Command, absent string) (bool, error) {
+	out, err := h.Run(ctx, c)
+	switch {
+	case err == nil:
+		return true, nil
+	case strings.Contains(string(out), absent) || strings.Contains(err.Error(), absent):
+		return false, nil
+	}
+	return false, fmt.Errorf("nft: %s: %w", c, err)
+}

@@ -23,10 +23,13 @@ func (f *fakeMounter) Mount(source, target, fstype string, _ uintptr, _ string) 
 }
 
 // fakeRuntime checks, at the moment a container starts, that every bind mount in its spec is a directory that
-// already exists inside the share, and records the order of events.
+// already exists inside the share (or, for a guest file under the run dir, a regular file there), and records the
+// order of events.
 type fakeRuntime struct {
 	t      *testing.T
 	share  string
+	run    string
+	net    *fakeNet
 	events []string
 	specs  map[string]*oci.Spec
 }
@@ -41,6 +44,12 @@ func (f *fakeRuntime) Run(_ context.Context, id, bundle string) error {
 		f.t.Fatal(err)
 	}
 	for _, m := range s.Mounts {
+		if m.Type == "bind" && strings.HasPrefix(m.Source, f.run+"/") {
+			if fi, err := os.Stat(m.Source); err != nil || !fi.Mode().IsRegular() {
+				f.t.Errorf("container %s binds guest file %s, which is not a file: %v", id, m.Source, err)
+			}
+			continue
+		}
 		if m.Type != "bind" || m.Destination == oci.GuestBinary {
 			continue
 		}
@@ -84,7 +93,8 @@ const planJSON = `{
 func layout(t *testing.T) initd.Layout {
 	t.Helper()
 	d := t.TempDir()
-	l := initd.Layout{ShareDir: filepath.Join(d, "share"), RunDir: filepath.Join(d, "run"), GuestBinary: "/init"}
+	l := initd.Layout{ShareDir: filepath.Join(d, "share"), RunDir: filepath.Join(d, "run"), GuestBinary: "/init",
+		SysClassNet: sysNet(t, map[string]string{"lo": "00:00:00:00:00:00", "eth0": "52:54:00:12:34:56"})}
 	if err := os.MkdirAll(filepath.Join(l.ShareDir, ".herd"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +106,9 @@ func boot(t *testing.T, l initd.Layout, plan string) (*fakeMounter, *fakeRuntime
 	if err := os.WriteFile(filepath.Join(l.ShareDir, initd.PlanPath), []byte(plan), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m, rt := &fakeMounter{}, &fakeRuntime{t: t, share: l.ShareDir}
-	_, booted, err := initd.Boot(context.Background(), m, rt, l, "herd")
+	m, rt := &fakeMounter{}, &fakeRuntime{t: t, share: l.ShareDir, run: l.RunDir}
+	rt.net = &fakeNet{events: &rt.events}
+	_, booted, err := initd.Boot(context.Background(), m, rt.net, rt, l, "herd")
 	return m, rt, booted, err
 }
 

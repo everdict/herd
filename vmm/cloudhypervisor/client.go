@@ -131,6 +131,7 @@ type vmConfig struct {
 	Memory  memoryConfig   `json:"memory"`
 	Disks   []diskConfig   `json:"disks,omitempty"`
 	Fs      []fsConfig     `json:"fs,omitempty"`
+	Net     []netConfig    `json:"net,omitempty"`
 	Vsock   *vsockConfig   `json:"vsock,omitempty"`
 	Serial  *consoleConfig `json:"serial,omitempty"`
 	Console *consoleConfig `json:"console,omitempty"`
@@ -165,6 +166,13 @@ type fsConfig struct {
 	Socket    string `json:"socket"`
 	NumQueues int    `json:"num_queues"`
 	QueueSize int    `json:"queue_size"`
+}
+
+// netConfig is a virtio-net device on an existing TAP (--net tap=<tap>,mac=<mac>). No ip or mask: the host side
+// of the TAP is herdlet's (egress/tapnet), configured before the VMM starts.
+type netConfig struct {
+	Tap string `json:"tap"`
+	MAC string `json:"mac"`
 }
 
 type vsockConfig struct {

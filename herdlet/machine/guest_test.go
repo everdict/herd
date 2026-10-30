@@ -84,7 +84,7 @@ func TestGuestBootsTheHerdletShare(t *testing.T) {
 func guestOn(t *testing.T, m *Machines, id string) *agent.Guest {
 	t.Helper()
 	l := initd.Layout{ShareDir: m.ShareDir(id), RunDir: t.TempDir(), GuestBinary: "/init"}
-	_, booted, err := initd.Boot(context.Background(), noMounts{}, &runs{}, l, ShareTag)
+	_, booted, err := initd.Boot(context.Background(), noMounts{}, nil, &runs{}, l, ShareTag)
 	if err != nil {
 		t.Fatal(err)
 	}

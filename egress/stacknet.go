@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/netip"
 	"os"
 	"sync"
@@ -136,4 +137,14 @@ func (n *StackNetwork) Dropped(vm string) int64 {
 		return v.stack.Dropped()
 	}
 	return 0
+}
+
+// StackMAC is the MAC address of VM vm's NIC on a macOS host: locally administered (02:68:76, "hv"), from the VM's
+// id, so the hypervisor that attaches the NIC (vz.Config.NetworkMAC) and herd-guest's plan, which finds the NIC by
+// it, agree without telling each other, also for a VM restored under its id.
+func StackMAC(vm string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(vm))
+	s := h.Sum32()
+	return fmt.Sprintf("02:68:76:%02x:%02x:%02x", byte(s>>16), byte(s>>8), byte(s))
 }

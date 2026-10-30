@@ -61,7 +61,7 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	a.Herdlet.HostFlags(hf)
 	hf.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "state", "snapshots", "router":
+		case "state", "snapshots", "router", "egress-bindings", "egress-ca", "egress-proxy-port", "egress-dns-port":
 			return
 		}
 		fs.Var(f.Value, f.Name, f.Usage)
@@ -143,6 +143,10 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 	h := a.Herdlet
 	h.API, h.Token, h.TokenFile = addrs.API, tok, ""
 	h.StateDir, h.Snapshots, h.Router, h.CredentialFile, h.JoinOnly = filepath.Join(a.Data, "herdlet"), snapDir, "", "", false
+	// The herdlet binds its VMs in this herd-egress's bindings file and gives the guests its CA, which is kept in the
+	// data directory so a restart keeps the CA the guests trust.
+	caCert, caKey := filepath.Join(a.Data, "egress-ca.pem"), filepath.Join(a.Data, "egress-ca.key")
+	h.EgressBindings, h.EgressCA = filepath.Join(a.Data, "egress-bindings.json"), caCert
 	if a.S3 != "" {
 		// The herdlet uses the store its join hands it, as every other host does.
 		h.Snapshots = ""
@@ -165,8 +169,12 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		}
 		closers = append(closers, pc.Close)
 		addrs.Egress, addrs.DNS = eln.Addr().String(), pc.LocalAddr().String()
-		eg := &Egress{API: addrs.API, Token: st.Grant.EgressCredential, Bindings: filepath.Join(a.Data, "egress-bindings.json"),
-			CAOut: filepath.Join(a.Data, "egress-ca.pem"), DNSAnswer: "198.18.0.1", Interval: time.Second,
+		h.EgressProxyPort, h.EgressDNSPort = uint(eln.Addr().(*net.TCPAddr).Port), uint(pc.LocalAddr().(*net.UDPAddr).Port)
+		if err := ensureCA(caCert, caKey); err != nil {
+			return fmt.Errorf("herd-egress CA: %w", err)
+		}
+		eg := &Egress{API: addrs.API, Token: st.Grant.EgressCredential, Bindings: h.EgressBindings,
+			CACert: caCert, CAKey: caKey, DNSAnswer: "198.18.0.1", Interval: time.Second,
 			Secrets: a.Secrets, AllowPrefixes: h.EgressAllow, NewGateway: a.NewGateway}
 		start("herd-egress", func() error { return eg.Run(ctx, eln, pc) })
 	}

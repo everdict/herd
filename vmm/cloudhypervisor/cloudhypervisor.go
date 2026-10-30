@@ -303,6 +303,11 @@ func (v *VMM) vmConfig(spec vmm.Spec, dir string) vmConfig {
 	for _, s := range spec.Shares {
 		c.Fs = append(c.Fs, fsConfig{Tag: s.Tag, Socket: fsSocket(dir, s.Tag), NumQueues: 1, QueueSize: 1024})
 	}
+	if spec.NIC != nil {
+		// The TAP and its egress table exist already (herdlet's, ADR A-18). A MEMORY restore re-opens the TAP the
+		// snapshot's config names, so the restoring host re-creates the same one first.
+		c.Net = []netConfig{{Tap: spec.NIC.TAP, MAC: spec.NIC.MAC}}
+	}
 	return c
 }
 

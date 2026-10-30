@@ -101,6 +101,12 @@ func (a *Agent) checkExit(ctx context.Context, o vmm.ExitObserver, vm string, bo
 	if err != nil || !exited {
 		return
 	}
+	if a.Machines != nil {
+		// herd-guest left why its boot failed (a Cloud Hypervisor boot answers before the guest runs).
+		if gerr := a.Machines.GuestBootError(vm); gerr != nil {
+			why = gerr.Error() + "; " + why
+		}
+	}
 	name := vm
 	if id != vm {
 		name += " (hypervisor id " + id + ")"

@@ -39,6 +39,8 @@ type Config struct {
 	// ReleaseNetwork, if set, is called once a VM is verified stopped, so its stack and egress binding go too
 	// (egress.StackNetwork.Release).
 	ReleaseNetwork func(id string)
+	// NetworkMAC, if set, gives VM id's NIC its MAC (egress.StackMAC), which herd-guest's plan names too.
+	NetworkMAC func(id string) string
 	// StopSettle bounds how long Delete waits, after Virtualization.framework accepted a stop, to observe the VM
 	// stopped; zero means 2 s. A VM still running after it is present with vmm.ErrDeleteNotVerified.
 	StopSettle time.Duration
@@ -160,6 +162,9 @@ func (v *VMM) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
 	if err := spec.Validate(); err != nil {
 		return vmm.VM{}, err
 	}
+	if err := noTAP(spec); err != nil {
+		return vmm.VM{}, err
+	}
 	inst, err := v.reserve(spec.ID)
 	if err != nil {
 		return vmm.VM{}, err
@@ -174,7 +179,8 @@ func machineConfig(spec vmm.Spec) MachineConfig {
 	mc := MachineConfig{Kernel: spec.Kernel, Initrd: spec.Initrd, Cmdline: spec.Cmdline, VCPUs: spec.VCPUs,
 		MemoryMiB: spec.MemoryMiB, Shares: append([]vmm.Share(nil), spec.Shares...)}
 	if mc.Cmdline == "" {
-		mc.Cmdline = "console=hvc0"
+		// panic=-1: a guest that cannot boot ends its VM at once, as on Cloud Hypervisor, instead of hanging it.
+		mc.Cmdline = "console=hvc0 panic=-1"
 	}
 	for _, r := range spec.Rootfs {
 		// Images are read-only; the guest puts an overlay on tmpfs on top (ADR A-10).
@@ -219,6 +225,9 @@ func (v *VMM) start(ctx context.Context, inst *instance, spec vmm.Spec, mc Machi
 			return fmt.Errorf("vz: %s: network: %w", inst.id, err)
 		}
 		inst.network, mc.Network = f, f
+		if v.cfg.NetworkMAC != nil {
+			mc.NetworkMAC = v.cfg.NetworkMAC(inst.id)
+		}
 	}
 	m, err := callValue(ctx, "new machine", func() (Machine, error) { return v.hv.NewMachine(mc) })
 	if err != nil {
@@ -602,6 +611,9 @@ func (v *VMM) Restore(ctx context.Context, s vmm.Snapshot, spec vmm.Spec) (vmm.V
 	if err := spec.Validate(); err != nil {
 		return vmm.VM{}, err
 	}
+	if err := noTAP(spec); err != nil {
+		return vmm.VM{}, err
+	}
 	rec, err := v.readRecord(s)
 	if err != nil {
 		return vmm.VM{}, err
@@ -722,4 +734,12 @@ func syncTree(ctx context.Context, root string) error {
 		}
 		return syncFile(path)
 	})
+}
+
+// noTAP refuses a spec with a TAP NIC: a Mac's VM network is the file-handle attachment Config.Network gives it.
+func noTAP(spec vmm.Spec) error {
+	if spec.NIC != nil {
+		return fmt.Errorf("%w: vz has no TAP devices (tap %q); a VM's network is Config.Network's", vmm.ErrInvalidSpec, spec.NIC.TAP)
+	}
+	return nil
 }

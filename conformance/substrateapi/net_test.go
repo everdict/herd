@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -129,13 +128,12 @@ func (dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, 
 // secrets (newAllInOneVMNet), the gateway is the all-in-one's own herd-egress and the actors are bound through its
 // bindings file.
 type vmNet struct {
-	t        *testing.T
-	ctx      context.Context
-	bypass   bool
-	bin      string
-	self     string
-	secrets  string
-	bindings string
+	t       *testing.T
+	ctx     context.Context
+	bypass  bool
+	bin     string
+	self    string
+	secrets string
 	// allow is the all-in-one's -egress-allow-prefix.
 	allow []string
 
@@ -143,7 +141,6 @@ type vmNet struct {
 	gw     *egress.Gateway
 	actors map[string]egress.Actor
 	lns    map[string]string
-	bound  []map[string]string
 }
 
 const secretURI, secret = "ate-secret://dir/conformance/token", "s3cr3t-conformance-credential"
@@ -187,8 +184,9 @@ func vmNetBase(t *testing.T) *vmNet {
 // newAllInOneVMNet is the VMs' network through the all-in-one's own herd-egress: startAllInOneWith runs it with
 // -secrets set to a directory holding the suite's credential as conformance/token, and its gateway (NewGateway)
 // keeps everything the all-in-one configured (credentials, CA, Guard) but this test's resolver and dialer. Its
-// policies come from herd-api as herd-egress reads them, and an actor is bound through herd-egress's bindings file
-// as a herdlet binds a VM's TAP address.
+// policies come from herd-api as herd-egress reads them, and an actor is bound in herd-egress's bindings file by the
+// herdlet itself, as on a Linux host: its VMs lease TAP links through a fake ip(8) and nft(8) (nfttest), and the
+// herdlet binds each VM's address to its actor.
 func newAllInOneVMNet(t *testing.T) *vmNet {
 	t.Helper()
 	n := vmNetBase(t)
@@ -236,24 +234,11 @@ func (n *vmNet) OnActor(vm string, a link.ActorRef) {
 	ea := egress.Actor{Space: a.Space, Name: a.Name, UID: a.UID}
 	n.mu.Lock()
 	n.actors[vm] = ea
-	if n.bindings != "" {
-		// herd-egress re-reads its bindings file every interval and unbinds whoever is not in it.
-		n.bound = append(n.bound, map[string]string{"space": a.Space, "name": a.Name, "uid": a.UID,
-			"source": fmt.Sprintf("10.88.%d.%d", len(n.bound)/64, len(n.bound)%64*4+2)})
-		b, err := json.Marshal(n.bound)
-		if err == nil {
-			err = os.WriteFile(n.bindings+".tmp", b, 0o600)
-		}
-		if err == nil {
-			err = os.Rename(n.bindings+".tmp", n.bindings)
-		}
-		if err != nil {
-			n.t.Errorf("egress bindings: %v", err)
-		}
-	}
-	gw := n.gw
+	gw, own := n.gw, n.secrets == ""
 	n.mu.Unlock()
-	gw.Bind(ea)
+	if own {
+		gw.Bind(ea)
+	}
 }
 
 // ShimFor is the fake guest's per-VM shim: the netshim with the VM's proxy.

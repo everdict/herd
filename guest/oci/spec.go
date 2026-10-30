@@ -1,6 +1,7 @@
 // Package oci runs the template's containers. Runtime is the boundary; Crun drives the crun binary in the guest
 // initramfs. Spec writes the OCI runtime spec (config.json) of one container: its rootfs, the guest's pseudo
-// filesystems, its DurableDir volumes as bind mounts of subdirectories of the virtio-fs share, and herd-guest itself
+// filesystems, its DurableDir volumes as bind mounts of subdirectories of the virtio-fs share, the guest files it is
+// given (resolv.conf, trust bundles with herd-egress's CA) as read-only binds, and herd-guest itself
 // at /.herd/herd-guest (read-only) so the container's init, the exec shim and the signal helper run inside it.
 package oci
 
@@ -64,6 +65,13 @@ type VolumeMount struct {
 	ReadOnly    bool
 }
 
+// FileMount is one guest file bound read-only (nosuid, nodev) at Destination in the container; both paths are clean
+// and absolute.
+type FileMount struct {
+	Source      string
+	Destination string
+}
+
 // Config is what Build needs for one container.
 type Config struct {
 	Name     string
@@ -73,9 +81,14 @@ type Config struct {
 	Cwd      string
 	ShareDir string
 	Volumes  []VolumeMount
+	// Files are guest files bound read-only into the container (its resolv.conf and trust bundles).
+	Files []FileMount
 	// GuestBinary is herd-guest's path in the guest, bound at GuestBinary in the container.
 	GuestBinary string
 }
+
+// cleanAbs reports whether p is absolute, clean and not "/".
+func cleanAbs(p string) bool { return path.IsAbs(p) && path.Clean(p) == p && p != "/" }
 
 // within reports whether p is dir or below it (both clean and absolute).
 func within(p, dir string) bool {
@@ -142,6 +155,16 @@ func Build(c Config) (*Spec, error) {
 			opts = append(opts, "ro")
 		}
 		s.Mounts = append(s.Mounts, Mount{Destination: v.Destination, Type: "bind", Source: src, Options: opts})
+	}
+	for _, f := range c.Files {
+		if !cleanAbs(f.Source) || !cleanAbs(f.Destination) || within(f.Destination, "/.herd") {
+			return nil, fmt.Errorf("oci: container %q: file mount %q at %q needs clean absolute paths", c.Name, f.Source, f.Destination)
+		}
+		if seen[f.Destination] {
+			return nil, fmt.Errorf("oci: container %q: two mounts at %s", c.Name, f.Destination)
+		}
+		seen[f.Destination] = true
+		s.Mounts = append(s.Mounts, Mount{Destination: f.Destination, Type: "bind", Source: f.Source, Options: []string{"bind", "ro", "nosuid", "nodev"}})
 	}
 	return s, nil
 }

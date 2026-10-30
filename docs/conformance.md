@@ -273,8 +273,8 @@ and the test binary is the guest's `wget`), the gateway's policies come from her
 herd-egress reads them, and its resolver maps `listed.test`/`echo.test` to TEST-NET-3 addresses that its dialer
 reaches on loopback, so its Guard is the real host's. `TestCredentialHeaderThroughAllInOneEgress` runs the egress walk and the
 credential header through the all-in-one's own herd-egress instead, started with `-secrets` (only its resolver
-and dialer are the test's, and the test binds each actor through herd-egress's bindings file); without the directory
+and dialer are the test's; the herdlet leases each VM a TAP link through a fake ip(8)/nft(8) and binds the VM's address to its actor in herd-egress's bindings file itself, as on a Linux host); without the directory
 handed to herd-egress the credential header is red (the gateway refuses the request whose credential it cannot
-resolve). The join run adds `two-containers` with the VOLUMES move. The Nomad mode runs
+resolve). `TestRealHostTAPEgress` (HERD_TAP_REAL=1, root, KVM) runs the same two cases from real Cloud Hypervisor guests on TAPs with real nftables tables; the command is in its doc comment. The join run adds `two-containers` with the VOLUMES move. The Nomad mode runs
 the same binaries as the join mode (dist/nomad), so its run is the join invocation against the Nomad service
 addresses; it needs the supervisor's cluster.

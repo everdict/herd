@@ -371,3 +371,35 @@ func TestDeleteAfterRestart(t *testing.T) {
 		t.Errorf("gone answered with %d processes running", n)
 	}
 }
+
+// TestNICOnBootAndRestore: a spec's NIC reaches Cloud Hypervisor as a net device on the VM's TAP with its MAC, on
+// vm.create and in the config a MEMORY restore re-opens; a spec without one has no net device.
+func TestNICOnBootAndRestore(t *testing.T) {
+	r := newRig(t)
+	v := r.vmm("a", tigerLake)
+	ctx := ctxT(t, 10*time.Second)
+	spec := r.spec("n1")
+	spec.NIC = &vmm.NIC{TAP: "herd7", MAC: "02:68:64:00:00:07"}
+	if _, err := v.Boot(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := v.Snapshot(ctx, "n1", vmm.FidelityMemory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := v.Delete(ctx, "n1"); p != vmm.PresenceGone {
+		t.Fatal(p, err)
+	}
+	if _, err := v.Restore(ctx, snap, spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Boot(ctx, r.spec("n2")); err != nil {
+		t.Fatal(err)
+	}
+	r.host.mu.Lock()
+	got := strings.Join(r.host.nets, "; ")
+	r.host.mu.Unlock()
+	if want := "vm.create tap=herd7,mac=02:68:64:00:00:07; vm.restore tap=herd7,mac=02:68:64:00:00:07"; got != want {
+		t.Errorf("net devices sent to Cloud Hypervisor: %q, want %q", got, want)
+	}
+}

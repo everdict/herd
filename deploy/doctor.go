@@ -88,7 +88,8 @@ func Doctor(h *Herdlet, host Host) []Check {
 		} else {
 			add("kvm", nil, "/dev/kvm")
 		}
-		for _, b := range []struct{ name, path string }{{"cloud-hypervisor", h.CHBinary}, {"virtiofsd", h.Virtiofsd}} {
+		// The hypervisor, virtiofsd, and ip(8) and nft(8), which make each VM's TAP and egress table (ADR A-18).
+		for _, b := range []struct{ name, path string }{{"cloud-hypervisor", h.CHBinary}, {"virtiofsd", h.Virtiofsd}, {"ip", "ip"}, {"nft", "nft"}} {
 			p, err := host.LookPath(b.path)
 			if err != nil {
 				err = fmt.Errorf("%s not found (%v): install it or pass its path", b.path, err)

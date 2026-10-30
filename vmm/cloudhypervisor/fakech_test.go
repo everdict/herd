@@ -36,6 +36,7 @@ type fakeHost struct {
 	calls          []string
 	starts         []string
 	cmdlines       []string // the payload command line of every accepted vm.create
+	nets           []string // the net devices of every accepted vm.create and vm.restore, "<endpoint> tap=<tap>,mac=<mac>"
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -258,6 +259,7 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.config, c.state = &cfg, "created"
 		c.h.mu.Lock()
 		c.h.cmdlines = append(c.h.cmdlines, cfg.Payload.Cmdline)
+		c.h.recordNets(epCreate, cfg.Net)
 		c.h.mu.Unlock()
 	case epBoot:
 		if c.state != "created" {
@@ -328,6 +330,9 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusBadRequest, err.Error())
 			return
 		}
+		c.h.mu.Lock()
+		c.h.recordNets(epRestore, cfg.Net)
+		c.h.mu.Unlock()
 		c.config, c.state = &cfg, "paused"
 		if rc.Resume {
 			c.state = "running"
@@ -423,3 +428,10 @@ func (f *faultyVMM) LeaveOnDelete() {
 }
 
 func (f *faultyVMM) Clear() { f.h.clear() }
+
+// recordNets records a VM's net devices; the caller holds h.mu.
+func (h *fakeHost) recordNets(ep string, nets []netConfig) {
+	for _, n := range nets {
+		h.nets = append(h.nets, fmt.Sprintf("%s tap=%s,mac=%s", ep, n.Tap, n.MAC))
+	}
+}

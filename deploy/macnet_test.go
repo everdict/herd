@@ -3,6 +3,8 @@ package deploy
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/netip"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/egress/gvstack/gvvm"
+	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/vz/vzfake"
@@ -54,13 +57,34 @@ func TestMacBackendNetworkIsHerdEgress(t *testing.T) {
 	if nic == nil {
 		t.Fatal("the actor VM has no NIC")
 	}
-	vm, err := gvvm.New(nic, egress.DefaultStackVM, egress.DefaultStackGateway)
+	// The guest configures itself from the plan the herdlet writes (Backend.Network, herd-guest's Plan.Network):
+	// its address, its gateway and its resolver must be the ones the VM's stack serves.
+	plan, pnic, err := be.Network.Lease(ctx, "vm-1", nil)
+	if err != nil || pnic != nil {
+		t.Fatalf("Mac lease: %+v %+v %v, want a plan network and no TAP", plan, pnic, err)
+	}
+	if err := (&initd.Plan{Containers: []initd.Container{{Name: "c", Image: initd.Image{Device: "/dev/vda", FSType: "erofs"}, Command: []string{"x"}}}, Network: &plan}).Validate(); err != nil {
+		t.Fatalf("herd-guest would refuse the Mac plan: %v", err)
+	}
+	if got := ms[len(ms)-1].Config().NetworkMAC; plan.MAC == "" || got != plan.MAC {
+		t.Errorf("the VM's NIC has MAC %q and the plan names %q: herd-guest finds its NIC by the plan's", got, plan.MAC)
+	}
+	addr, err := netip.ParsePrefix(plan.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm, err := gvvm.New(nic, addr.Addr(), netip.MustParseAddr(plan.Gateway))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer vm.Close()
+	if blk, _ := pem.Decode([]byte(plan.CA)); blk == nil {
+		t.Errorf("the Mac plan carries no herd-egress CA: %q", plan.CA)
+	} else if cert, err := x509.ParseCertificate(blk.Bytes); err != nil || !cert.IsCA || cert.Subject.CommonName != "herd-egress mac-1" {
+		t.Errorf("the Mac plan's CA is not this host's gateway CA: %v %v", cert, err)
+	}
 	q := []byte{0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, 'a', 'p', 'i', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0, 1, 0, 1}
-	r, err := vm.Exchange(netip.AddrPortFrom(egress.DefaultStackGateway, 53), q, 5*time.Second)
+	r, err := vm.Exchange(netip.AddrPortFrom(netip.MustParseAddr(plan.DNS[0]), 53), q, 5*time.Second)
 	if err != nil || netip.AddrFrom4([4]byte(r[len(r)-4:])) != egress.DefaultStackGateway {
 		t.Fatalf("DNS from the VM: %x %v", r, err)
 	}

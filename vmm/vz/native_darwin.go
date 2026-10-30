@@ -112,6 +112,17 @@ func (native) NewMachine(cfg MachineConfig) (Machine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("network: %w", err)
 		}
+		if cfg.NetworkMAC != "" {
+			hw, err := net.ParseMAC(cfg.NetworkMAC)
+			if err != nil {
+				return nil, fmt.Errorf("network: mac: %w", err)
+			}
+			mac, err := vzf.NewMACAddress(hw)
+			if err != nil {
+				return nil, fmt.Errorf("network: mac: %w", err)
+			}
+			nic.SetMACAddress(mac)
+		}
 		conf.SetNetworkDevicesVirtualMachineConfiguration([]*vzf.VirtioNetworkDeviceConfiguration{nic})
 	}
 

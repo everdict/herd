@@ -120,7 +120,7 @@ func (e *Egress) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&e.Bindings, "bindings", "", "JSON bindings file (actor and its VM's TAP address)")
 	fs.StringVar(&e.CACert, "ca-cert", "", "gateway CA certificate (PEM); with -ca-key")
 	fs.StringVar(&e.CAKey, "ca-key", "", "gateway CA EC key (PEM)")
-	fs.StringVar(&e.CAOut, "ca-out", "", "without -ca-cert: where to write the generated CA certificate for herdlet to install in guests")
+	fs.StringVar(&e.CAOut, "ca-out", "", "without -ca-cert: where to keep the CA certificate herdlet installs in guests (generated once; its key beside it as <ca-out>.key, so a restart keeps the CA guests trust)")
 	fs.StringVar(&e.Secrets, "secrets", "", "directory for ate-secret://dir/<name>/<tail> credentials")
 	fs.StringVar(&e.JWTKey, "jwt-key", "", "EC P-256 key (PEM) for actor_jwt credentials")
 	fs.StringVar(&e.JWTIssuer, "jwt-issuer", "", "issuer of actor JWTs")
@@ -273,16 +273,13 @@ func loadOrMakeCA(certPath, keyPath, out string) (*egress.CA, error) {
 		}
 		return egress.LoadCA(c, k)
 	}
-	ca, err := egress.NewCA("herd-egress CA")
-	if err != nil {
-		return nil, err
-	}
 	if out != "" {
-		if err := os.WriteFile(out, ca.CertPEM(), 0o644); err != nil {
+		if err := ensureCA(out, out+".key"); err != nil {
 			return nil, err
 		}
+		return loadOrMakeCA(out, out+".key", "")
 	}
-	return ca, nil
+	return egress.NewCA("herd-egress CA")
 }
 
 func loadECKey(path string) (*ecdsa.PrivateKey, error) {
@@ -301,4 +298,27 @@ func loadECKey(path string) (*ecdsa.PrivateKey, error) {
 		return nil, errors.New("not an EC key")
 	}
 	return x509.ParseECPrivateKey(blk.Bytes)
+}
+
+// ensureCA keeps a gateway CA at certPath and keyPath: the one there, or a new one written there (the key 0600), so
+// herd-egress restarts with the CA its guests were given.
+func ensureCA(certPath, keyPath string) error {
+	_, cerr := os.Stat(certPath)
+	_, kerr := os.Stat(keyPath)
+	if cerr == nil && kerr == nil {
+		_, err := loadOrMakeCA(certPath, keyPath, "")
+		return err
+	}
+	ca, err := egress.NewCA("herd-egress CA")
+	if err != nil {
+		return err
+	}
+	key, err := ca.KeyPEM()
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(certPath, ca.CertPEM(), 0o644)
 }

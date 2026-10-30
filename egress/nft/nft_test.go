@@ -159,3 +159,49 @@ func TestApplyOrder(t *testing.T) {
 		t.Errorf("cleanup after failure: %v", tail)
 	}
 }
+
+type cannedHost struct{ out string }
+
+func (c cannedHost) Run(context.Context, nft.Command) ([]byte, error) { return []byte(c.out), nil }
+
+// TestHoleRulesAndHoles: the accepts herd inserts name only the TAP, the host's address and herd-egress's two ports
+// (iptables-nft can show them), and are found again by their comment in "nft -a list ruleset" as nft prints it.
+func TestHoleRulesAndHoles(t *testing.T) {
+	v := vm1()
+	got := strings.Join(nft.HoleRules(v), "\n")
+	want := `iifname "herd-a1b2c3" ip daddr 10.88.0.1 tcp dport 15001 accept comment "herd-egress:herd_a1b2c3"` + "\n" +
+		`iifname "herd-a1b2c3" ip daddr 10.88.0.1 udp dport 15053 accept comment "herd-egress:herd_a1b2c3"`
+	if got != want {
+		t.Errorf("HoleRules:\n%s\nwant:\n%s", got, want)
+	}
+	listed := `table ip filter { # handle 3
+	chain INPUT { # handle 1
+		type filter hook input priority filter; policy drop;
+		iifname "herd-a1b2c3" ip daddr 10.88.0.1 udp dport 15053 counter packets 4 bytes 240 accept comment "herd-egress:herd_a1b2c3" # handle 91
+		iifname "herd-a1b2c3" ip daddr 10.88.0.1 tcp dport 15001 counter packets 0 bytes 0 accept comment "herd-egress:herd_a1b2c3" # handle 90
+		iifname "herd9" ip daddr 10.88.0.37 tcp dport 15001 accept comment "herd-egress:herd_other" # handle 88
+		counter packets 10 bytes 600 jump ufw-before-input # handle 7
+	}
+}
+table inet firewalld { # handle 5
+	chain filter_INPUT { # handle 2
+		type filter hook input priority filter + 10; policy accept;
+		iifname "herd-a1b2c3" ip daddr 10.88.0.1 tcp dport 15001 accept comment "herd-egress:herd_a1b2c3" # handle 12
+	}
+}
+`
+	holes, err := nft.Holes(context.Background(), cannedHost{listed}, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hs []string
+	for _, h := range holes {
+		hs = append(hs, h.Chain.String()+" #"+h.Handle)
+	}
+	if g, w := strings.Join(hs, ", "), "ip filter INPUT #91, ip filter INPUT #90, inet firewalld filter_INPUT #12"; g != w {
+		t.Errorf("Holes = %s, want %s", g, w)
+	}
+	if cs := nft.InputDropChains(listed); len(cs) != 1 || cs[0].String() != "ip filter INPUT" {
+		t.Errorf("InputDropChains = %v", cs)
+	}
+}
