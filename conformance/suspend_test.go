@@ -143,9 +143,18 @@ func TestSuspendUnknownStaysSuspending(t *testing.T) {
 			// Once the herdlet answers, the owed suspend converges.
 			h.VMM.Clear()
 			h.Rewrite(nil)
-			time.Sleep(10 * time.Millisecond)
-			if left, err := e.Server.Reconcile(ctx); err != nil || left != 0 {
-				t.Fatalf("Reconcile = %d owed, %v", left, err)
+			// A herdlet that was silent may still be finishing the timed-out exchange: reconcile until the owed
+			// suspend converges, bounded, instead of after a fixed sleep (which flaked on the bolt store).
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				left, err := e.Server.Reconcile(ctx)
+				if err == nil && left == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("Reconcile = %d owed, %v (still after 3 s)", left, err)
+				}
+				time.Sleep(20 * time.Millisecond)
 			}
 			got, owed = getActor(t, e, "a1")
 			if got.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_SUSPENDED || owed != "" {
