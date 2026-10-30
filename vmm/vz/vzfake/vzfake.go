@@ -58,6 +58,11 @@ type Hypervisor struct {
 	machines []*Machine
 }
 
+var (
+	_ vz.Hypervisor = (*Hypervisor)(nil)
+	_ vz.Machine    = (*Machine)(nil)
+)
+
 // New returns a fake Mac whose machines validate save/restore and whose guest answers at once.
 func New() *Hypervisor {
 	h := &Hypervisor{saveRestoreValid: true}
