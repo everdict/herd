@@ -137,6 +137,9 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The herdlet's snapshot call is bounded by the harness's call timeout; the store's fsyncs would make it depend
+	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
+	snaps.NoSync = true
 	hub := link.NewHub()
 	api, err := apiserver.New(apiserver.Config{Store: memstore.New(), Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{},
 		CallTimeout: 2 * time.Second})

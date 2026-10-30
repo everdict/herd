@@ -79,3 +79,28 @@ func TestFailedPutLeavesNothing(t *testing.T) {
 		t.Errorf("Stat after failed Put: %v", err)
 	}
 }
+
+// A NoSync store (test harnesses) keeps the same contract: what Put answered is what Verify and Open give back.
+func TestNoSyncKeepsTheContract(t *testing.T) {
+	ctx := context.Background()
+	s, err := disk.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.NoSync = true
+	o, err := s.Put(ctx, "s1/a1/1", strings.NewReader("memory"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Verify(ctx, "s1/a1/1", o.Digest); err != nil || got != o {
+		t.Fatalf("Verify = %+v, %v", got, err)
+	}
+	rc, err := s.Open(ctx, "s1/a1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if b, err := io.ReadAll(rc); err != nil || string(b) != "memory" {
+		t.Fatalf("Open = %q, %v", b, err)
+	}
+}

@@ -109,6 +109,9 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The herdlet's snapshot call is bounded by the harness's call timeout; the store's fsyncs would make it depend
+	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
+	snaps.NoSync = true
 	e := &Env{Space: "space-1", Hub: link.NewHub(), Store: NewStore(t), Snapshots: snaps, Key: key,
 		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx}
 	e.Server, err = apiserver.New(apiserver.Config{

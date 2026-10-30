@@ -18,7 +18,12 @@ import (
 )
 
 // Store is a snapstore.Store rooted at a directory.
-type Store struct{ root string }
+type Store struct {
+	root string
+	// NoSync skips the fsyncs, so a Put costs no disk flush. It is for test harnesses whose herdlet call budgets
+	// (hundreds of milliseconds) must not depend on the host disk's fsync latency; a production store never sets it.
+	NoSync bool
+}
 
 // New returns a store rooted at dir, creating it.
 func New(dir string) (*Store, error) {
@@ -44,8 +49,9 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// writeDurable writes r to path via a fsynced temporary file and a rename, then fsyncs the directory.
-func writeDurable(ctx context.Context, path string, r io.Reader) (digest string, size int64, err error) {
+// writeDurable writes r to path via a fsynced temporary file and a rename, then fsyncs the directory (without the
+// fsyncs when s.NoSync).
+func (s *Store) writeDurable(ctx context.Context, path string, r io.Reader) (digest string, size int64, err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", 0, err
@@ -65,8 +71,10 @@ func writeDurable(ctx context.Context, path string, r io.Reader) (digest string,
 	if err != nil {
 		return "", 0, err
 	}
-	if err = tmp.Sync(); err != nil {
-		return "", 0, err
+	if !s.NoSync {
+		if err = tmp.Sync(); err != nil {
+			return "", 0, err
+		}
 	}
 	if err = tmp.Close(); err != nil {
 		return "", 0, err
@@ -74,8 +82,10 @@ func writeDurable(ctx context.Context, path string, r io.Reader) (digest string,
 	if err = os.Rename(tmp.Name(), path); err != nil {
 		return "", 0, err
 	}
-	if err = syncDir(dir); err != nil {
-		return "", 0, err
+	if !s.NoSync {
+		if err = syncDir(dir); err != nil {
+			return "", 0, err
+		}
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), size, nil
 }
@@ -101,11 +111,11 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 	if err := os.Remove(p + ".sha256"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return snapstore.Object{}, fmt.Errorf("snapstore/disk: put %s: %w", key, err)
 	}
-	digest, size, err := writeDurable(ctx, p, r)
+	digest, size, err := s.writeDurable(ctx, p, r)
 	if err != nil {
 		return snapstore.Object{}, fmt.Errorf("snapstore/disk: put %s: %w", key, err)
 	}
-	if _, _, err := writeDurable(ctx, p+".sha256", strings.NewReader(fmt.Sprintf("%s %d\n", digest, size))); err != nil {
+	if _, _, err := s.writeDurable(ctx, p+".sha256", strings.NewReader(fmt.Sprintf("%s %d\n", digest, size))); err != nil {
 		return snapstore.Object{}, fmt.Errorf("snapstore/disk: put %s digest: %w", key, err)
 	}
 	return snapstore.Object{Key: key, Digest: digest, Size: size}, nil
