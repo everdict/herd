@@ -18,6 +18,7 @@ import (
 
 	"github.com/everdict/herd/apiserver"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/egress/nft"
 	"github.com/everdict/herd/egress/tapnet"
 	"github.com/everdict/herd/herdlet"
@@ -73,6 +74,10 @@ type Herdlet struct {
 	// capabilities, a Mac's in-process herd-egress applies them, and herd all-in-one hands them to its herd-egress.
 	// On a Linux host that runs herd-egress apart, give herd-egress the same flag.
 	EgressAllow list
+	// Secrets is a Mac's in-process herd-egress's -secrets (ADR A-21): the directory it resolves
+	// ate-secret://dir/<name>/<tail> credentials from. herd all-in-one hands it its own -secrets. On a Linux host,
+	// whose herd-egress runs apart, give herd-egress the flag.
+	Secrets string
 
 	// EgressBindings, EgressCA, EgressProxyPort, EgressDNSPort and NetPool are a Linux host's VM networks (ADR A-18,
 	// linuxNet): herd-egress's bindings file and CA, its transparent and DNS ports, and the pool VM links are leased from.
@@ -94,6 +99,13 @@ type Herdlet struct {
 	// OnActor, if set with VMM, is told which actor a VM is before its boot or restore, as a Mac's in-process herd-egress
 	// is (Backend.OnActor): tests give the fake's VMs a network served under the actor's egress policy.
 	OnActor func(vm string, a link.ActorRef)
+	// MacNet, if set with VMM, gives the VMs a Mac's network (ADR A-21) in place of a Linux host's: the in-process
+	// herd-egress a Mac builds (macNet), behind one gvisor-tap-vsock stack per VM. build hands MacNet the function
+	// vz attaches each VM's NIC with on a Mac (vz.Config.Network), so a test attaches the guest's end itself (gvvm).
+	MacNet func(attach func(vm string) (*os.File, error))
+	// NewGateway, if set, builds a Mac's in-process herd-egress from the configuration the flags gave instead of
+	// egress.New (tests: a resolver and dialer of their own).
+	NewGateway func(egress.Config) (*egress.Gateway, error)
 	// Retry is how long the herdlet waits before it dials again after its link or tunnel broke (default 2 s).
 	Retry time.Duration
 }
@@ -124,6 +136,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.NetPool, "net-pool", tapnet.DefaultPool.String(), "IPv4 pool each VM's /30 link is leased from (Linux)")
 	fs.StringVar(&h.HostFirewall, "host-firewall", tapnet.FirewallInsert, "when another table's input chain drops by policy (ufw, Tailscale): insert each VM's accepts for exactly its flows to herd-egress there and remove them with the VM, or refuse to start VMs (Linux: insert|refuse)")
 	fs.Var(&h.EgressAllow, "egress-allow-prefix", egressAllowUsage)
+	fs.StringVar(&h.Secrets, "secrets", "", "directory for ate-secret://dir/<name>/<tail> credentials of the in-process herd-egress (macOS; on Linux, herd-egress -secrets)")
 }
 
 // RunFlags registers `herdlet run`'s flags: the host flags, and a herdlet credential to dial with instead of a join.
@@ -310,6 +323,29 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 				return Backend{}, nil, "", err
 			}
 			host.Network, host.OnActor = n, assign(n, h.OnActor)
+		}
+		if h.MacNet != nil {
+			label := h.MacHost
+			if label == "" {
+				label = "mac"
+			}
+			api := h.API
+			if s, err := readState(h.StateDir); err == nil && api == "" {
+				api = s.API
+			}
+			mac, nw, err := h.macNet(api, label)
+			if err != nil {
+				return Backend{}, nil, "", err
+			}
+			onActor := h.OnActor
+			host.Network, host.Serve = mac.Network, mac.Serve
+			host.OnActor = func(vm string, a link.ActorRef) {
+				mac.OnActor(vm, a)
+				if onActor != nil {
+					onActor(vm, a)
+				}
+			}
+			h.MacNet(nw.Attach)
 		}
 		if h.Images == nil {
 			return host, nil, "given", nil

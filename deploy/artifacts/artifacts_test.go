@@ -154,7 +154,8 @@ func TestMacHerdletJoinsLikeLinux(t *testing.T) {
 		}
 	}
 	for f := range mf {
-		if !lf[f] {
+		// -secrets is the in-process herd-egress's on a Mac (ADR A-21); a Linux host gives it to herd-egress's own unit.
+		if !lf[f] && f != "secrets" {
 			t.Errorf("the Mac join passes -%s, which the Linux join does not: the paths differ, the join must not", f)
 		}
 	}
@@ -203,5 +204,43 @@ func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
 		if !apis[p] {
 			t.Errorf("%s does not give herd-api -s3: its joined herdlets would have no snapshot store to share", p)
 		}
+	}
+}
+
+// TestMacPlistsPassSecrets (criterion docs, PLT-209): both launchd daemons a Mac installs, the joined herdlet and the
+// all-in-one, run with -secrets naming /usr/local/etc/herd/secrets, the directory the Mac's in-process herd-egress
+// resolves ate-secret://dir/<name>/<tail> credentials from; without it every credential header is refused there.
+func TestMacPlistsPassSecrets(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@", "-token-file", "/usr/local/etc/herd/join.token",
+			"-state", "/usr/local/var/herdlet", "-kernel", "/usr/local/share/herd/kernel",
+			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets"},
+		"launchd/com.everdict.herd.plist": {"-data", "/usr/local/var/herd", "-listen", "0.0.0.0:7443",
+			"-router-listen", "0.0.0.0:8443", "-kernel", "/usr/local/share/herd/kernel",
+			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets"},
+	}
+	for _, f := range files {
+		args, ok := want[f.Path]
+		if !ok {
+			continue
+		}
+		delete(want, f.Path)
+		invs, err := artifacts.Invocations(f)
+		if err != nil || len(invs) != 1 {
+			t.Fatalf("%s: %v %v", f.Path, invs, err)
+		}
+		if !slices.Equal(invs[0].Args, args) {
+			t.Errorf("%s runs %s %q, want %q", f.Path, invs[0].Binary, invs[0].Args, args)
+		}
+		if _, err := deploy.Parse(invs[0].Binary, invs[0].Args, io.Discard); err != nil {
+			t.Errorf("%s: %v", f.Path, err)
+		}
+	}
+	for p := range want {
+		t.Errorf("%s is not rendered", p)
 	}
 }

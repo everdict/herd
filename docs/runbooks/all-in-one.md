@@ -54,7 +54,8 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
 6. Optional: credentials for egress policies. An `EgressPolicy` whose `replace_headers` names
    `ate-secret://dir/<name>/<tail>` has herd-egress inject the file `<name>/<tail>` of its secrets directory (the
-   actor never holds the value). The all-in-one takes that directory as `-secrets` and hands it to its herd-egress;
+   actor never holds the value). The all-in-one takes that directory as `-secrets` and hands it to its herd-egress
+   (on a Mac, to the herdlet's in-process herd-egress);
    add it to the unit's `ExecStart` (`sudo systemctl edit --full herd`), for example:
 
    ```sh
@@ -74,6 +75,7 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    mkdir herd && tar -C herd -xzf herd_darwin_arm64.tar.gz
    sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
    sudo install -d /usr/local/share/herd /usr/local/var/herd
+   sudo install -d -m 0700 /usr/local/etc/herd/secrets
    sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
    ```
 
@@ -83,7 +85,10 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    herdlet doctor
    ```
 
-3. Install and load the launchd job (`dist/launchd/com.everdict.herd.plist`; data in `/usr/local/var/herd`):
+3. Install and load the launchd job (`dist/launchd/com.everdict.herd.plist`; data in `/usr/local/var/herd`). On a Mac
+   the VMs' egress goes through the herdlet's in-process herd-egress (ADR A-21), which resolves
+   `ate-secret://dir/<name>/<tail>` credentials from the job's `-secrets` directory, `/usr/local/etc/herd/secrets`
+   (the file `<name>/<tail>`, mode 0600):
 
    ```sh
    sudo install -m 0644 herd/dist/launchd/com.everdict.herd.plist /Library/LaunchDaemons/com.everdict.herd.plist

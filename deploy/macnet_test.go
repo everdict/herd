@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,5 +116,62 @@ func TestMacBackendNetworkIsHerdEgress(t *testing.T) {
 	if c, err := vm.DialTCP(dctx, netip.MustParseAddrPort("203.0.113.9:80")); err == nil {
 		c.Close()
 		t.Errorf("a deleted VM's link still carries connections")
+	}
+}
+
+// TestMacHerdletSecrets (criterion mac-cred, join and launchd): a joined Mac's herdlet takes -secrets, and its
+// in-process herd-egress (macHost, on the fake hypervisor) resolves ate-secret://dir/<name>/<tail> from that
+// directory; a credential naming a store it does not have is refused as absent, and without -secrets every
+// credential is refused for want of a store.
+func TestMacHerdletSecrets(t *testing.T) {
+	logrus.SetOutput(io.Discard)
+	dir := t.TempDir()
+	secrets := filepath.Join(dir, "secrets")
+	if err := os.MkdirAll(filepath.Join(secrets, "github"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "github", "token"), []byte("ghp-mac\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	actor := egress.Actor{Space: "space-1", Name: "mac-actor", UID: "u-1"}
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"with -secrets", []string{"herd-api.example:7443", "-token-file", "/dev/null", "-secrets", secrets}, "ghp-mac"},
+		{"without -secrets", []string{"herd-api.example:7443", "-token-file", "/dev/null"}, ""},
+	} {
+		var h Herdlet
+		fs := flag.NewFlagSet("herdlet join", flag.ContinueOnError)
+		h.JoinFlags(fs)
+		if err := fs.Parse(c.args[1:]); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		h.StateDir, h.MacHost = filepath.Join(dir, c.name), "mac-1"
+		var cfg egress.Config
+		h.NewGateway = func(cf egress.Config) (*egress.Gateway, error) {
+			cfg = cf
+			return egress.New(cf)
+		}
+		if _, err := h.macHost(c.args[0], vzfake.New(), vzfake.UnlockedConsole()); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if c.want == "" {
+			if cfg.Credentials != nil {
+				t.Errorf("%s: the gateway has credential stores %v", c.name, cfg.Credentials)
+			}
+			continue
+		}
+		if cfg.Credentials == nil {
+			t.Fatalf("%s: the Mac gateway has no credential store", c.name)
+		}
+		if got, err := cfg.Credentials.Resolve(ctx, actor, "ate-secret://dir/github/token"); err != nil || got != c.want {
+			t.Errorf("%s: ate-secret://dir/github/token = %q %v, want %q", c.name, got, err, c.want)
+		}
+		if _, err := cfg.Credentials.Resolve(ctx, actor, "ate-secret://vault/github/token"); !errors.Is(err, egress.ErrNoCredential) {
+			t.Errorf("%s: a store the host does not have: %v, want ErrNoCredential", c.name, err)
+		}
 	}
 }

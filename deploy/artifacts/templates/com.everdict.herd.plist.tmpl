@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- herd all-in-one on a Mac (docs/runbooks/all-in-one.md). Rendered by deploy/artifacts; edit the template. -->
+<!-- herd all-in-one on a Mac (docs/runbooks/all-in-one.md). -secrets is the directory the herdlet's in-process
+     herd-egress resolves ate-secret://dir/<name>/<tail> credentials from. Rendered by deploy/artifacts; edit the
+     template. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -18,6 +20,8 @@
 		<string>[[.MacGuestDir]]/kernel</string>
 		<string>-initrd</string>
 		<string>[[.MacGuestDir]]/initrd.img</string>
+		<string>-secrets</string>
+		<string>[[.MacEtcDir]]/secrets</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

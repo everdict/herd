@@ -92,6 +92,7 @@ curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_darwi
 mkdir herd && tar -C herd -xzf herd_darwin_arm64.tar.gz
 sudo install -m 0755 herd/herdlet herd/herd-egress /usr/local/bin/
 sudo install -d /usr/local/share/herd /usr/local/etc/herd /usr/local/var/herdlet
+sudo install -d -m 0700 /usr/local/etc/herd/secrets
 sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
 herdlet doctor
 echo "<join token>" | sudo tee /usr/local/etc/herd/join.token
@@ -100,7 +101,10 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.everdict.herdlet.plis
 ```
 
 On a Mac the herdlet runs herd-egress itself, in-process (each VM's network device is a file handle into its own
-userspace stack, ADR A-21), with the egress credential the join granted. `herdlet doctor` fails a herdlet that is not
+userspace stack, ADR A-21), with the egress credential the join granted. It resolves an egress policy's
+`ate-secret://dir/<name>/<tail>` from its `-secrets` directory, which the launchd daemon sets to
+`/usr/local/etc/herd/secrets` (put the file `<name>/<tail>` there, mode 0600); without `-secrets` it refuses every
+request whose credential it must inject. `herdlet doctor` fails a herdlet that is not
 signed with `com.apple.security.virtualization` (the release's is; `scripts/release.sh` signs it on a Mac) and a
 kernel of the other architecture. The Mac declares MEMORY only while its save/restore probe passed and a user is at
 the console with the screen unlocked, VOLUMES otherwise; a lock, an unlock or a wake reaches herd-api's worker record

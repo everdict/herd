@@ -154,9 +154,7 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 			log.Printf("herd-egress: refused %s %s %s:%d host-side=%v: %s", ev.Actor, ev.Protocol, ev.Name, ev.Port, ev.HostSide, ev.Reason)
 		}
 	}}
-	if e.Secrets != "" {
-		cfg.Credentials = egress.Providers{"dir": egress.DirProvider{Root: e.Secrets}}
-	}
+	cfg.Credentials = credentialStores(e.Secrets)
 	if e.JWTKey != "" {
 		k, err := loadECKey(e.JWTKey)
 		if err != nil {
@@ -321,4 +319,14 @@ func ensureCA(certPath, keyPath string) error {
 		return err
 	}
 	return os.WriteFile(certPath, ca.CertPEM(), 0o644)
+}
+
+// credentialStores are a gateway's credential stores for -secrets dir, herd-egress's and a Mac herdlet's alike:
+// ate-secret://dir/<name>/<tail> from the directory, and a credential naming another store refused as absent.
+// Without a directory there is none, and every credential_uri is refused ("no credential store").
+func credentialStores(dir string) egress.Credentials {
+	if dir == "" {
+		return nil
+	}
+	return egress.Providers{"dir": egress.DirProvider{Root: dir}}
 }

@@ -30,7 +30,8 @@ type AllInOne struct {
 	// S3, S3Endpoint and S3Region keep snapshots in a bucket instead of <data>/snapshots (API.S3), so hosts that
 	// join this herd-api move actors without a shared filesystem.
 	S3, S3Endpoint, S3Region string
-	// Secrets is herd-egress's -secrets: the directory it resolves ate-secret://dir/<name>/<tail> credentials from.
+	// Secrets is herd-egress's -secrets, and on a Mac the herdlet's (Herdlet.Secrets): the directory they resolve
+	// ate-secret://dir/<name>/<tail> credentials from.
 	Secrets string
 
 	// NewGateway, if set, is herd-egress's Egress.NewGateway.
@@ -53,7 +54,7 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.EgressListen, "egress-listen", ":15001", "herd-egress transparent TCP listener")
 	fs.StringVar(&a.DNSListen, "dns-listen", ":15053", "herd-egress synthetic DNS listener (UDP)")
 	fs.BoolVar(&a.Egress, "egress", true, "run herd-egress")
-	fs.StringVar(&a.Secrets, "secrets", "", "herd-egress: directory for ate-secret://dir/<name>/<tail> credentials")
+	fs.StringVar(&a.Secrets, "secrets", "", "herd-egress (and on a Mac the herdlet's in-process one): directory for ate-secret://dir/<name>/<tail> credentials")
 	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead of <data>/snapshots, s3://bucket[/prefix] (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
 	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
 	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
@@ -61,7 +62,7 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	a.Herdlet.HostFlags(hf)
 	hf.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "state", "snapshots", "router", "egress-bindings", "egress-ca", "egress-proxy-port", "egress-dns-port":
+		case "state", "snapshots", "router", "egress-bindings", "egress-ca", "egress-proxy-port", "egress-dns-port", "secrets":
 			return
 		}
 		fs.Var(f.Value, f.Name, f.Usage)
@@ -143,6 +144,8 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 	h := a.Herdlet
 	h.API, h.Token, h.TokenFile = addrs.API, tok, ""
 	h.StateDir, h.Snapshots, h.Router, h.CredentialFile, h.JoinOnly = filepath.Join(a.Data, "herdlet"), snapDir, "", "", false
+	// On a Mac the VMs' gateway is the herdlet's own herd-egress (ADR A-21): it resolves credentials from -secrets too.
+	h.Secrets = a.Secrets
 	// The herdlet binds its VMs in this herd-egress's bindings file and gives the guests its CA, which is kept in the
 	// data directory so a restart keeps the CA the guests trust.
 	caCert, caKey := filepath.Join(a.Data, "egress-ca.pem"), filepath.Join(a.Data, "egress-ca.key")

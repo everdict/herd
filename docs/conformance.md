@@ -71,8 +71,9 @@ to>`, `--echo-listen`, `--echo-url`). The policy lists the echo host with `effec
 conformance-placeholder`; the echo server must see exactly the credential in its place (not the placeholder, and the
 value is never printed). The guest's answer and its `env` must not contain the credential, and a request without the
 header reaches the echo server without one. herd-egress resolves `ate-secret://dir/<name>/<tail>` from its `-secrets`
-directory (`herd-egress -secrets` on a joined host, `herd -secrets` for an all-in-one, which hands it to its
-herd-egress). Without injection the case is red (the echo server sees the placeholder).
+directory (`herd-egress -secrets` on a joined Linux host, `herdlet -secrets` on a joined Mac, whose herdlet runs
+herd-egress in-process, and `herd -secrets` for an all-in-one, which hands it to its herd-egress and on a Mac to the
+herdlet's in-process one, PLT-209). Without injection the case is red (the echo server sees the placeholder).
 
 **`long-stream`** (`--long-stream`; `--stream-for`, default 30m; `--stream-gap`, default 60s). The suite starts
 `/bin/sh -c` printing `tick i` every `--stream-gap` for `--stream-for`, then 20 `tail i` lines up to 1 s apart and

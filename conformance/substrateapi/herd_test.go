@@ -225,7 +225,12 @@ func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	}
 	a := &deploy.AllInOne{Data: data, Listen: "127.0.0.1:0", RouterListen: "127.0.0.1:0", TunnelListen: "127.0.0.1:0",
 		EgressListen: "127.0.0.1:0", DNSListen: "127.0.0.1:0", Egress: true, Herdlet: h}
-	if n != nil && n.secrets != "" {
+	switch {
+	case n != nil && n.mac:
+		// A Mac all-in-one: the herdlet's in-process herd-egress is the VMs' gateway, and assigns their actors itself.
+		a.Secrets = n.secrets
+		a.Herdlet.MacNet, a.Herdlet.NewGateway, a.Herdlet.OnActor = n.MacNet, n.NewGateway, nil
+	case n != nil && n.secrets != "":
 		a.Secrets, a.NewGateway = n.secrets, n.NewGateway
 		a.Herdlet.NetHost = &nfttest.Host{}
 	}

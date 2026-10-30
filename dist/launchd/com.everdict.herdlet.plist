@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- herdlet on a joined Mac (docs/runbooks/join.md): replace @HERD_API@ with herd-api's host:port. Rendered by
+<!-- herdlet on a joined Mac (docs/runbooks/join.md): replace @HERD_API@ with herd-api's host:port. -secrets is the
+     directory its in-process herd-egress resolves ate-secret://dir/<name>/<tail> credentials from. Rendered by
      deploy/artifacts; edit the template. -->
 <plist version="1.0">
 <dict>
@@ -19,6 +20,8 @@
 		<string>/usr/local/share/herd/kernel</string>
 		<string>-initrd</string>
 		<string>/usr/local/share/herd/initrd.img</string>
+		<string>-secrets</string>
+		<string>/usr/local/etc/herd/secrets</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

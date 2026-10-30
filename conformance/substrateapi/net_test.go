@@ -23,6 +23,7 @@ import (
 	"github.com/everdict/herd/conformance/substrateapi"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/egress"
+	"github.com/everdict/herd/egress/gvstack/gvvm"
 	"github.com/everdict/herd/link"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -136,11 +137,15 @@ type vmNet struct {
 	secrets string
 	// allow is the all-in-one's -egress-allow-prefix.
 	allow []string
+	// attach, set by the herdlet when mac (newMacVMNet), is a Mac's vz.Config.Network: each VM's NIC file.
+	mac    bool
+	attach func(vm string) (*os.File, error)
 
 	mu     sync.Mutex
 	gw     *egress.Gateway
 	actors map[string]egress.Actor
 	lns    map[string]string
+	guests map[string]*gvvm.VM
 }
 
 const secretURI, secret = "ate-secret://dir/conformance/token", "s3cr3t-conformance-credential"
@@ -198,6 +203,50 @@ func newAllInOneVMNet(t *testing.T) *vmNet {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// newMacVMNet is the VMs' network as on a Mac all-in-one (ADR A-21): the herdlet's in-process herd-egress
+// (deploy.Herdlet.MacNet), one gvisor-tap-vsock stack per VM, with the gateway keeping everything the herdlet
+// configured but this test's resolver and dialer (deploy.Herdlet.NewGateway). The all-in-one runs with -secrets set
+// to a directory holding the suite's credential as conformance/token. Each VM's proxy listener carries its
+// connections into the VM's stack from a guest's end of the link (gvvm), so every request crosses the stack and the
+// herdlet assigns the actors and reads their policies itself, as on a Mac.
+func newMacVMNet(t *testing.T) *vmNet {
+	t.Helper()
+	n := newAllInOneVMNet(t)
+	n.mac = true
+	n.guests = map[string]*gvvm.VM{}
+	return n
+}
+
+// MacNet is the herdlet's deploy.Herdlet.MacNet.
+func (n *vmNet) MacNet(attach func(vm string) (*os.File, error)) {
+	n.mu.Lock()
+	n.attach = attach
+	n.mu.Unlock()
+}
+
+// macGuest is VM vm's end of its link, attached on first use.
+func (n *vmNet) macGuest(vm string) (*gvvm.VM, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if g, ok := n.guests[vm]; ok {
+		return g, nil
+	}
+	if n.attach == nil {
+		return nil, fmt.Errorf("vm %s: the herdlet built no Mac network", vm)
+	}
+	f, err := n.attach(vm)
+	if err != nil {
+		return nil, err
+	}
+	g, err := gvvm.New(f, egress.DefaultStackVM, egress.DefaultStackGateway)
+	if err != nil {
+		return nil, err
+	}
+	context.AfterFunc(n.ctx, g.Close)
+	n.guests[vm] = g
+	return g, nil
 }
 
 // NewGateway is the all-in-one's deploy.AllInOne.NewGateway.
@@ -263,6 +312,10 @@ func (n *vmNet) listener(vm string) string {
 		go func() { _ = (&http.Server{Handler: forward{}}).Serve(ln) }()
 		return ln.Addr().String()
 	}
+	if n.mac {
+		go n.macProxy(vm, ln)
+		return ln.Addr().String()
+	}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -282,6 +335,32 @@ func (n *vmNet) listener(vm string) string {
 		}
 	}()
 	return ln.Addr().String()
+}
+
+// macProxy carries each connection to ln from VM vm's end of its link into its stack, to the gateway's address: the
+// stack hands the flow to the herdlet's gateway as the VM's actor, which decides the proxied request by its name.
+func (n *vmNet) macProxy(vm string, ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer c.Close()
+			g, err := n.macGuest(vm)
+			if err != nil {
+				n.t.Errorf("vm network: %v", err)
+				return
+			}
+			up, err := g.DialTCP(n.ctx, netip.AddrPortFrom(egress.DefaultStackGateway, 80))
+			if err != nil {
+				return
+			}
+			defer up.Close()
+			go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+			_, _ = io.Copy(c, up)
+		}()
+	}
 }
 
 // forward is an HTTP forward proxy that decides nothing: herd-egress bypassed.
@@ -434,6 +513,33 @@ func TestCredentialHeaderThroughAllInOneEgress(t *testing.T) {
 		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
 			t.Errorf("%s: %s %s; want PASS", c, r.Outcome, r.Detail)
 		}
+	}
+}
+
+// TestCredentialHeaderThroughMacStack (criterion mac-cred): herd all-in-one on a Mac, where the VMs' gateway is the
+// herdlet's in-process herd-egress behind each VM's gvisor-tap-vsock stack (newMacVMNet), started with -secrets:
+// that gateway resolves the credential-header case's ate-secret://dir/conformance/token from the directory, so the
+// echo server sees the credential in place of the guest's placeholder, and the egress walk passes through the same
+// stack. Its counterexample is the Mac gateway built without the credential providers, which refused the request
+// with "no credential store" (PLT-209).
+func TestCredentialHeaderThroughMacStack(t *testing.T) {
+	n := newMacVMNet(t)
+	addrs, tok := startAllInOneWith(t, n)
+	cfg := suiteConfig("herd-all-in-one-mac-stack", addrs.API, addrs.Router, tok)
+	e, echoURL, listedURL := echoes(t)
+	optional(&cfg, e, echoURL, listedURL)
+	cfg.LongStream, cfg.Template2 = false, ""
+	rep := runSuite(t, cfg)
+	for _, c := range []string{"credential-header", "egress-walk"} {
+		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
+			t.Errorf("%s: %s %s; want PASS", c, r.Outcome, r.Detail)
+		}
+	}
+	n.mu.Lock()
+	guests := len(n.guests)
+	n.mu.Unlock()
+	if guests == 0 {
+		t.Errorf("no VM's request crossed a Mac stack")
 	}
 }
 
