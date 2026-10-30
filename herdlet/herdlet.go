@@ -57,8 +57,15 @@ type Agent struct {
 	// Pool, if set (with Machines), keeps warm VMs per template: a boot takes one first, and Run refills it and
 	// reports its counts to herd-api as capacity.
 	Pool *machine.Pool
+	// Watch is how often the herdlet checks that the VMs it runs for actors still run, and tells herd-api of one whose
+	// hypervisor exited on its own; zero means DefaultWatch, negative never. Only a VMM that is a vmm.ExitObserver is
+	// watched.
+	Watch time.Duration
 
 	vms sync.Map // VM id → vmLock
+
+	runMu   sync.Mutex
+	running map[string]bool // VM ids (as herd-api names them) of the VMs this herdlet runs for actors
 }
 
 // vmLock serializes work on one VM: a delete waits for a boot still in flight instead of racing it.
@@ -118,6 +125,16 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		defer wg.Done()
 		a.watchCapabilities(wctx, reg.Capabilities, send)
 	}()
+	if _, ok := a.observer(); ok && a.Watch >= 0 {
+		// The watch stops with the link (before wg.Wait, which waits for it).
+		xctx, stopExits := context.WithCancel(ctx)
+		defer stopExits()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.watchExits(xctx, send)
+		}()
+	}
 	if a.Pool != nil {
 		a.Pool.Changed = func(warm map[string]int) {
 			_ = send(link.Up{Capacity: &link.Capacity{Slots: a.Slots, Warm: warm}})
@@ -257,8 +274,10 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 	return link.Outcome{Result: link.ResultFailed, Reason: fmt.Sprintf("unknown op %q", w.Op)}
 }
 
-// cut ends the VM's tunnel streams with the reason the cause names, and refuses new ones.
+// cut ends the VM's tunnel streams with the reason the cause names, and refuses new ones. The VM is no longer
+// watched for an exit: what follows (a stop after the snapshot, a delete) is asked for.
 func (a *Agent) cut(vm string, c link.Cause, detail string) {
+	a.watch(vm, false)
 	if a.Tunnel == nil {
 		return
 	}
@@ -269,7 +288,9 @@ func (a *Agent) cut(vm string, c link.Cause, detail string) {
 	a.Tunnel.Close(vm, r, detail)
 }
 
+// reopen lets the router reach the VM again and watches it for an exit.
 func (a *Agent) reopen(vm string) {
+	a.watch(vm, true)
 	if a.Tunnel != nil {
 		a.Tunnel.Reopen(vm)
 	}

@@ -77,6 +77,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg}
 	cfg.Hub.OnRegister = s.recordWorker
+	cfg.Hub.OnExit = s.vmExited
 	return s, nil
 }
 

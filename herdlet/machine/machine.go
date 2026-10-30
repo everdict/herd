@@ -347,3 +347,6 @@ func (m *Machines) DialGuest(ctx context.Context, id string, port uint32) (net.C
 	}
 	return m.cfg.Guests.DialGuest(ctx, m.resolve(id), port)
 }
+
+// VMID is the VMM's id of the actor's VM (a warm VM it adopted keeps its own).
+func (m *Machines) VMID(id string) string { return m.resolve(id) }

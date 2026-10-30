@@ -31,6 +31,9 @@ type Hub struct {
 	// OnRegister, if set, is called with each registration, capacity update and capabilities update before it is
 	// acknowledged.
 	OnRegister func(ctx context.Context, r Register) error
+	// OnExit, if set, is called with each VM exit a herdlet reports, with the worker the link registered. It must not
+	// block on work it sends to the same herdlet: the link reads nothing else until it returns.
+	OnExit func(ctx context.Context, worker string, e Exited)
 
 	mu      sync.Mutex
 	workers map[string]*conn
@@ -101,6 +104,10 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		switch {
 		case up.Outcome != nil:
 			c.deliver(*up.Outcome)
+		case up.Exited != nil:
+			if h.OnExit != nil {
+				h.OnExit(ctx, c.reg.Worker, *up.Exited)
+			}
 		case up.Capacity != nil || up.Capabilities != nil:
 			h.mu.Lock()
 			if up.Capacity != nil {

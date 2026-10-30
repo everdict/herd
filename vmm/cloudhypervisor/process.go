@@ -92,6 +92,18 @@ func (c *child) Exited() (bool, error) {
 	}
 }
 
+// ExitStatus is how the process ended ("exit status 1", "signal: killed"); empty while it runs.
+func (c *child) ExitStatus() string {
+	select {
+	case <-c.done:
+		if c.cmd.ProcessState != nil {
+			return c.cmd.ProcessState.String()
+		}
+	default:
+	}
+	return ""
+}
+
 // procfsProcess is a process found again through a pid file (after a herdlet restart).
 type procfsProcess struct {
 	pid    int

@@ -23,6 +23,8 @@ type Up struct {
 	// console locked, or whose save/restore probe stopped passing) says so at once.
 	Capabilities *Capabilities `json:"capabilities,omitempty"`
 	Outcome      *Outcome      `json:"outcome,omitempty"`
+	// Exited says that a VM the herdlet ran for an actor stopped running without being asked to.
+	Exited *Exited `json:"exited,omitempty"`
 }
 
 // Down is a herd-api → herdlet message. Exactly one field is set.
@@ -188,4 +190,21 @@ type EnvVar struct {
 type VolumeMount struct {
 	Name      string `json:"name"`
 	MountPath string `json:"mountPath"`
+}
+
+// ExitReason is why a herdlet reports a VM exited.
+type ExitReason string
+
+// ExitHypervisorExited: the VM's hypervisor process exited (or the VM is gone) while the actor was running, and
+// nothing herd-api asked for stopped it.
+const ExitHypervisorExited ExitReason = "hypervisor-exited"
+
+// Exited reports a VM that stopped running on its own. The herdlet observed it; a herdlet that could not observe its
+// VM reports nothing, since unknown is not crashed.
+type Exited struct {
+	// VM is the VM's id as herd-api named it in Work (the actor's uid).
+	VM     string     `json:"vm"`
+	Reason ExitReason `json:"reason"`
+	// Detail is what the herdlet knows of why (the process's exit status, the end of the hypervisor's log).
+	Detail string `json:"detail,omitempty"`
 }

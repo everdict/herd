@@ -553,6 +553,76 @@ func (v *VMM) Inspect(ctx context.Context, id string) (vmm.Presence, error) {
 	return vmm.PresencePresent, nil
 }
 
+var _ vmm.ExitObserver = (*VMM)(nil)
+
+// Exited answers whether the VM's cloud-hypervisor process has exited. The why is the process's exit status when this
+// herdlet started it, and the last lines of its log.
+func (v *VMM) Exited(ctx context.Context, id string) (bool, string, error) {
+	if err := ctx.Err(); err != nil {
+		return false, "", fmt.Errorf("cloud-hypervisor: exited: %w", err)
+	}
+	in, err := v.instance(id)
+	if err != nil {
+		return false, "", err
+	}
+	if in == nil {
+		return true, "the VM is gone", nil
+	}
+	if in.ch == nil {
+		return true, "no cloud-hypervisor process is recorded", nil
+	}
+	exited, err := in.ch.Exited()
+	if err != nil {
+		return false, "", fmt.Errorf("cloud-hypervisor: exited %s: %w", id, err)
+	}
+	if !exited {
+		return false, "", nil
+	}
+	why := fmt.Sprintf("cloud-hypervisor (pid %d) exited", in.ch.Pid())
+	if s, ok := in.ch.(interface{ ExitStatus() string }); ok {
+		if st := s.ExitStatus(); st != "" {
+			why += " (" + st + ")"
+		}
+	}
+	if tail := logTail(filepath.Join(in.dir, "cloud-hypervisor.log"), 3); tail != "" {
+		why += "; its log ends: " + tail
+	}
+	return true, why, nil
+}
+
+// logTail is the last n non-empty lines of a log, at most 1 KiB, joined by " | "; empty when there is none.
+func logTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const limit = 1024
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := max(fi.Size()-4*limit, 0)
+	buf := make([]byte, fi.Size()-off)
+	if n, _ := f.ReadAt(buf, off); n < len(buf) {
+		return ""
+	}
+	var lines []string
+	for _, l := range strings.Split(string(buf), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	s := strings.Join(lines, " | ")
+	if len(s) > limit {
+		s = s[len(s)-limit:]
+	}
+	return s
+}
+
 func (v *VMM) Delete(ctx context.Context, id string) (vmm.Presence, error) {
 	if err := ctx.Err(); err != nil {
 		return vmm.PresenceUnknown, fmt.Errorf("cloud-hypervisor: delete: %w", err)

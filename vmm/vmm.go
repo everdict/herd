@@ -206,6 +206,15 @@ type VMM interface {
 	Delete(ctx context.Context, id string) (Presence, error)
 }
 
+// ExitObserver is a VMM that can tell a VM it started that stopped running on its own (its hypervisor process exited:
+// the guest powered off, the VMM crashed, something killed it) from one that runs. herdlet watches the VMs it runs for
+// actors with it, so herd-api learns of an exit nobody asked for.
+type ExitObserver interface {
+	// Exited answers true, with what is known of why, when the VM's hypervisor has exited or the VM is gone; false
+	// while it runs; and an error (never true) when it could not be observed.
+	Exited(ctx context.Context, id string) (bool, string, error)
+}
+
 var (
 	ErrNotFound              = errors.New("vmm: not found")
 	ErrExists                = errors.New("vmm: already exists")
