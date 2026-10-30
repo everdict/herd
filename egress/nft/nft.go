@@ -1,4 +1,4 @@
-// Package nft renders and applies the Ubuntu half of herd-egress's plumbing (ADR 0001 A-16): each VM's TAP and an
+// Package nft renders and applies the Ubuntu half of herd-egress's plumbing (ADR 0001 A-18): each VM's TAP and an
 // nftables table of its own that is default-deny for everything the TAP carries, except what is redirected to
 // herd-egress. Every TCP connection the VM opens, to any address and port, is redirected to herd-egress's transparent
 // listener (which reads the original port with SO_ORIGINAL_DST and decides by name); UDP to port 53 is redirected to

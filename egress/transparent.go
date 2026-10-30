@@ -82,3 +82,14 @@ func (g *Gateway) ServeTransparent(ctx context.Context, ln net.Listener, src *So
 		}()
 	}
 }
+
+// Retain keeps only the bindings keep answers true for.
+func (s *Sources) Retain(keep func(netip.Addr, Actor) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for addr, a := range s.m {
+		if !keep(addr, a) {
+			delete(s.m, addr)
+		}
+	}
+}

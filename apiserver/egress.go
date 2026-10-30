@@ -6,7 +6,10 @@ import (
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/egress/policy"
 	"github.com/everdict/herd/store"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -26,7 +29,12 @@ func egressView(r store.Record) (*ateapi.EgressPolicy, error) {
 	return p, nil
 }
 
+// encodePolicy admits a policy as Substrate does (the rule syntax, no two rules tying; package egress/policy, which
+// herd-egress enforces) and encodes it.
 func encodePolicy(in *ateapi.EgressPolicy) ([]byte, error) {
+	if _, err := policy.Compile(in); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
 	p := proto.Clone(in).(*ateapi.EgressPolicy)
 	p.Metadata = nil
 	return proto.Marshal(p)

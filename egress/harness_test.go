@@ -335,3 +335,5 @@ type bufConn struct {
 }
 
 func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func bufioReader(c net.Conn) *bufio.Reader { return bufio.NewReader(c) }

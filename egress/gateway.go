@@ -1,4 +1,4 @@
-// Package egress is herd-egress: the per-actor egress gateway (spec herd.md R4, ADR 0001 A-16). Every TCP flow an
+// Package egress is herd-egress: the per-actor egress gateway (spec herd.md R4, ADR 0001 A-18). Every TCP flow an
 // actor's VM opens reaches the Gateway — on Ubuntu through the VM's TAP, which nftables redirects to the gateway and
 // nowhere else (package egress/nft); on macOS through a userspace network stack behind the VM's file-handle network
 // device (the Stack interface). The gateway decides by NAME, never by address: the SNI of a TLS ClientHello, the
