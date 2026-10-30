@@ -7,10 +7,16 @@
 # darwin/arm64: herd-api, herd-router and herd-egress CGO_ENABLED=0; herd and herdlet drive Virtualization.framework
 # through cgo, so they are built (and signed with vmm/vz/vz.entitlements) only when this script runs on a Mac.
 # Set GUEST_DIR to a guest/build.sh output directory to add the guest kernel and initramfs (herd-guest-<arch>/{kernel,initrd.img}).
+# VIRTIOFSD_DIR (required) is a scripts/virtiofsd/build.sh output directory: each linux archive carries its static
+# virtiofsd (virtiofsd-<arch>/virtiofsd), checked against the checksum the build recorded and the version
+# scripts/virtiofsd/source.env pins, because a distribution's may be older than herd needs (Ubuntu 24.04's is 1.10).
+# The script ends by listing what each archive holds.
 set -eu
 
 OUT=${1:?usage: release.sh <out-dir>}
 here=$(cd "$(dirname "$0")/.." && pwd)
+. "$here/scripts/virtiofsd/source.env"
+VIRTIOFSD_DIR=${VIRTIOFSD_DIR:?set VIRTIOFSD_DIR to a scripts/virtiofsd/build.sh all <dir> output: the linux archives carry its virtiofsd}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 
@@ -45,9 +51,32 @@ for p in linux/amd64 linux/arm64 darwin/arm64; do
 			echo "release.sh: skipping darwin $c (Virtualization.framework needs cgo on a Mac)" >&2
 		fi
 	done
+	if [ "$goos" = linux ]; then
+		vdir="$VIRTIOFSD_DIR/virtiofsd-$goarch"
+		if ! (cd "$vdir" && sha256sum -c --status virtiofsd.sha256); then
+			echo "release.sh: $vdir/virtiofsd does not match its virtiofsd.sha256 (scripts/virtiofsd/build.sh $goarch)" >&2
+			exit 1
+		fi
+		if [ "$(cat "$vdir/VERSION")" != "$VIRTIOFSD_VERSION" ]; then
+			echo "release.sh: $vdir is virtiofsd $(cat "$vdir/VERSION"), scripts/virtiofsd/source.env pins $VIRTIOFSD_VERSION" >&2
+			exit 1
+		fi
+		# ELF e_machine: x86-64 is 3e 00, AArch64 b7 00.
+		want=3e00; [ "$goarch" = arm64 ] && want=b700
+		if [ "$(od -An -tx1 -j18 -N2 "$vdir/virtiofsd" | tr -d ' \n')" != "$want" ]; then
+			echo "release.sh: $vdir/virtiofsd is not an executable for $goarch" >&2
+			exit 1
+		fi
+		install -m 0755 "$vdir/virtiofsd" "$dir/virtiofsd"
+	fi
 	if [ -n "${GUEST_DIR:-}" ] && [ -d "$GUEST_DIR/herd-guest-$goarch" ]; then
 		cp "$GUEST_DIR/herd-guest-$goarch/kernel" "$GUEST_DIR/herd-guest-$goarch/initrd.img" "$dir/"
 	fi
 	cp -R "$here/dist" "$dir/dist"
 	tar -C "$dir" -czf "$OUT/herd_${goos}_${goarch}.tar.gz" .
+done
+for p in linux/amd64 linux/arm64 darwin/arm64; do
+	a="herd_${p%/*}_${p#*/}.tar.gz" v=
+	[ "${p%/*}" = linux ] && v=" (virtiofsd $VIRTIOFSD_VERSION)"
+	echo "release.sh: $a: $(tar -tzf "$OUT/$a" | sed -n 's#^\./##; /\//d; /^$/d; p' | sort | tr '\n' ' ')+ dist/$v"
 done

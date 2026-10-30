@@ -53,11 +53,11 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
 
 ## On each Ubuntu node
 
-1. Install Cloud Hypervisor, virtiofsd and herd as in all-in-one.md steps 1–2 (no snapshot directory to mount: the
-   join hands the node herd-api's bucket), and check the host:
+1. Install Cloud Hypervisor and herd (with its virtiofsd) as in all-in-one.md steps 1–2 (no snapshot directory to
+   mount: the join hands the node herd-api's bucket), and check the host:
 
    ```sh
-   sudo herdlet doctor -virtiofsd /usr/libexec/virtiofsd
+   sudo herdlet doctor
    ```
 
 2. Give the node herd-api's address and the join token:
@@ -82,7 +82,7 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    The same join by hand, in the foreground:
 
    ```sh
-   sudo herdlet join <control-host>:7443 --token "<join token>" -virtiofsd /usr/libexec/virtiofsd
+   sudo herdlet join <control-host>:7443 --token "<join token>"
    ```
 
 ## On each Mac node (Apple Silicon)

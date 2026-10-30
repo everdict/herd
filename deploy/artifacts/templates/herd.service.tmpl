@@ -9,7 +9,7 @@ Wants=network-online.target
 ExecStart=[[.BinDir]]/herd -data [[.DataDir]] \
     -listen 0.0.0.0:7443 -router-listen 0.0.0.0:8443 -tunnel-listen 127.0.0.1:7444 \
     -kernel [[.GuestDir]]/kernel -initrd [[.GuestDir]]/initrd.img \
-    -virtiofsd /usr/libexec/virtiofsd
+    -virtiofsd [[.LibexecDir]]/virtiofsd
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

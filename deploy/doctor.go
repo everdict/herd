@@ -2,12 +2,16 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"regexp"
 	"strings"
+	"time"
 
 	"fmt"
 	"github.com/everdict/herd/guest"
 	"github.com/everdict/herd/internal/plist"
+	"github.com/everdict/herd/vmm/cloudhypervisor"
 	"os"
 	"os/exec"
 	"runtime"
@@ -33,6 +37,8 @@ type Host struct {
 	Entitlements func() ([]byte, error)
 	// KernelArch reads a guest kernel's architecture from its boot header (guest.KernelArch); nil skips the check.
 	KernelArch func(path string) (string, error)
+	// Help runs an executable with --help and returns what it printed (virtiofsd's options); nil skips the check.
+	Help func(path string) (string, error)
 }
 
 // ThisHost is the machine herdlet runs on.
@@ -61,6 +67,18 @@ func ThisHost() Host {
 			return out.Bytes(), nil
 		},
 		KernelArch: guest.KernelArch,
+		Help: func(p string) (string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, p, "--help").CombinedOutput()
+			if err != nil {
+				if o := strings.TrimSpace(string(out)); o != "" {
+					err = fmt.Errorf("%w: %s", err, o)
+				}
+				return string(out), fmt.Errorf("%s --help: %w", p, err)
+			}
+			return string(out), nil
+		},
 	}
 }
 
@@ -95,6 +113,9 @@ func Doctor(h *Herdlet, host Host) []Check {
 				err = fmt.Errorf("%s not found (%v): install it or pass its path", b.path, err)
 			}
 			add(b.name, err, p)
+			if b.name == "virtiofsd" && err == nil && host.Help != nil {
+				add("virtiofsd args", virtiofsdAccepts(host, p, strings.Fields(h.VirtiofsdArgs)), strings.Join(cloudhypervisor.VirtiofsdFlags(strings.Fields(h.VirtiofsdArgs)), " "))
+			}
 		}
 	case "darwin":
 		var archErr error
@@ -134,6 +155,30 @@ func Doctor(h *Herdlet, host Host) []Check {
 		add("kernel arch", err, arch)
 	}
 	return cs
+}
+
+// DefaultVirtiofsd is where the runbooks install the virtiofsd herd's Linux release archives carry (pinned in
+// scripts/virtiofsd/source.env): a distribution's may be too old, as Ubuntu 24.04's 1.10 is.
+const DefaultVirtiofsd = "/usr/local/libexec/herd/virtiofsd"
+
+// virtiofsdAccepts checks the virtiofsd at path lists, in its --help, every option herd starts it with
+// (cloudhypervisor.VirtiofsdArgs, the operator's extra arguments included). One it does not know makes virtiofsd
+// exit at once, so every boot would fail waiting for its socket.
+func virtiofsdAccepts(host Host, path string, extra []string) error {
+	help, err := host.Help(path)
+	if err != nil {
+		return fmt.Errorf("%v: herd needs virtiofsd >= 1.11; install the one in herd's release archive at %s or pass -virtiofsd <a virtiofsd >= 1.11>", err, DefaultVirtiofsd)
+	}
+	var missing []string
+	for _, f := range cloudhypervisor.VirtiofsdFlags(extra) {
+		if !regexp.MustCompile(`(^|[\s,\[])` + regexp.QuoteMeta(f) + `([\s=,\[<]|$)`).MatchString(help) {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s does not accept %s, which herd passes, so every boot would fail: herd needs virtiofsd >= 1.11 (Ubuntu 24.04's virtiofsd package is 1.10); install the one in herd's release archive at %s or pass -virtiofsd <a virtiofsd >= 1.11>", path, strings.Join(missing, ", "), DefaultVirtiofsd)
+	}
+	return nil
 }
 
 // VirtualizationEntitlement is what Virtualization.framework requires of the process that makes VMs.

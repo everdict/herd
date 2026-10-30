@@ -11,7 +11,7 @@ Wants=network-online.target
 EnvironmentFile=/etc/herd/herdlet.env
 ExecStart=/usr/local/bin/herdlet join ${HERD_API} -token-file /etc/herd/join.token -state /var/lib/herdlet \
     -kernel /usr/local/share/herd/kernel -initrd /usr/local/share/herd/initrd.img \
-    -virtiofsd /usr/libexec/virtiofsd
+    -virtiofsd /usr/local/libexec/herd/virtiofsd
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

@@ -196,13 +196,7 @@ func (v *VMM) start(ctx context.Context, spec vmm.Spec, drive func(context.Conte
 func (v *VMM) launch(ctx context.Context, spec vmm.Spec, in *instance) error {
 	for _, s := range spec.Shares {
 		sock := fsSocket(in.dir, s.Tag)
-		args := []string{"--socket-path=" + sock, "--shared-dir=" + s.HostPath, "--cache=never",
-			// Snapshots with virtio-fs: virtiofsd re-finds open files by path on restore (R0 spike).
-			"--migration-mode=find-paths"}
-		if s.ReadOnly {
-			args = append(args, "--readonly")
-		}
-		args = append(args, v.cfg.VirtiofsdArgs...)
+		args := VirtiofsdArgs(sock, s.HostPath, s.ReadOnly, v.cfg.VirtiofsdArgs)
 		p, err := v.spawn(in, ProcSpec{Path: v.cfg.Virtiofsd, Args: args,
 			Log: filepath.Join(in.dir, "virtiofsd-"+s.Tag+".log"), Marker: sock}, "virtiofsd-"+s.Tag)
 		if err != nil {

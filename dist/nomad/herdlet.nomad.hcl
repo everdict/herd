@@ -43,7 +43,7 @@ job "herdlet" {
           "-state", "/var/lib/herdlet",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
-          "-virtiofsd", "/usr/libexec/virtiofsd",
+          "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
         ]
       }
     }

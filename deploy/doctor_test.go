@@ -3,6 +3,8 @@ package deploy_test
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -118,5 +120,73 @@ func TestDoctorRefusesTheOtherArchsKernel(t *testing.T) {
 		if (f["kernel arch"] == "") != tc.ok {
 			t.Errorf("%s/%s host with a %s kernel: %v", tc.goos, tc.arch, tc.kernel, f)
 		}
+	}
+}
+
+// virtiofsdHelp is the option list of a virtiofsd release's --help, reconstructed from upstream's Opt struct at that
+// tag (gitlab.com/virtio-fs/virtiofsd v1.10.1 3988b73, as Ubuntu 24.04 ships 1.10; v1.13.2 720245d, as herd's
+// release archives carry).
+func virtiofsdHelp(t *testing.T, version string) string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/virtiofsd-" + version + ".help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestDoctorFailsAVirtiofsdThatRejectsHerdsArguments (criterion doctor): a virtiofsd whose --help lacks an option herd
+// starts it with (1.10 has no --migration-mode or --readonly) fails doctor's "virtiofsd args" line, which names the
+// option and the fix (the archive's virtiofsd, or -virtiofsd); so does one that cannot run, and an operator's
+// -virtiofsd-args option it does not know. 1.13.2 passes, with and without --sandbox=none. Before the check, doctor
+// said ok for 1.10 and every boot failed: red.
+func TestDoctorFailsAVirtiofsdThatRejectsHerdsArguments(t *testing.T) {
+	withHelp := func(help string, err error) deploy.Host {
+		h := host("linux", "amd64", nil, false)
+		h.Help = func(string) (string, error) { return help, err }
+		return h
+	}
+	hl := &deploy.Herdlet{CHBinary: "cloud-hypervisor", Virtiofsd: "/usr/libexec/virtiofsd", Kernel: "k", Initrd: "i"}
+	f := failed(deploy.Doctor(hl, withHelp(virtiofsdHelp(t, "1.10.1"), nil)))
+	for _, want := range []string{"/usr/libexec/virtiofsd does not accept", "--migration-mode", "--readonly", ">= 1.11", deploy.DefaultVirtiofsd, "-virtiofsd"} {
+		if !strings.Contains(f["virtiofsd args"], want) {
+			t.Errorf("virtiofsd 1.10.1: doctor's virtiofsd args line %q lacks %q (all failures: %v)", f["virtiofsd args"], want, f)
+		}
+	}
+	if f := failed(deploy.Doctor(hl, withHelp(virtiofsdHelp(t, "1.13.2"), nil))); len(f) != 0 {
+		t.Errorf("virtiofsd 1.13.2: %v", f)
+	}
+	if f := failed(deploy.Doctor(hl, withHelp("", errors.New("exec format error")))); !strings.Contains(f["virtiofsd args"], "exec format error") {
+		t.Errorf("a virtiofsd that cannot run: %v", f)
+	}
+	sandboxed := *hl
+	sandboxed.VirtiofsdArgs = "--sandbox=none"
+	if f := failed(deploy.Doctor(&sandboxed, withHelp(virtiofsdHelp(t, "1.13.2"), nil))); len(f) != 0 {
+		t.Errorf("virtiofsd 1.13.2 with -virtiofsd-args --sandbox=none: %v", f)
+	}
+	sandboxed.VirtiofsdArgs = "--sandbox=none --no-such-option"
+	if f := failed(deploy.Doctor(&sandboxed, withHelp(virtiofsdHelp(t, "1.13.2"), nil))); !strings.Contains(f["virtiofsd args"], "--no-such-option") ||
+		strings.Contains(f["virtiofsd args"], "--sandbox") {
+		t.Errorf("virtiofsd 1.13.2 with an option it does not know: %v", f)
+	}
+}
+
+// TestThisHostRunsVirtiofsdHelp: the real host asks the virtiofsd it was given for its --help, so a 1.10 on this
+// machine fails doctor through the same path the test fake takes.
+func TestThisHostRunsVirtiofsdHelp(t *testing.T) {
+	dir := t.TempDir()
+	help := filepath.Join(dir, "help")
+	if err := os.WriteFile(help, []byte(virtiofsdHelp(t, "1.10.1")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "virtiofsd")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = --help ] && exec cat "+help+"\necho \"error: unexpected argument '$1' found\" >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := host("linux", "amd64", nil, false)
+	h.LookPath, h.Help = exec.LookPath, deploy.ThisHost().Help
+	hl := &deploy.Herdlet{CHBinary: "cloud-hypervisor", Virtiofsd: bin, Kernel: "k", Initrd: "i"}
+	if f := failed(deploy.Doctor(hl, h)); !strings.Contains(f["virtiofsd args"], "--migration-mode") {
+		t.Errorf("a 1.10 virtiofsd on this host: %v", f)
 	}
 }

@@ -9,7 +9,7 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/herd -data /var/lib/herd \
     -listen 0.0.0.0:7443 -router-listen 0.0.0.0:8443 -tunnel-listen 127.0.0.1:7444 \
     -kernel /usr/local/share/herd/kernel -initrd /usr/local/share/herd/initrd.img \
-    -virtiofsd /usr/libexec/virtiofsd
+    -virtiofsd /usr/local/libexec/herd/virtiofsd
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

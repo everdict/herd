@@ -5,11 +5,14 @@ package runbooks_test
 
 import (
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -192,5 +195,112 @@ func TestJoinNeedsNoSharedMount(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "HERD_S3=") {
 		t.Error("join.md does not configure herd-api's S3 snapshot store")
+	}
+}
+
+// virtiofsdArg is the -virtiofsd a herd or herdlet command line passes, or "" for the flag's default.
+func virtiofsdArg(args []string) string {
+	for i, a := range args {
+		n := strings.TrimLeft(a, "-")
+		if v, ok := strings.CutPrefix(n, "virtiofsd="); ok && a != n {
+			return v
+		}
+		if n == "virtiofsd" && a != n && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestRunbooksInstallHerdsVirtiofsd (criterion bundled): no runbook installs virtiofsd from a distribution's package
+// (Ubuntu 24.04's apt line gives 1.10, which rejects --migration-mode); all-in-one.md, which join.md and nomad.md
+// follow, installs the release archive's virtiofsd at herdlet's default -virtiofsd; every herd and herdlet command a
+// runbook runs uses that default or the archive's own copy; and the archive carries a virtiofsd >= 1.11, pinned to an
+// upstream commit. The runbook that said `apt-get install -y virtiofsd` and `-virtiofsd /usr/libexec/virtiofsd`, with
+// an archive that held none: red.
+func TestRunbooksInstallHerdsVirtiofsd(t *testing.T) {
+	fs := flag.NewFlagSet("herdlet", flag.ContinueOnError)
+	(&deploy.Herdlet{}).HostFlags(fs)
+	if d := fs.Lookup("virtiofsd").DefValue; d != deploy.DefaultVirtiofsd {
+		t.Errorf("herdlet's -virtiofsd defaults to %s, not deploy.DefaultVirtiofsd %s", d, deploy.DefaultVirtiofsd)
+	}
+	installed := map[string]bool{}
+	for _, rb := range runbooks {
+		b, err := os.ReadFile(rb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range shellBlocks(string(b)) {
+			for _, words := range commands(line) {
+				if bin, args, ok := herdCommand(words); ok {
+					if v := virtiofsdArg(args); v != "" && v != deploy.DefaultVirtiofsd && path.Base(path.Dir(v)) != "herd" {
+						t.Errorf("%s: `%s %s` uses virtiofsd %s, not the release archive's", rb, bin, strings.Join(args, " "), v)
+					}
+					continue
+				}
+				for len(words) > 0 && words[0] == "sudo" {
+					words = words[1:]
+				}
+				if len(words) < 2 {
+					continue
+				}
+				switch words[0] {
+				case "apt-get", "apt", "dnf", "yum", "snap", "brew":
+					for _, w := range words[1:] {
+						if strings.Contains(w, "virtiofsd") {
+							t.Errorf("%s: `%s` installs a distribution's virtiofsd, which may be older than 1.11 (Ubuntu 24.04's is 1.10)", rb, strings.Join(words, " "))
+						}
+					}
+				case "install":
+					if slices.Contains(words, "herd/virtiofsd") {
+						dst := words[len(words)-1]
+						if strings.HasSuffix(dst, "/") {
+							dst += "virtiofsd"
+						}
+						installed[rb+":"+dst] = true
+					}
+				}
+			}
+		}
+	}
+	if !installed["all-in-one.md:"+deploy.DefaultVirtiofsd] {
+		t.Errorf("all-in-one.md does not install herd/virtiofsd at %s (installs: %v)", deploy.DefaultVirtiofsd, installed)
+	}
+
+	env, err := os.ReadFile("../../scripts/virtiofsd/source.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins := map[string]string{}
+	for _, l := range strings.Split(string(env), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok && !strings.HasPrefix(k, "#") {
+			pins[k] = v
+		}
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(pins["VIRTIOFSD_VERSION"], "%d.%d", &major, &minor); err != nil || major < 1 || major == 1 && minor < 11 {
+		t.Errorf("scripts/virtiofsd/source.env pins virtiofsd %q, herd needs >= 1.11 (%v)", pins["VIRTIOFSD_VERSION"], err)
+	}
+	if pins["VIRTIOFSD_REF"] != "v"+pins["VIRTIOFSD_VERSION"] || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(pins["VIRTIOFSD_COMMIT"]) ||
+		!strings.HasPrefix(pins["VIRTIOFSD_REPO"], "https://gitlab.com/virtio-fs/") {
+		t.Errorf("scripts/virtiofsd/source.env does not pin an upstream tag to a commit: %v", pins)
+	}
+	build, err := os.ReadFile("../../scripts/virtiofsd/build.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"$VIRTIOFSD_COMMIT"`, "cargo build --locked", "+crt-static", "--migration-mode", "sha256sum virtiofsd >virtiofsd.sha256"} {
+		if !strings.Contains(string(build), want) {
+			t.Errorf("scripts/virtiofsd/build.sh lacks %q", want)
+		}
+	}
+	rel, err := os.ReadFile("../../scripts/release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"VIRTIOFSD_DIR:?", "sha256sum -c --status virtiofsd.sha256", `install -m 0755 "$vdir/virtiofsd" "$dir/virtiofsd"`} {
+		if !strings.Contains(string(rel), want) {
+			t.Errorf("scripts/release.sh lacks %q: the linux archives must carry the checked virtiofsd", want)
+		}
 	}
 }

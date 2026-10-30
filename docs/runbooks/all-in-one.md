@@ -6,31 +6,36 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
 ## Ubuntu (x86_64 or arm64, KVM)
 
-1. Install Cloud Hypervisor v54.0 and virtiofsd (>= 1.11):
+1. Install Cloud Hypervisor v54.0:
 
    ```sh
    ARCH=$(dpkg --print-architecture)   # amd64 or arm64
    CH=cloud-hypervisor-static; [ "$ARCH" = arm64 ] && CH=cloud-hypervisor-static-aarch64
    curl -fsSLo cloud-hypervisor https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/$CH
    sudo install -m 0755 cloud-hypervisor /usr/local/bin/cloud-hypervisor
-   sudo apt-get install -y virtiofsd
    ```
 
-2. Install herd from its release archive (binaries, guest kernel and initramfs, and `dist/`):
+2. Install herd from its release archive (binaries, a static virtiofsd, guest kernel and initramfs, and `dist/`).
+   herd needs virtiofsd >= 1.11 and Ubuntu 24.04's `virtiofsd` package is 1.10, so the archive carries virtiofsd
+   1.13.2 (`scripts/virtiofsd/source.env`) and herdlet uses it from `/usr/local/libexec/herd/virtiofsd` by default:
 
    ```sh
    curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_linux_$ARCH.tar.gz
    mkdir herd && tar -C herd -xzf herd_linux_$ARCH.tar.gz
    sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
-   sudo install -d /usr/local/share/herd
+   sudo install -d /usr/local/share/herd /usr/local/libexec/herd
    sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
+   sudo install -m 0755 herd/virtiofsd /usr/local/libexec/herd/virtiofsd
    ```
 
+   To use a virtiofsd of your own (>= 1.11), pass its path as `-virtiofsd` to `herdlet doctor` here and in the unit's
+   `ExecStart`.
+
 3. Check that this host can run herd actors. Every line must say `ok`; a `FAIL` line says what is missing (for
-   example `/dev/kvm`):
+   example `/dev/kvm`, or a virtiofsd that does not accept the options herd starts it with):
 
    ```sh
-   sudo herdlet doctor -virtiofsd /usr/libexec/virtiofsd
+   sudo herdlet doctor
    ```
 
 4. Install and start the unit (`dist/systemd/herd.service`; data in `/var/lib/herd`):

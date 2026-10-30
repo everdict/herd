@@ -1,0 +1,39 @@
+A virtio-fs vhost-user device daemon
+
+Usage: virtiofsd [OPTIONS]
+
+Options:
+      --shared-dir <SHARED_DIR>
+      --tag <TAG>
+      --socket <SOCKET>
+      --socket-path <SOCKET_PATH>
+      --socket-group <SOCKET_GROUP>
+      --fd <FD>
+      --thread-pool-size <THREAD_POOL_SIZE>
+      --xattr
+      --posix-acl
+      --xattrmap <XATTRMAP>
+      --sandbox <SANDBOX>
+      --seccomp <SECCOMP>
+      --announce-submounts
+      --no-announce-submounts
+      --inode-file-handles <INODE_FILE_HANDLES>
+      --cache <CACHE>
+      --no-readdirplus
+      --writeback
+      --allow-direct-io
+      --print-capabilities
+      --modcaps <MODCAPS>
+      --log-level <LOG_LEVEL>
+      --syslog
+      --rlimit-nofile <RLIMIT_NOFILE>
+      --no-killpriv-v2
+      --killpriv-v2
+      --security-label
+      --uid-map <UID_MAP>
+      --gid-map <GID_MAP>
+      --preserve-noatime
+  -h, --help
+          Print help (see a summary with '-h')
+  -V, --version
+          Print version

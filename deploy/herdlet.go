@@ -126,7 +126,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Warm, "warm", "", "warm VMs per template, <template-uid>=N,...")
 	fs.UintVar(&h.GuestPort, "guest-port", 8080, "herd-guest's vsock port (warm VM health check)")
 	fs.StringVar(&h.CHBinary, "cloud-hypervisor", "cloud-hypervisor", "Cloud Hypervisor binary (Linux)")
-	fs.StringVar(&h.Virtiofsd, "virtiofsd", "/usr/libexec/virtiofsd", "virtiofsd binary (Linux)")
+	fs.StringVar(&h.Virtiofsd, "virtiofsd", DefaultVirtiofsd, "virtiofsd binary, >= 1.11 (Linux; default: the one herd's release archive carries, as the runbooks install it)")
 	fs.StringVar(&h.VirtiofsdArgs, "virtiofsd-args", "", "extra virtiofsd arguments, space-separated (Linux)")
 	fs.StringVar(&h.MacHost, "host", "", "this Mac's label for its MEMORY restore family (macOS; default: the hostname)")
 	fs.StringVar(&h.EgressBindings, "egress-bindings", DefaultEgressBindings, "herd-egress's bindings file (its -bindings): the herdlet binds each VM's address to its actor there (Linux)")
@@ -510,6 +510,9 @@ func forever(ctx context.Context, retry time.Duration, what string, f func() err
 	}
 }
 
+// thisHost is the host preflight checks; tests replace it.
+var thisHost = ThisHost
+
 // preflight refuses a host that cannot run microVMs before it joins (R-D7); doctor says why. A herdlet given its
 // VMM (tests) and a join-only run skip it.
 func (h *Herdlet) preflight() error {
@@ -517,7 +520,7 @@ func (h *Herdlet) preflight() error {
 		return nil
 	}
 	var failed []string
-	for _, c := range Doctor(h, ThisHost()) {
+	for _, c := range Doctor(h, thisHost()) {
 		if !c.OK {
 			failed = append(failed, c.Name+": "+c.Detail)
 		}

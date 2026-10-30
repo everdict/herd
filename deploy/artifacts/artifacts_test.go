@@ -244,3 +244,37 @@ func TestMacPlistsPassSecrets(t *testing.T) {
 		t.Errorf("%s is not rendered", p)
 	}
 }
+
+// TestLinuxArtifactsUseTheArchivesVirtiofsd (criterion bundled): every artifact that runs a Linux herdlet (the
+// systemd units of the all-in-one and of a joined host, and the Nomad herdlet job) points -virtiofsd at the virtiofsd
+// the release archive carries: where the runbooks install it (deploy.DefaultVirtiofsd), or the Nomad task directory
+// the archive is unpacked into. The units that named /usr/libexec/virtiofsd, a distribution's (1.10 on Ubuntu 24.04):
+// red.
+func TestLinuxArtifactsUseTheArchivesVirtiofsd(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"systemd/herd.service":    deploy.DefaultVirtiofsd,
+		"systemd/herdlet.service": deploy.DefaultVirtiofsd,
+		"nomad/herdlet.nomad.hcl": "${NOMAD_TASK_DIR}/virtiofsd",
+	}
+	got := map[string]string{}
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f.Path, err)
+		}
+		for _, inv := range invs {
+			if i := slices.Index(inv.Args, "-virtiofsd"); i >= 0 && i+1 < len(inv.Args) {
+				got[f.Path] = inv.Args[i+1]
+			}
+		}
+	}
+	for p, w := range want {
+		if got[p] != w {
+			t.Errorf("%s runs -virtiofsd %q, want the release archive's %s", p, got[p], w)
+		}
+	}
+}

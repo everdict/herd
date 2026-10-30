@@ -2,12 +2,14 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/snapstore/disk"
@@ -75,5 +77,42 @@ func TestGrantStoreWinsOverSnapshotsFlag(t *testing.T) {
 		t.Fatal(err)
 	} else if _, ok := s.(*disk.Store); !ok {
 		t.Errorf("without a store in the grant, the herdlet's store is %T, want -snapshots' directory", s)
+	}
+}
+
+// TestHerdletRefusesAVirtiofsdThatRejectsHerdsArguments (criterion doctor): a herdlet given a virtiofsd 1.10 does not
+// join or serve: Run stops at the preflight with doctor's reason, before it dials herd-api, and leaves no grant. Before
+// the check it joined and failed every boot instead: red.
+func TestHerdletRefusesAVirtiofsdThatRejectsHerdsArguments(t *testing.T) {
+	help := func(version string) Host {
+		b, err := os.ReadFile("testdata/virtiofsd-" + version + ".help")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Host{GOOS: "linux", GOARCH: "amd64",
+			OpenRW:   func(string) error { return nil },
+			LookPath: func(n string) (string, error) { return n, nil },
+			Stat:     func(string) error { return nil },
+			Help:     func(string) (string, error) { return string(b), nil },
+		}
+	}
+	old := thisHost
+	t.Cleanup(func() { thisHost = old })
+	state := t.TempDir()
+	h := &Herdlet{CHBinary: "cloud-hypervisor", Virtiofsd: "/usr/libexec/virtiofsd", Kernel: "k", Initrd: "i",
+		Worker: "node-1", StateDir: state, API: "127.0.0.1:1", Token: "join-token"}
+	thisHost = func() Host { return help("1.10.1") }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := h.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "cannot run herd actors") || !strings.Contains(err.Error(), "--migration-mode") {
+		t.Errorf("herdlet with virtiofsd 1.10.1: Run = %v, want the preflight's refusal naming --migration-mode", err)
+	}
+	if ents, _ := os.ReadDir(state); len(ents) != 0 {
+		t.Errorf("herdlet with virtiofsd 1.10.1 left %d entries in its state directory", len(ents))
+	}
+	thisHost = func() Host { return help("1.13.2") }
+	if err := h.preflight(); err != nil {
+		t.Errorf("herdlet with virtiofsd 1.13.2: preflight = %v", err)
 	}
 }
