@@ -16,7 +16,9 @@ func TestEgressPolicyAdmission(t *testing.T) {
 	ctx := ctxT(t)
 	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED)
 	mkActor(t, e, "a1", "tpl", nil)
-	https := func(hosts ...string) *ateapi.EgressRule { return &ateapi.EgressRule{Https: &ateapi.HttpsRule{Hostnames: hosts}} }
+	https := func(hosts ...string) *ateapi.EgressRule {
+		return &ateapi.EgressRule{Https: &ateapi.HttpsRule{Hostnames: hosts}}
+	}
 	bad := map[string][]*ateapi.EgressRule{
 		"tie":           {https("api.example.com"), https("api.example.com")},
 		"ip hostname":   {https("169.254.169.254")},
