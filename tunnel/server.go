@@ -314,6 +314,7 @@ type Conn struct {
 	reason Reason
 	detail string
 }
+
 func (c *Conn) setCut(r Reason, d string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
