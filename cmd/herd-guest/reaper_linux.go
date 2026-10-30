@@ -3,8 +3,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,11 +23,18 @@ var (
 )
 
 func reapedRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	var out bytes.Buffer
+	// Output goes to a file, not a pipe: `crun run --detach` exits while the container keeps the stdio it inherited,
+	// and with a pipe Wait would block until the container exits (herd-guest never served on a real VM).
+	f, err := os.CreateTemp("", "herd-crun-out-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd.Stdout, cmd.Stderr = f, f
 	mu.Lock()
-	err := cmd.Start()
+	err = cmd.Start()
 	if err == nil {
 		owned[cmd.Process.Pid] = true
 	}
@@ -39,7 +46,11 @@ func reapedRunner(ctx context.Context, name string, args ...string) ([]byte, err
 	mu.Lock()
 	delete(owned, cmd.Process.Pid)
 	mu.Unlock()
-	return out.Bytes(), err
+	out, readErr := os.ReadFile(f.Name())
+	if readErr != nil {
+		return nil, errors.Join(err, readErr)
+	}
+	return out, err
 }
 
 func startReaper() {

@@ -95,10 +95,12 @@ func serve(args []string) error {
 			return err
 		}
 		rt := &oci.Crun{Runner: reapedRunner}
+		log.Printf("herd-guest: booting: share %q, then volumes and containers", *shareTag)
 		_, booted, err := initd.Boot(ctx, m, rt, initd.DefaultLayout, *shareTag)
 		if err != nil {
 			return err
 		}
+		log.Printf("herd-guest: %d container(s) started", len(booted))
 		for _, b := range booted {
 			targets = append(targets, &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt})
 		}
