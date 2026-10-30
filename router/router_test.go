@@ -137,11 +137,21 @@ func connect(t *testing.T, s *stack, target, tok, authority string) net.Conn {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("CONNECT %s: %s %s", authority, resp.Status, b)
 	}
+	// The tunnelled server may speak first (an HTTP/2 server sends its SETTINGS at once), and those bytes can arrive in
+	// the same read as the CONNECT response: they belong to the tunnel, so hand them on instead of dropping them.
 	if br.Buffered() > 0 {
-		t.Fatalf("CONNECT: %d bytes after the response", br.Buffered())
+		return &bufferedConn{Conn: c, r: br}
 	}
 	return c
 }
+
+// bufferedConn is a connection whose first bytes were already read into r.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 
 func connectStatus(t *testing.T, s *stack, target, tok, authority string) int {
 	t.Helper()
