@@ -9,6 +9,8 @@ package fakeguest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -38,8 +40,32 @@ type VMM struct {
 	// as herdlet laid it out, so the guest's files are the volumes a suspend carries).
 	RootOf func(vm string) string
 
-	mu     sync.Mutex
-	guests map[string]*guest
+	mu      sync.Mutex
+	guests  map[string]*guest
+	sockMu  sync.Mutex // guards sockDir only: start calls sockPath with mu held
+	sockDir string     // a short directory for sockets whose path under Dir would be too long
+}
+
+// maxSockPath keeps a unix socket path under sun_path's limit (104 bytes on macOS, 108 on Linux).
+const maxSockPath = 100
+
+// sockPath is vm's guest socket: under Dir when the path fits, else in a short directory of its own under /tmp
+// (not $TMPDIR, which macOS sets to a long /var/folders path).
+func (v *VMM) sockPath(id string) (string, error) {
+	if p := filepath.Join(v.Dir, id, "guest.sock"); len(p) <= maxSockPath {
+		return p, nil
+	}
+	v.sockMu.Lock()
+	defer v.sockMu.Unlock()
+	if v.sockDir == "" {
+		d, err := os.MkdirTemp("/tmp", "fg")
+		if err != nil {
+			return "", err
+		}
+		v.sockDir = d
+	}
+	sum := sha256.Sum256([]byte(id))
+	return filepath.Join(v.sockDir, hex.EncodeToString(sum[:8])+".sock"), nil
 }
 
 type guest struct {
@@ -103,7 +129,11 @@ func (v *VMM) start(id string) error {
 	if err != nil {
 		return fmt.Errorf("fakeguest: %w", err)
 	}
-	sock := filepath.Join(v.Dir, id, "guest.sock")
+	sock, err := v.sockPath(id)
+	if err != nil {
+		g.Close()
+		return fmt.Errorf("fakeguest: %w", err)
+	}
 	l, err := transport.ListenUnix(sock)
 	if err != nil {
 		g.Close()
@@ -141,8 +171,14 @@ func (v *VMM) Close() {
 		ids = append(ids, id)
 	}
 	v.mu.Unlock()
+	v.sockMu.Lock()
+	sockDir := v.sockDir
+	v.sockMu.Unlock()
 	for _, id := range ids {
 		v.stop(id)
+	}
+	if sockDir != "" {
+		_ = os.RemoveAll(sockDir)
 	}
 }
 
