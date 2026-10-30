@@ -80,12 +80,8 @@ func TestReal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		_, _ = c.Write(append([]byte("echo\n"), payload...))
-		if cw, ok := c.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}()
+	// The guest echoes until the host closes; read exactly the payload back, then close.
+	go func() { _, _ = c.Write(append([]byte("echo\n"), payload...)) }()
 	_ = c.SetReadDeadline(time.Now().Add(time.Minute))
 	echoed, err := io.ReadAll(io.LimitReader(c, int64(len(payload))))
 	c.Close()
