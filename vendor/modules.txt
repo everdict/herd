@@ -1,3 +1,15 @@
+# github.com/Code-Hex/go-infinity-channel v1.0.0
+## explicit; go 1.18
+github.com/Code-Hex/go-infinity-channel
+# github.com/Code-Hex/vz/v3 v3.8.0
+## explicit; go 1.25.0
+github.com/Code-Hex/vz/v3
+github.com/Code-Hex/vz/v3/internal/objc
+github.com/Code-Hex/vz/v3/internal/progress
+github.com/Code-Hex/vz/v3/internal/sliceutil
+# golang.org/x/mod v0.22.0
+## explicit; go 1.22.0
+golang.org/x/mod/semver
 # google.golang.org/protobuf v1.36.12
 ## explicit; go 1.23
 google.golang.org/protobuf/encoding/prototext
