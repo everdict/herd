@@ -257,6 +257,11 @@ type Backend struct {
 	Guests machine.GuestDialer
 	// Version is the hypervisor's, reported with the capabilities.
 	Version string
+	// OnActor and Serve are a Mac's in-process herd-egress (ADR A-21): OnActor tells it which actor a VM is, and
+	// Serve keeps the actors' egress policies current, read over policies (the join's egress credential), until ctx
+	// ends. Nil on Linux, whose herd-egress is its own process.
+	OnActor func(vm string, a link.ActorRef)
+	Serve   func(ctx context.Context, policies grpc.ClientConnInterface)
 }
 
 // build makes the host's backend and the machines that turn templates into VMs on it: the image cache (OCI
@@ -351,6 +356,9 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, VMM: host.VMM,
 		Snapshots: snaps, HypervisorVersion: host.Version, Machines: m,
 		Boot: vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}}
+	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console
+	// locked is VOLUMES at once).
+	agent.OnActor, agent.Wake = host.OnActor, herdlet.WakeDetector{}.Run(ctx)
 	var guests herdlet.GuestDialer = h.Guests
 	if m != nil {
 		guests = m
@@ -396,6 +404,18 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		return err
 	}
 	defer cc.Close()
+	if host.Serve != nil {
+		if st.Grant.EgressCredential == "" {
+			log.Printf("herdlet: no egress credential (a -token-file run): every actor on this host stays deny-all")
+		}
+		ec, err := grpc.NewClient("passthrough:///"+st.API, grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.EgressCredential)), keep)
+		if err != nil {
+			return err
+		}
+		defer ec.Close()
+		go host.Serve(ctx, ec)
+	}
 	log.Printf("herdlet %s: linking to herd-api at %s", st.Grant.Worker, st.API)
 	forever(ctx, retry, "link to "+st.API, func() error { return agent.Run(ctx, cc) })
 	<-done

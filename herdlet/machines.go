@@ -24,6 +24,10 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 		}
 		if a.Pool != nil {
 			if id, ok := a.Pool.Take(ctx, *w.Spec); ok {
+				// The warm VM keeps its own id on the hypervisor: its network learns the actor under that id.
+				if w.Actor != nil && a.OnActor != nil {
+					a.OnActor(id, *w.Actor)
+				}
 				m.Adopt(w.VM, id)
 				a.reopen(w.VM)
 				return link.Outcome{Result: link.ResultDone}

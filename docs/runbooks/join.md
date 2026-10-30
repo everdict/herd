@@ -92,6 +92,13 @@ sed 's/@HERD_API@/<control-host>:7443/' herd/dist/launchd/com.everdict.herdlet.p
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.everdict.herdlet.plist
 ```
 
+On a Mac the herdlet runs herd-egress itself, in-process (each VM's network device is a file handle into its own
+userspace stack, ADR A-21), with the egress credential the join granted. `herdlet doctor` fails a herdlet that is not
+signed with `com.apple.security.virtualization` (the release's is; `scripts/release.sh` signs it on a Mac) and a
+kernel of the other architecture. The Mac declares MEMORY only while its save/restore probe passed and a user is at
+the console with the screen unlocked, VOLUMES otherwise; a lock, an unlock or a wake reaches herd-api's worker record
+within 30 s (ADR A-22).
+
 ## Check the pool
 
 On the control host, every joined node is listed with what it declared:

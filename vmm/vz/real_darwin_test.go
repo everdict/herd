@@ -38,7 +38,7 @@ func TestReal(t *testing.T) {
 
 	state := t.TempDir()
 	hv := &recorder{Hypervisor: vz.Native()}
-	v, err := vz.New(vz.Config{StateDir: state, Host: host, Probe: vz.ProbeConfig{Kernel: kernel, Initrd: initrd}}, hv)
+	v, err := vz.New(vz.Config{StateDir: state, Host: host, Probe: vz.ProbeConfig{Kernel: kernel, Initrd: initrd}, Session: vz.IORegSession{}}, hv)
 	if err != nil {
 		t.Fatal(err)
 	}

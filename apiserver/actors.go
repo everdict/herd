@@ -110,7 +110,8 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 	if err != nil {
 		return err
 	}
-	w := link.Work{Op: link.OpBoot, VM: vmID(ar), Template: ar.st.TemplateUID, Spec: templateSpec(ar.st.TemplateUID, tpl)}
+	w := link.Work{Op: link.OpBoot, VM: vmID(ar), Template: ar.st.TemplateUID, Spec: templateSpec(ar.st.TemplateUID, tpl),
+		Actor: &link.ActorRef{Space: ar.rec.Key.Space, Name: ar.rec.Key.Name, UID: ar.rec.UID}}
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
 	}

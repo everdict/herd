@@ -41,6 +41,15 @@ type Agent struct {
 	// Tunnel, if set, is this herdlet's tunnel to herd-router: a suspend or delete cuts the VM's streams with the
 	// reason, and a boot or restore lets the router reach the VM again.
 	Tunnel *Tunnel
+	// Recheck is how often the herdlet asks its VMM for its capabilities again and pushes a change to herd-api;
+	// zero means DefaultRecheck, negative never.
+	Recheck time.Duration
+	// Wake, if set, signals that the host woke from sleep (WakeDetector): the herdlet invalidates what its VMM
+	// learned by probing (a VMM with InvalidateProbe, e.g. vz) and rechecks at once.
+	Wake <-chan struct{}
+	// OnActor, if set, is told which actor a VM is before the VM is booted or restored (on a Mac:
+	// egress.StackNetwork.Assign, so the VM's network is served under the actor's egress policy).
+	OnActor func(vm string, a link.ActorRef)
 	// Machines, if set, turns templates into VMs (ADR A-19): a boot builds the template's images and lays out its
 	// share, a snapshot object is a bundle carrying the volume tree, a restore unpacks it. Without it the herdlet
 	// boots Boot as is and a snapshot object is the VMM's record only.
@@ -90,12 +99,8 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	}
 	reg := link.Register{
 		Worker: a.Worker, Class: a.Class, Labels: a.Labels,
-		Capabilities: link.Capabilities{
-			Platform: caps.Platform, Arch: caps.Arch, SuspendMaxFidelity: caps.SuspendMaxFidelity,
-			RestoreFamily: caps.RestoreFamily, PortableRestoreFamily: vmm.PortableRestoreFamily,
-			HypervisorVersion: a.HypervisorVersion, Reason: a.Reason,
-		},
-		Capacity: link.Capacity{Slots: a.Slots, Warm: a.Warm},
+		Capabilities: a.declare(caps),
+		Capacity:     link.Capacity{Slots: a.Slots, Warm: a.Warm},
 	}
 	if a.Pool != nil {
 		reg.Capacity.Warm = a.Pool.Counts()
@@ -105,6 +110,14 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	// The watch stops with the link (before wg.Wait, which waits for it).
+	wctx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		a.watchCapabilities(wctx, reg.Capabilities, send)
+	}()
 	if a.Pool != nil {
 		a.Pool.Changed = func(warm map[string]int) {
 			_ = send(link.Up{Capacity: &link.Capacity{Slots: a.Slots, Warm: warm}})
@@ -184,6 +197,9 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		return classify(err)
 	}
 	defer release()
+	if w.Actor != nil && a.OnActor != nil && (w.Op == link.OpBoot || w.Op == link.OpRestore) {
+		a.OnActor(w.VM, *w.Actor)
+	}
 	if a.Machines != nil {
 		return a.doMachine(ctx, w)
 	}
@@ -299,4 +315,62 @@ func (a *Agent) restore(ctx context.Context, w link.Work) link.Outcome {
 		return classify(err)
 	}
 	return link.Outcome{Result: link.ResultDone}
+}
+
+// DefaultRecheck is how often a herdlet re-reads its capabilities when Agent.Recheck is zero.
+const DefaultRecheck = 30 * time.Second
+
+// declare is what the herdlet registers for the VMM's capabilities.
+func (a *Agent) declare(caps vmm.Capabilities) link.Capabilities {
+	reason := caps.Reason
+	if reason == "" {
+		reason = a.Reason
+	}
+	return link.Capabilities{
+		Platform: caps.Platform, Arch: caps.Arch, SuspendMaxFidelity: caps.SuspendMaxFidelity,
+		RestoreFamily: caps.RestoreFamily, PortableRestoreFamily: vmm.PortableRestoreFamily,
+		HypervisorVersion: a.HypervisorVersion, Reason: reason,
+	}
+}
+
+// probeInvalidator is a VMM whose capabilities rest on a probe the host's sleep may have made stale (vz.VMM).
+type probeInvalidator interface{ InvalidateProbe() }
+
+// watchCapabilities re-reads the VMM's capabilities every Recheck and on each wake, and sends herd-api every change,
+// so the worker record and the scheduler see what the host declares now (a Mac that locked is VOLUMES at once). A
+// read that fails keeps the last declaration and is tried again at the next tick.
+func (a *Agent) watchCapabilities(ctx context.Context, last link.Capabilities, send func(link.Up) error) {
+	every := a.Recheck
+	if every == 0 {
+		every = DefaultRecheck
+	}
+	var tick <-chan time.Time
+	if every > 0 {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		tick = t.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+		case <-a.Wake:
+			if p, ok := a.VMM.(probeInvalidator); ok {
+				p.InvalidateProbe()
+			}
+		}
+		caps, err := a.VMM.Capabilities(ctx)
+		if err != nil {
+			continue
+		}
+		now := a.declare(caps)
+		if now == last {
+			continue
+		}
+		if err := send(link.Up{Capabilities: &now}); err != nil {
+			return
+		}
+		last = now
+	}
 }

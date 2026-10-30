@@ -104,3 +104,62 @@ func TestNomadJobPair(t *testing.T) {
 		}
 	}
 }
+
+// TestMacHerdletJoinsLikeLinux (criterion launchd-install): the launchd daemon a Mac installs runs the same command
+// as the systemd unit on Linux — `herdlet join <herd-api>` with the join token file, the state directory and the
+// guest kernel and initramfs — and no flag the Linux unit does not pass; only paths differ. It is a launchd daemon
+// that starts at load and is kept alive, Interactive, with room for a host of VMs' files.
+func TestMacHerdletJoinsLikeLinux(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := map[artifacts.Kind]artifacts.Invocation{}
+	var plist []byte
+	for _, f := range files {
+		if f.Path != "launchd/com.everdict.herdlet.plist" && f.Path != "systemd/herdlet.service" {
+			continue
+		}
+		is, err := artifacts.Invocations(f)
+		if err != nil || len(is) != 1 {
+			t.Fatalf("%s: %v %v", f.Path, is, err)
+		}
+		inv[f.Kind] = is[0]
+		if f.Kind == artifacts.Launchd {
+			plist = f.Data
+		}
+	}
+	mac, linux := inv[artifacts.Launchd], inv[artifacts.Systemd]
+	flags := func(i artifacts.Invocation) (string, map[string]bool) {
+		fs := map[string]bool{}
+		for _, a := range i.Args {
+			if strings.HasPrefix(a, "-") {
+				fs[strings.TrimLeft(a, "-")] = true
+			}
+		}
+		if len(i.Args) == 0 {
+			return "", fs
+		}
+		return i.Args[0], fs
+	}
+	ms, mf := flags(mac)
+	ls, lf := flags(linux)
+	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "join" || ls != "join" {
+		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet join", mac.Binary, mac.Args, linux.Binary, linux.Args)
+	}
+	for _, f := range []string{"token-file", "state", "kernel", "initrd"} {
+		if !mf[f] || !lf[f] {
+			t.Errorf("-%s: Mac %v, Linux %v; both joins pass it", f, mf[f], lf[f])
+		}
+	}
+	for f := range mf {
+		if !lf[f] {
+			t.Errorf("the Mac join passes -%s, which the Linux join does not: the paths differ, the join must not", f)
+		}
+	}
+	for _, want := range []string{"<key>RunAtLoad</key>\n\t<true/>", "<key>KeepAlive</key>\n\t<true/>", "<string>Interactive</string>", "<key>NumberOfFiles</key>"} {
+		if !bytes.Contains(plist, []byte(want)) {
+			t.Errorf("herdlet's launchd daemon lacks %q", want)
+		}
+	}
+}

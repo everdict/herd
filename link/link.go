@@ -19,7 +19,10 @@ const LinkMethod = "/herd.ext.v1.Herdlet/Link"
 type Up struct {
 	Register *Register `json:"register,omitempty"`
 	Capacity *Capacity `json:"capacity,omitempty"`
-	Outcome  *Outcome  `json:"outcome,omitempty"`
+	// Capabilities replaces what the herdlet declared when it registered: a host whose fidelity changed (a Mac whose
+	// console locked, or whose save/restore probe stopped passing) says so at once.
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+	Outcome      *Outcome      `json:"outcome,omitempty"`
 }
 
 // Down is a herd-api → herdlet message. Exactly one field is set.
@@ -96,11 +99,21 @@ type Work struct {
 	SnapshotKey string `json:"snapshotKey,omitempty"`
 	// Snapshot is what OpRestore restores.
 	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
+	// Actor names the actor whose VM this is, on boot and restore (macOS hosts bind the VM's network to its egress
+	// policy by it).
+	Actor *ActorRef `json:"actor,omitempty"`
 	// Cause says why herd-api asks for a snapshot or a delete (CauseSuspend, CauseDelete). The herdlet cuts the VM's
 	// tunnel streams with it, so clients learn why their stream ended.
 	Cause Cause `json:"cause,omitempty"`
 	// DeadlineUnixMilli bounds the work; past it the herdlet answers unknown.
 	DeadlineUnixMilli int64 `json:"deadlineUnixMilli,omitempty"`
+}
+
+// ActorRef names an actor.
+type ActorRef struct {
+	Space string `json:"space"`
+	Name  string `json:"name"`
+	UID   string `json:"uid,omitempty"`
 }
 
 // Cause is why a piece of work is asked for.

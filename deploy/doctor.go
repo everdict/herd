@@ -1,7 +1,13 @@
 package deploy
 
 import (
+	"bytes"
+	"errors"
+	"strings"
+
 	"fmt"
+	"github.com/everdict/herd/guest"
+	"github.com/everdict/herd/internal/plist"
 	"os"
 	"os/exec"
 	"runtime"
@@ -22,6 +28,11 @@ type Host struct {
 	OpenRW   func(path string) error
 	LookPath func(name string) (string, error)
 	Stat     func(path string) error
+	// Entitlements returns the entitlements this binary is signed with (codesign -d --entitlements - --xml); nil
+	// skips the check.
+	Entitlements func() ([]byte, error)
+	// KernelArch reads a guest kernel's architecture from its boot header (guest.KernelArch); nil skips the check.
+	KernelArch func(path string) (string, error)
 }
 
 // ThisHost is the machine herdlet runs on.
@@ -36,6 +47,20 @@ func ThisHost() Host {
 		},
 		LookPath: exec.LookPath,
 		Stat:     func(p string) error { _, err := os.Stat(p); return err },
+		Entitlements: func() ([]byte, error) {
+			exe, err := os.Executable()
+			if err != nil {
+				return nil, err
+			}
+			var out, errb bytes.Buffer
+			cmd := exec.Command("/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", exe)
+			cmd.Stdout, cmd.Stderr = &out, &errb
+			if err := cmd.Run(); err != nil {
+				return nil, fmt.Errorf("codesign: %w: %s", err, strings.TrimSpace(errb.String()))
+			}
+			return out.Bytes(), nil
+		},
+		KernelArch: guest.KernelArch,
 	}
 }
 
@@ -81,6 +106,14 @@ func Doctor(h *Herdlet, host Host) []Check {
 			vzErr = fmt.Errorf("this herdlet was built without cgo, so it cannot drive Virtualization.framework; use the darwin/arm64 release built on a Mac")
 		}
 		add("virtualization.framework", vzErr, "linked")
+		if host.Entitlements != nil {
+			ent, err := host.Entitlements()
+			if err == nil {
+				err = HasVirtualization(ent)
+			}
+			// Without it Virtualization.framework refuses every VM; the release build signs it (scripts/release.sh).
+			add("entitlement", err, VirtualizationEntitlement)
+		}
 	default:
 		add("os", fmt.Errorf("herdlet runs on Linux (KVM) and macOS (Apple Silicon), not %s", host.GOOS), "")
 	}
@@ -91,5 +124,36 @@ func Doctor(h *Herdlet, host Host) []Check {
 		}
 		add(f.name, err, f.path)
 	}
+	// One build makes both architectures' guests (guest/build.sh all): the host must boot its own, never the other.
+	if host.KernelArch != nil && host.Stat(h.Kernel) == nil {
+		arch, err := host.KernelArch(h.Kernel)
+		if err == nil && arch != host.GOARCH {
+			err = fmt.Errorf("guest kernel %s is %s, this host is %s: install herd-guest-%s from guest/build.sh all", h.Kernel, arch, host.GOARCH, host.GOARCH)
+		}
+		add("kernel arch", err, arch)
+	}
 	return cs
+}
+
+// VirtualizationEntitlement is what Virtualization.framework requires of the process that makes VMs.
+const VirtualizationEntitlement = "com.apple.security.virtualization"
+
+// HasVirtualization checks an entitlements plist (codesign -d --entitlements - --xml) grants
+// com.apple.security.virtualization.
+func HasVirtualization(entitlements []byte) error {
+	if len(strings.TrimSpace(string(entitlements))) == 0 {
+		return fmt.Errorf("this herdlet is not signed with entitlements; sign it with %s (scripts/release.sh does)", VirtualizationEntitlement)
+	}
+	v, err := plist.Decode(entitlements)
+	if err != nil {
+		return fmt.Errorf("entitlements: %w", err)
+	}
+	d, ok := v.(map[string]any)
+	if !ok {
+		return errors.New("entitlements are not a dict")
+	}
+	if on, _ := d[VirtualizationEntitlement].(bool); !on {
+		return fmt.Errorf("this herdlet is not signed with %s, so Virtualization.framework would refuse every VM; sign it with vmm/vz/vz.entitlements (scripts/release.sh does)", VirtualizationEntitlement)
+	}
+	return nil
 }

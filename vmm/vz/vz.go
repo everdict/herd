@@ -33,14 +33,23 @@ type Config struct {
 	// Probe is the guest the save/restore probe boots. Without a kernel there is no probe and the Mac declares
 	// VOLUMES.
 	Probe ProbeConfig
-	// Network, if set, returns the host end of a VM's network: one end of a datagram socket pair whose other end
-	// herd-egress's userspace stack holds. Nil boots VMs without a NIC.
+	// Network, if set, returns the VM end of a VM's network: one end of a datagram socket pair whose other end
+	// herd-egress's userspace stack holds (egress.StackNetwork.Attach). Nil boots VMs without a NIC.
 	Network func(id string) (*os.File, error)
+	// ReleaseNetwork, if set, is called once a VM is verified stopped, so its stack and egress binding go too
+	// (egress.StackNetwork.Release).
+	ReleaseNetwork func(id string)
 	// StopSettle bounds how long Delete waits, after Virtualization.framework accepted a stop, to observe the VM
 	// stopped; zero means 2 s. A VM still running after it is present with vmm.ErrDeleteNotVerified.
 	StopSettle time.Duration
 	// ProbeTimeout bounds the save/restore probe; zero means 2 min.
 	ProbeTimeout time.Duration
+	// ProbeInterval is how long a probe result stands before the next Capabilities runs the probe again; zero means
+	// 6 h. InvalidateProbe (on wake) and a newly unlocked console also re-run it.
+	ProbeInterval time.Duration
+	// Session reports the console session. MEMORY is declared only while it answers that a user is at the console
+	// with the screen unlocked; nil means it is never declared (IORegSession on a Mac).
+	Session Session
 }
 
 // ProbeConfig is the guest the save/restore probe boots: the actors' kernel and initramfs.
@@ -60,8 +69,9 @@ type VMM struct {
 	vms map[string]*instance
 	seq int
 
-	probeMu sync.Mutex
-	probe   *ProbeResult
+	probeMu    sync.Mutex
+	probe      *ProbeResult
+	probeStale bool
 }
 
 // instance is one VM this process started. busy serialises the operations that change it.
@@ -101,23 +111,46 @@ func New(cfg Config, hv Hypervisor) (*VMM, error) {
 	if cfg.ProbeTimeout == 0 {
 		cfg.ProbeTimeout = 2 * time.Minute
 	}
+	if cfg.ProbeInterval == 0 {
+		cfg.ProbeInterval = 6 * time.Hour
+	}
 	return &VMM{cfg: cfg, hv: hv, family: family, vms: map[string]*instance{}}, nil
 }
 
 func (v *VMM) vmDir(id string) string { return filepath.Join(v.cfg.StateDir, "vms", id) }
 
-// Capabilities declares VOLUMES unless this host's probe passed (see Probe).
+// Capabilities declares MEMORY only while both hold on this Mac: the save/restore probe passed (see Probe) and the
+// console session has a user with the screen unlocked. Anything else — a failed or unknown probe, a locked screen,
+// the login window, a session that does not answer — is VOLUMES, with the reason.
 func (v *VMM) Capabilities(ctx context.Context) (vmm.Capabilities, error) {
 	if err := ctx.Err(); err != nil {
 		return vmm.Capabilities{}, fmt.Errorf("vz: capabilities: %w", err)
 	}
-	r := v.Probe(ctx)
 	c := vmm.Capabilities{Platform: vmm.PlatformVZ, Arch: "arm64", SuspendMaxFidelity: vmm.FidelityVolumes}
-	if r.Passed() {
+	con, conErr := v.console(ctx)
+	r := v.probeFor(ctx, con, conErr == nil)
+	switch {
+	case !r.Passed():
+		c.Reason = "save/restore probe did not pass: " + r.Reason
+	case conErr != nil:
+		c.Reason = "console session unknown: " + conErr.Error()
+	case !con.Unlocked():
+		c.Reason = con.String()
+	default:
 		c.SuspendMaxFidelity = vmm.FidelityMemory
 		c.RestoreFamily = v.family
 	}
 	return c, nil
+}
+
+// console asks the session, bounded by ctx; no Session is an error.
+func (v *VMM) console(ctx context.Context) (Console, error) {
+	if v.cfg.Session == nil {
+		return Console{}, errors.New("no console session check configured")
+	}
+	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return callValue(sctx, "console session", func() (Console, error) { return v.cfg.Session.Console(sctx) })
 }
 
 func (v *VMM) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
@@ -365,6 +398,9 @@ func (v *VMM) destroy(ctx context.Context, inst *instance) (vmm.Presence, error)
 	if inst.network != nil {
 		_ = inst.network.Close()
 	}
+	if v.cfg.ReleaseNetwork != nil {
+		v.cfg.ReleaseNetwork(inst.id)
+	}
 	if err := ctx.Err(); err != nil {
 		return vmm.PresenceUnknown, fmt.Errorf("vz: delete %s: %w", inst.id, err)
 	}
@@ -445,7 +481,7 @@ func (v *VMM) Snapshot(ctx context.Context, id string, f vmm.Fidelity) (vmm.Snap
 			return vmm.Snapshot{}, err
 		}
 		if c.SuspendMaxFidelity < vmm.FidelityMemory {
-			return vmm.Snapshot{}, fmt.Errorf("vz: snapshot %s at MEMORY: this Mac has not shown it can save machine state (%s): %w", id, v.Probe(ctx).Reason, vmm.ErrFidelityUnsupported)
+			return vmm.Snapshot{}, fmt.Errorf("vz: snapshot %s at MEMORY: this Mac does not declare MEMORY now (%s): %w", id, c.Reason, vmm.ErrFidelityUnsupported)
 		}
 	default:
 		return vmm.Snapshot{}, fmt.Errorf("vz: snapshot %s at %v: %w", id, f, vmm.ErrFidelityUnsupported)

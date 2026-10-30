@@ -1,0 +1,93 @@
+package deploy
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net/http"
+	"net/netip"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/everdict/herd/egress"
+	"github.com/everdict/herd/egress/gvstack/gvvm"
+	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/vmm"
+	"github.com/everdict/herd/vmm/vz/vzfake"
+	"github.com/sirupsen/logrus"
+)
+
+// TestMacBackendNetworkIsHerdEgress (criterion vz-egress): the Mac backend as deploy.Herdlet assembles it, on the fake
+// hypervisor. A booted actor VM's only NIC is the file handle of its own gvisor-tap-vsock stack; from inside it DNS
+// is answered by herd-egress's synthetic DNS and an HTTP request is answered by herd-egress itself (deny-all until
+// the actor's policy is read). After the VM is deleted its stack is closed and the actor unbound.
+func TestMacBackendNetworkIsHerdEgress(t *testing.T) {
+	logrus.SetOutput(io.Discard)
+	dir := t.TempDir()
+	g := struct{ Kernel, Initrd string }{"/guest/Image", "/guest/initrd.img"}
+	hv := vzfake.New()
+	h := &Herdlet{StateDir: filepath.Join(dir, "state"), Kernel: g.Kernel, Initrd: g.Initrd, MacHost: "mac-1"}
+	be, err := h.macHost("herd-api.example:7443", hv, vzfake.UnlockedConsole())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c, err := be.VMM.Capabilities(ctx)
+	if err != nil || c.SuspendMaxFidelity != vmm.FidelityMemory || c.RestoreFamily != "microvm-vz-arm64-mac-1" {
+		t.Fatalf("capabilities %+v %v", c, err)
+	}
+	for _, m := range hv.Machines() {
+		if m.Config().Kernel != g.Kernel || m.Config().Network != nil {
+			t.Errorf("the probe booted %q with a NIC %v, want this host's arm64 guest without one", m.Config().Kernel, m.Config().Network)
+		}
+	}
+
+	be.OnActor("vm-1", link.ActorRef{Space: "space-1", Name: "mac-actor", UID: "u-1"})
+	if _, err := be.VMM.Boot(ctx, vmm.Spec{ID: "vm-1", Kernel: g.Kernel, Initrd: g.Initrd, VCPUs: 1, MemoryMiB: 256}); err != nil {
+		t.Fatal(err)
+	}
+	ms := hv.Machines()
+	nic := ms[len(ms)-1].Config().Network
+	if nic == nil {
+		t.Fatal("the actor VM has no NIC")
+	}
+	vm, err := gvvm.New(nic, egress.DefaultStackVM, egress.DefaultStackGateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	q := []byte{0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 3, 'a', 'p', 'i', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0, 1, 0, 1}
+	r, err := vm.Exchange(netip.AddrPortFrom(egress.DefaultStackGateway, 53), q, 5*time.Second)
+	if err != nil || netip.AddrFrom4([4]byte(r[len(r)-4:])) != egress.DefaultStackGateway {
+		t.Fatalf("DNS from the VM: %x %v", r, err)
+	}
+	conn, err := vm.DialTCP(ctx, netip.MustParseAddrPort("203.0.113.9:80"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: api.example\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	conn.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "herd-egress") {
+		t.Errorf("HTTP from the VM: %d %q, want herd-egress's 403 (no policy read yet)", resp.StatusCode, body)
+	}
+
+	if p, err := be.VMM.Delete(ctx, "vm-1"); p != vmm.PresenceGone {
+		t.Fatalf("Delete: %v %v", p, err)
+	}
+	dctx, dcancel := context.WithTimeout(ctx, time.Second)
+	defer dcancel()
+	if c, err := vm.DialTCP(dctx, netip.MustParseAddrPort("203.0.113.9:80")); err == nil {
+		c.Close()
+		t.Errorf("a deleted VM's link still carries connections")
+	}
+}

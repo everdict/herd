@@ -4,30 +4,18 @@ package deploy
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/everdict/herd/vmm/vz"
 )
 
-// newHost is Virtualization.framework (ADR R-D8): native vsock, virtio-fs, VOLUMES unless the Mac passed the
-// save/restore probe.
+// newHost is Virtualization.framework (ADR R-D8, A-21, A-22): native vsock, virtio-fs, each VM's NIC into the
+// in-process herd-egress, VOLUMES unless the Mac passed the save/restore probe and its console is unlocked.
 func (h *Herdlet) newHost(ctx context.Context) (Backend, error) {
-	host := h.MacHost
-	if host == "" {
-		n, err := os.Hostname()
-		if err != nil {
-			return Backend{}, err
-		}
-		host = strings.ToLower(strings.Split(n, ".")[0])
+	api := h.API
+	if s, err := readState(h.StateDir); err == nil && api == "" {
+		api = s.API
 	}
-	v, err := vz.New(vz.Config{StateDir: filepath.Join(h.StateDir, "vms"), SnapshotDir: filepath.Join(h.StateDir, "vm-snapshots"), Host: host,
-		Probe: vz.ProbeConfig{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline}}, vz.Native())
-	if err != nil {
-		return Backend{}, err
-	}
-	return Backend{VMM: v, Guests: v, Version: "virtualization.framework"}, nil
+	return h.macHost(api, vz.Native(), vz.IORegSession{})
 }
 
 // vzBuilt reports whether this build can drive Virtualization.framework.

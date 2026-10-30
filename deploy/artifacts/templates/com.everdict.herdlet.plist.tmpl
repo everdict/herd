@@ -24,6 +24,19 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<!-- Interactive: launchd does not throttle the VMs' work; 256 open files is short for a host of VMs. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>65536</integer>
+	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>65536</integer>
+	</dict>
 	<key>StandardErrorPath</key>
 	<string>/var/log/herdlet.log</string>
 </dict>

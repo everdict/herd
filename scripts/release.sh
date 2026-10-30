@@ -32,6 +32,11 @@ for p in linux/amd64 linux/arm64 darwin/arm64; do
 		elif [ "$(uname -s)" = Darwin ]; then
 			build "$goos" "$goarch" 1 "$c" "$dir/$c"
 			codesign --force --entitlements "$here/vmm/vz/vz.entitlements" -s - "$dir/$c"
+			# herdlet doctor refuses a Mac herdlet without the entitlement; fail here first.
+			if [ "$(codesign -d --entitlements - --xml "$dir/$c" | plutil -extract com.apple.security.virtualization raw -o - -)" != true ]; then
+				echo "release.sh: $dir/$c is not signed with com.apple.security.virtualization" >&2
+				exit 1
+			fi
 		else
 			echo "release.sh: skipping darwin $c (Virtualization.framework needs cgo on a Mac)" >&2
 		fi

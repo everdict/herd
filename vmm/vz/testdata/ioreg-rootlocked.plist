@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IOKitBuildVersion</key>
+	<string>Darwin Kernel Version 25.2.0</string>
+	<key>IOConsoleLocked</key>
+	<true/>
+	<key>IOConsoleUsers</key>
+	<array>
+		<dict>
+			<key>kCGSSessionAuditIDKey</key>
+			<integer>100008</integer>
+			<key>kCGSSessionGroupIDKey</key>
+			<integer>20</integer>
+			<key>kCGSSessionIDKey</key>
+			<integer>257</integer>
+			<key>kCGSSessionLoginwindowSafeLogin</key>
+			<false/>
+			<key>kCGSSessionOnConsoleKey</key>
+			<true/>
+			<key>kCGSSessionSystemSafeBoot</key>
+			<false/>
+			<key>kCGSSessionUserIDKey</key>
+			<integer>501</integer>
+			<key>kCGSSessionUserNameKey</key>
+			<string>nahyun</string>
+			<key>kCGSessionLoginDoneKey</key>
+			<true/>
+			<key>kSCSecuritySessionID</key>
+			<integer>100008</integer>
+		</dict>
+	</array>
+	<key>IORegistryEntryName</key>
+	<string>Root</string>
+</dict>
+</plist>

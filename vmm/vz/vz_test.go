@@ -29,6 +29,9 @@ func newVMM(t *testing.T, hv *vzfake.Hypervisor, cfg vz.Config) *vz.VMM {
 	if cfg.StopSettle == 0 {
 		cfg.StopSettle = 50 * time.Millisecond
 	}
+	if cfg.Session == nil {
+		cfg.Session = vzfake.UnlockedConsole()
+	}
 	v, err := vz.New(cfg, hv)
 	if err != nil {
 		t.Fatalf("New: %v", err)

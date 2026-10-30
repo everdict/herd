@@ -80,6 +80,9 @@ type Capabilities struct {
 	SuspendMaxFidelity Fidelity
 	// RestoreFamily is the family this host's MEMORY snapshots restore within; empty when it cannot take one.
 	RestoreFamily string
+	// Reason says why the host declares less than its platform could (e.g. a Mac whose console is locked); empty
+	// otherwise.
+	Reason string
 }
 
 // Share is a host directory exposed to the guest over virtio-fs.

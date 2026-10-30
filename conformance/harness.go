@@ -29,6 +29,8 @@ type HerdletSpec struct {
 	Slots  int
 	Labels map[string]string
 	Caps   vmm.Capabilities
+	// Backend, if set, is the herdlet's hypervisor instead of the fake (Herdlet.VMM is then nil); Caps is unused.
+	Backend vmm.VMM
 	// Configure, if set, finishes the herdlet before it dials (e.g. gives it Machines over its VMM).
 	Configure func(*herdlet.Agent)
 }
@@ -162,8 +164,13 @@ func (e *Env) AddHerdlet(t testing.TB, s HerdletSpec) *Herdlet {
 		s.Caps = vmm.Capabilities{Platform: vmm.PlatformCloudHypervisor, Arch: "amd64", SuspendMaxFidelity: vmm.FidelityMemory, RestoreFamily: "microvm-ch-amd64-tigerlake"}
 	}
 	ctx, cancel := context.WithCancel(e.ctx)
-	h := &Herdlet{Spec: s, VMM: fake.New(s.Caps, e.vms), cancel: cancel, done: make(chan struct{})}
-	a := &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: h.VMM,
+	h := &Herdlet{Spec: s, cancel: cancel, done: make(chan struct{})}
+	var backend vmm.VMM = s.Backend
+	if backend == nil {
+		h.VMM = fake.New(s.Caps, e.vms)
+		backend = h.VMM
+	}
+	a := &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: backend,
 		Snapshots: e.Snapshots, Rewrite: h.answer}
 	if s.Configure != nil {
 		s.Configure(a)

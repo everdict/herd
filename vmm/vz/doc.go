@@ -13,6 +13,8 @@
 //     resumes. MEMORY also saves the machine state, and is offered only on a Mac whose probe passed: Capabilities
 //     declares MEMORY (family microvm-vz-arm64-<host>) only after validateSaveRestoreSupport answered true AND a
 //     real save/restore round trip succeeded here; the R0 spike saw the first without the second (R-D9, ADR A-8).
+//     It is MEMORY only while the console (Session) also has a user with the screen unlocked, and the probe is run
+//     again on wake, after ProbeInterval and when the console is unlocked after a locked probe (ADR A-22).
 //   - Delete answers gone only after the VM is observed stopped and its directory is observed absent.
 //
 // The binary that uses Native must be signed with the com.apple.security.virtualization entitlement (vz.entitlements;

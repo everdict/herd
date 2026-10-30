@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -229,7 +230,10 @@ func TestWarmVMHandedToCreateActor(t *testing.T) {
 	tpl := twoContainerTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
 	var m *machine.Machines
 	var pool *machine.Pool
+	var mu sync.Mutex
+	told := map[string]link.ActorRef{}
 	e.AddHerdlet(t, conformance.HerdletSpec{Name: "ubuntu", Slots: 4, Caps: ubuntuCaps, Configure: func(a *herdlet.Agent) {
+		a.OnActor = func(vm string, r link.ActorRef) { mu.Lock(); defer mu.Unlock(); told[vm] = r }
 		machines(t, reg, &m)(a)
 		pool = &machine.Pool{Machines: m, Health: machine.GuestHealth{VMM: a.VMM}, Interval: 20 * time.Millisecond}
 		// Declared by count only: the spec comes with the template's first boot.
@@ -254,6 +258,12 @@ func TestWarmVMHandedToCreateActor(t *testing.T) {
 	if share := m.ShareDir(a.GetMetadata().GetUid()); filepath.Base(share)[:5] != "warm-" {
 		t.Fatalf("the actor got a new VM (%s), not the warm one", share)
 	}
+	// The warm VM keeps its own id on the hypervisor; its network (a Mac's StackNetwork) learns the actor under it.
+	mu.Lock()
+	if r := told[filepath.Base(m.ShareDir(a.GetMetadata().GetUid()))]; r.Name != "a1" || r.Space != e.Space || r.UID != a.GetMetadata().GetUid() {
+		t.Errorf("the adopted warm VM's id was told %+v, want %s/a1 (told %v)", r, e.Space, told)
+	}
+	mu.Unlock()
 	for pool.Counts()[tpl.GetMetadata().GetUid()] != 1 {
 		if time.Now().After(deadline) {
 			t.Fatal("the pool did not refill")

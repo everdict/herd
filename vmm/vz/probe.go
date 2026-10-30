@@ -26,24 +26,47 @@ type ProbeResult struct {
 	Reason string
 	// At is when the probe ran.
 	At time.Time
+	// Console is the console session the probe ran under (zero if the session did not answer).
+	Console Console
 }
 
 // Passed reports whether this Mac may declare MEMORY.
 func (r ProbeResult) Passed() bool { return r.Ran && r.Validated && r.RoundTrip && r.Reason == "" }
 
-// Probe runs the save/restore probe once and returns its result; later calls return the same result. A probe that
-// fails, times out or cannot run leaves the Mac at VOLUMES.
+// Probe returns this Mac's save/restore probe result, running the probe when there is none that still stands (see
+// probeFor). A probe that fails, times out or cannot run leaves the Mac at VOLUMES.
 func (v *VMM) Probe(ctx context.Context) ProbeResult {
+	con, err := v.console(ctx)
+	return v.probeFor(ctx, con, err == nil)
+}
+
+// InvalidateProbe makes the next Capabilities run the probe again. herdlet calls it when the Mac wakes from sleep:
+// the session, the keychain and the framework's state may all have changed while it slept.
+func (v *VMM) InvalidateProbe() {
 	v.probeMu.Lock()
 	defer v.probeMu.Unlock()
-	if v.probe != nil {
-		return *v.probe
+	v.probeStale = true
+}
+
+// probeFor returns the probe result that stands for the console con (known only if conOK), running the probe again
+// when there is none, it was invalidated, it is older than ProbeInterval, or it ran under a console that says
+// nothing about this one: a probe from a locked screen, the login window or another user does not stand for an
+// unlocked console.
+func (v *VMM) probeFor(ctx context.Context, con Console, conOK bool) ProbeResult {
+	v.probeMu.Lock()
+	defer v.probeMu.Unlock()
+	if r := v.probe; r != nil && !v.probeStale && time.Since(r.At) < v.cfg.ProbeInterval &&
+		(!conOK || !con.Unlocked() || (r.Console.Unlocked() && r.Console.User == con.User)) {
+		return *r
 	}
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.cfg.ProbeTimeout)
 	defer cancel()
 	r := v.runProbe(pctx)
 	r.At = time.Now()
-	v.probe = &r
+	if conOK {
+		r.Console = con
+	}
+	v.probe, v.probeStale = &r, false
 	return r
 }
 
@@ -53,6 +76,10 @@ func (v *VMM) runProbe(ctx context.Context) ProbeResult {
 		return ProbeResult{Reason: "no probe guest configured"}
 	}
 	r := ProbeResult{Ran: true}
+	if err := os.MkdirAll(v.cfg.StateDir, 0o700); err != nil {
+		r.Reason = err.Error()
+		return r
+	}
 	dir, err := os.MkdirTemp(v.cfg.StateDir, ".probe-")
 	if err != nil {
 		r.Reason = err.Error()

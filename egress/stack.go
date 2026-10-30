@@ -22,8 +22,8 @@ type Flow struct {
 //   - UDP to port 53 at the gateway address is answered by the StackConfig's DNS function; all other UDP, ICMP and
 //     IPv6 is dropped and counted.
 //
-// The VZ half (gvisor-tap-vsock and the attachment) lands with R7 (PLT-118); vmm/vz attaches VMFile. egress/stacktest
-// holds a fake with the same contract.
+// egress/gvstack is the real one (gvisor-tap-vsock, ADR A-21); StackNetwork hands its file to vmm/vz as the VM's NIC.
+// egress/stacktest holds a fake with the same contract.
 type Stack interface {
 	// Accept returns the VM's next TCP flow; it fails once the stack is closed.
 	Accept(ctx context.Context) (Flow, error)

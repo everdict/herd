@@ -28,7 +28,8 @@ type Worker struct {
 type Hub struct {
 	// Timeout bounds a call with no deadline of its own.
 	Timeout time.Duration
-	// OnRegister, if set, is called with each registration and capacity update before it is acknowledged.
+	// OnRegister, if set, is called with each registration, capacity update and capabilities update before it is
+	// acknowledged.
 	OnRegister func(ctx context.Context, r Register) error
 
 	mu      sync.Mutex
@@ -100,9 +101,14 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		switch {
 		case up.Outcome != nil:
 			c.deliver(*up.Outcome)
-		case up.Capacity != nil:
+		case up.Capacity != nil || up.Capabilities != nil:
 			h.mu.Lock()
-			c.reg.Capacity = *up.Capacity
+			if up.Capacity != nil {
+				c.reg.Capacity = *up.Capacity
+			}
+			if up.Capabilities != nil {
+				c.reg.Capabilities = *up.Capabilities
+			}
 			reg := c.reg
 			h.mu.Unlock()
 			if h.OnRegister != nil {

@@ -5,6 +5,7 @@
 package vzfake
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -304,3 +305,53 @@ func (m *Machine) RestoreState(path string) error {
 }
 
 func (m *Machine) MachineID() []byte { return append([]byte(nil), m.id...) }
+
+// Console is a fake console session: a user whose screen locks and unlocks, the login window, or a session that
+// does not answer.
+type Console struct {
+	mu    sync.Mutex
+	state vz.Console
+	err   error
+	calls int
+}
+
+var _ vz.Session = (*Console)(nil)
+
+// UnlockedConsole is user "herd" at the console with the screen unlocked.
+func UnlockedConsole() *Console { return &Console{state: vz.Console{User: "herd"}} }
+
+// Set makes the session report c.
+func (s *Console) Set(c vz.Console) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state, s.err = c, nil
+}
+
+// Lock locks the screen (true) or unlocks it (false), keeping the user.
+func (s *Console) Lock(locked bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Locked, s.err = locked, nil
+}
+
+// Fail makes the session answer err.
+func (s *Console) Fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+// Calls is how many times the session was asked.
+func (s *Console) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// Console implements vz.Session.
+func (s *Console) Console(context.Context) (vz.Console, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return s.state, s.err
+}

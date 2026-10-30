@@ -9,7 +9,7 @@
 //
 // The bindings file is a JSON list of {"space","name","uid","source"} (source: the VM's TAP address); herdlet writes
 // it, and herd-egress re-reads it every -interval. macOS hosts serve the same gateway behind a userspace stack per VM
-// (egress.Stack), which lands with R7.
+// (egress.Stack, egress/gvstack), which a macOS herdlet runs in-process (ADR A-21).
 package main
 
 import (
