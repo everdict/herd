@@ -83,3 +83,75 @@ func TestReadsTar(t *testing.T) {
 		}
 	}
 }
+
+// mke2fsRunner is an mke2fs that names version, and fails -d on a tarball with tarErr when tarErr is set (e2fsprogs
+// 1.47.1+ built without libarchive).
+type mke2fsRunner struct {
+	version string
+	tarErr  string
+	calls   [][]string
+}
+
+func (f *mke2fsRunner) LookPath(name string) (string, error) {
+	if name == "mke2fs" {
+		return "/opt/bin/mke2fs", nil
+	}
+	return "", fmt.Errorf("%s: not found", name)
+}
+
+func (f *mke2fsRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	if len(args) == 1 && args[0] == "-V" {
+		return []byte(f.version), nil
+	}
+	for i, a := range args {
+		if a == "-d" && i+1 < len(args) {
+			if fi, err := os.Stat(args[i+1]); err == nil && !fi.IsDir() && f.tarErr != "" {
+				return []byte(f.tarErr), errors.New("exit status 1")
+			}
+		}
+	}
+	return nil, nil
+}
+
+// TestDetectProbesTarInput: a version that should read tars is not enough. An mke2fs 1.47.2 built without libarchive
+// refuses every tarball, so Detect must try one and unpack to a directory when the tool refuses (PLT-196).
+func TestDetectProbesTarInput(t *testing.T) {
+	ctx := context.Background()
+	r := &mke2fsRunner{version: "mke2fs 1.47.2 (1-Jan-2025)",
+		tarErr: "__populate_fs_from_tar: you need libarchive to be able to process tarballs"}
+	b, why, err := Detect(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := b.(EXT4); !ok || !e.FromDir {
+		t.Fatalf("Detect with an mke2fs that refuses tars = %#v (%q); want ext4 from a directory", b, why)
+	}
+	if !strings.Contains(why, "libarchive") {
+		t.Errorf("why does not say why tar input was refused: %q", why)
+	}
+	r.tarErr = ""
+	b, why, err = Detect(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := b.(EXT4); !ok || e.FromDir {
+		t.Fatalf("Detect with an mke2fs that reads tars = %#v (%q); want ext4 from the tar", b, why)
+	}
+}
+
+// TestProbeTarRealMke2fs runs the probe against the host's mke2fs: one whose version predates tar input must fail it,
+// so the probe exercises tar input rather than passing on any mke2fs. It skips where mke2fs is not installed.
+func TestProbeTarRealMke2fs(t *testing.T) {
+	ctx := context.Background()
+	p, err := Exec{}.LookPath("mke2fs")
+	if err != nil {
+		t.Skip("no mke2fs")
+	}
+	v, _ := Exec{}.Run(ctx, p, "-V")
+	perr := probeTar(ctx, EXT4{Runner: Exec{}, Path: p})
+	t.Logf("%s: probe: %v", strings.SplitN(string(v), "\n", 2)[0], perr)
+	if !readsTar(string(v)) && perr == nil {
+		t.Fatalf("an mke2fs older than 1.47.1 passed the tar probe")
+	}
+}

@@ -1,10 +1,11 @@
 // Package mkfs builds read-only root filesystem images from a flattened tar with the host's filesystem tools:
 // erofs with erofs-utils (mkfs.erofs --tar, 1.7 or later) where it is installed, ext4 with e2fsprogs (mke2fs -d
-// <tarball>, 1.47.1 or later) otherwise. Both read owners and modes from the tar, so no root is needed. The tools
+// <tarball>, 1.47.1 or later and built with libarchive, which Detect checks by building from a tar) otherwise. Both read owners and modes from the tar, so no root is needed. The tools
 // are reached through Runner, so tests check the command lines without running them.
 package mkfs
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -117,13 +118,48 @@ func Detect(ctx context.Context, r Runner) (b image.Builder, why string, err err
 		if p, err := r.LookPath(name); err == nil {
 			out, _ := r.Run(ctx, p, "-V")
 			if readsTar(string(out)) {
-				return EXT4{Runner: r, Path: p}, strings.Join(append(notes, name+" at "+p+" reads tars"), "; "), nil
+				// The version is not enough: e2fsprogs built without libarchive refuses every tarball, so try one.
+				perr := probeTar(ctx, EXT4{Runner: r, Path: p})
+				if perr == nil {
+					return EXT4{Runner: r, Path: p}, strings.Join(append(notes, name+" at "+p+" reads tars"), "; "), nil
+				}
+				return EXT4{Runner: r, Path: p, FromDir: true}, strings.Join(append(notes, name+" at "+p+" refused a tar ("+perr.Error()+"): unpacking to a directory"), "; "), nil
 			}
 			return EXT4{Runner: r, Path: p, FromDir: true}, strings.Join(append(notes, name+" at "+p+" predates tar input (< 1.47.1): unpacking to a directory"), "; "), nil
 		}
 	}
 	notes = append(notes, "no mke2fs")
 	return nil, strings.Join(notes, "; "), fmt.Errorf("%w: %s", ErrNoTool, strings.Join(notes, "; "))
+}
+
+// probeTar builds an image with e from a one-file tar in a scratch directory, so e must read the tar itself.
+func probeTar(ctx context.Context, e EXT4) error {
+	dir, err := os.MkdirTemp("", "herd-mkfs-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	tarPath := filepath.Join(dir, "probe.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		return err
+	}
+	tw := tar.NewWriter(f)
+	body := []byte("probe\n")
+	err = tw.WriteHeader(&tar.Header{Name: "probe", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+	if err == nil {
+		_, err = tw.Write(body)
+	}
+	if err == nil {
+		err = tw.Close()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return e.Build(ctx, tarPath, filepath.Join(dir, "probe.img"))
 }
 
 var versionRE = regexp.MustCompile(`mke2fs (\d+)\.(\d+)(?:\.(\d+))?`)
