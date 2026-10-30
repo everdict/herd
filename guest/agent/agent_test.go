@@ -66,9 +66,48 @@ func startGuest(t *testing.T, targets ...agent.Target) *guestUnderTest {
 	sock := sockPath(t, "guest.sock")
 	h := &guestUnderTest{t: t, targets: targets, sock: sock}
 	h.start()
+	// Cleanups run last-registered first: the guest stops, then its processes are awaited, then the targets'
+	// TempDirs (registered before this) are removed.
+	t.Cleanup(h.awaitProcesses)
 	t.Cleanup(h.stop)
 	return h
 }
+
+// awaitProcesses waits until every record in every target has its exit. A shim outlives the call that started it
+// and writes pgid and exit into the record after StartProcess has returned; a test that returns before that would
+// have its TempDir removal race the shim's writes (RemoveAll: directory not empty). Once exit is in place the shim
+// writes nothing more.
+func (h *guestUnderTest) awaitProcesses() {
+	deadline := time.Now().Add(awaitExitTimeout)
+	for _, tg := range h.targets {
+		st, err := execrec.OpenStore(tg.Rootfs())
+		if err != nil {
+			h.t.Errorf("awaiting processes: %v", err)
+			continue
+		}
+		ids, err := st.List()
+		if err != nil {
+			h.t.Errorf("awaiting processes: %v", err)
+		}
+		for _, id := range ids {
+			for {
+				rec, err := st.Read(id)
+				if err == nil && rec.Exited {
+					break
+				}
+				if time.Now().After(deadline) {
+					h.t.Errorf("process %s in %s still running at cleanup (%v): a test must end the processes it starts", id, tg.Name(), err)
+					break
+				}
+				time.Sleep(agent.PollInterval)
+			}
+		}
+		st.Close()
+	}
+}
+
+// awaitExitTimeout bounds how long cleanup waits for a test's processes to write their exit.
+const awaitExitTimeout = 10 * time.Second
 
 func (h *guestUnderTest) start() {
 	g, err := agent.New(h.targets...)
@@ -280,6 +319,30 @@ func TestProcessStdin(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("input to a process without stdin = %v, want FailedPrecondition", err)
 	}
+}
+
+// TestProcessCleanupAwaitsRunningProcesses: a test that returns while its process still runs (as TestProcessStdin
+// did with its `true`) must not have its TempDir removed until the shim has written the exit; otherwise RemoveAll
+// races the shim's writes and fails with "directory not empty".
+func TestProcessCleanupAwaitsRunningProcesses(t *testing.T) {
+	t.Run("returns-early", func(t *testing.T) {
+		ctx := testCtx(t)
+		tg := newTarget(t, "main")
+		var id string
+		// Registered after the target's TempDir and before the guest: runs right before the TempDir is removed.
+		t.Cleanup(func() {
+			st, err := execrec.OpenStore(tg.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if rec, err := st.Read(id); err != nil || !rec.Exited {
+				t.Errorf("process %s has no exit when its TempDir is removed (%v): the shim still writes into the record", id, err)
+			}
+		})
+		h := startGuest(t, tg)
+		id = h.start1(ctx, &ateenv.StartProcessRequest{Command: []string{"sh", "-c", "sleep 0.3"}}).GetProcessId()
+	})
 }
 
 func TestProcessSignalAndTimeout(t *testing.T) {
