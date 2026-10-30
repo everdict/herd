@@ -45,7 +45,7 @@ credential injection), `herd-guest` (the in-VM agent).
 | `docs/adr/0001-herd.md` | The decisions herd is built on |
 | `api/ateapi/v1` | Vendored Substrate `Control` subset (proto + generated Go), pinned to upstream commit `6d7b3f49` |
 | `api/herdext/v1` | herd's capability extension |
-| `vmm` | The hypervisor boundary; `vmm/fake` (in-memory), `vmm/vmmtest` (the contract every backend keeps), `vmm/cloudhypervisor` (linux), `vmm/vz` (darwin) |
+| `vmm` | The hypervisor boundary; `vmm/fake` (in-memory), `vmm/vmmtest` (the contract every backend keeps), `vmm/cloudhypervisor` (linux), `vmm/vz` (Virtualization.framework; binding darwin/arm64, `vmm/vz/vzfake` everywhere) |
 | `guest` | Guest kernel configuration (one for arm64 and amd64), initramfs list, `build.sh` |
 | `internal/cmd/protosubset` | Cuts the subset out of the upstream proto |
 | `cmd/herd-api`, `apiserver` | herd-api: the Control subset, the Capabilities extension, workflows, `Reconcile` |

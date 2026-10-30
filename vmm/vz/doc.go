@@ -1,7 +1,20 @@
 // Package vz is herd's macOS host backend: Apple Virtualization.framework through Code-Hex/vz running the same arm64
 // Linux guest, with virtio-fs volumes, native vsock and a file-handle network attachment into herd-egress (spec R-D8).
-// A Mac declares VOLUMES unless it has shown it can save and restore machine state in its session (R-D9).
 //
-// R0 ships a stub that answers *vmm.NotImplementedError for every operation; the backend lands in R2/R7
-// (PLT-114, PLT-118) and runs vmmtest.Run on a Mac.
+// The backend's logic (VMM) builds on every platform against the Hypervisor interface; Native, the Code-Hex/vz
+// binding, builds only on darwin/arm64 with cgo, and vzfake is the in-memory Hypervisor the tests run everywhere.
+//
+//   - Boot builds a VM from the kernel Image and initramfs with one virtio-fs device per share, a virtio-vsock device,
+//     a virtio console logged to the VM's directory and, if configured, a file-handle NIC, and answers only once the
+//     guest accepts a connection on its vsock port (herd-guest's 8080).
+//   - Every Virtualization.framework call is bounded by the caller's context: one that does not answer makes the
+//     operation answer unknown (presence) or fail (snapshots), never a guess (R-D6, ADR A-6).
+//   - Snapshot at VOLUMES pauses the VM, flushes the shares to stable storage, records the snapshot durably and
+//     resumes. MEMORY also saves the machine state, and is offered only on a Mac whose probe passed: Capabilities
+//     declares MEMORY (family microvm-vz-arm64-<host>) only after validateSaveRestoreSupport answered true AND a
+//     real save/restore round trip succeeded here; the R0 spike saw the first without the second (R-D9, ADR A-8).
+//   - Delete answers gone only after the VM is observed stopped and its directory is observed absent.
+//
+// The binary that uses Native must be signed with the com.apple.security.virtualization entitlement (vz.entitlements;
+// realtest.sh signs the test binary ad hoc and runs TestReal against a real guest).
 package vz
