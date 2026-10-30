@@ -1,0 +1,17 @@
+# herd guest initramfs, in gen_init_cpio format: one list for both architectures. build.sh points the variables at
+# static binaries built for the target architecture; herd-guest (R5, PLT-104) is /init.
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+nod /dev/null 0666 0 0 c 1 3
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /run 0755 0 0
+dir /tmp 1777 0 0
+dir /mnt 0755 0 0
+dir /mnt/volumes 0755 0 0
+dir /bin 0755 0 0
+dir /sbin 0755 0 0
+file /init ${HERD_GUEST} 0755 0 0
+file /bin/busybox ${BUSYBOX} 0755 0 0
+file /sbin/crun ${CRUN} 0755 0 0
+slink /bin/sh /bin/busybox 0777 0 0

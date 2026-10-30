@@ -25,7 +25,7 @@ var required = []string{
 // kernels are built from one configuration.
 var archOnly = map[string][]string{
 	"amd64": {"64BIT", "HYPERVISOR_GUEST", "PARAVIRT", "KVM_GUEST", "PVH", "SERIAL_8250", "SERIAL_8250_CONSOLE"},
-	"arm64": {"ARM64_4K_PAGES", "SERIAL_AMBA_PL011", "SERIAL_AMBA_PL011_CONSOLE", "RTC_DRV_PL031", "ARM_GIC_V3"},
+	"arm64": {"ARM64_4K_PAGES", "ARM_GIC_V3", "ARM_GIC_V3_ITS", "PCI_HOST_GENERIC", "SERIAL_AMBA_PL011", "SERIAL_AMBA_PL011_CONSOLE", "RTC_DRV_PL031"},
 }
 
 var line = regexp.MustCompile(`^CONFIG_([A-Z0-9_]+)=(.*)$`)
