@@ -30,6 +30,7 @@ func workerCapabilities(r link.Register) *herdext.WorkerCapabilities {
 		PortableRestoreFamily: r.Capabilities.PortableRestoreFamily,
 		HypervisorVersion:     r.Capabilities.HypervisorVersion,
 		Reason:                r.Capabilities.Reason,
+		EgressAllowPrefixes:   r.Capabilities.EgressAllowPrefixes,
 	}
 }
 

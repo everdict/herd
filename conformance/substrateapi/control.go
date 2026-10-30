@@ -110,6 +110,9 @@ func DialControl(e Endpoint, token string) (*Control, error) {
 // Close closes the connection.
 func (c *Control) Close() error { return c.cc.Close() }
 
+// Conn is the connection, for a caller that asks the target more than the suite does (herd conformance).
+func (c *Control) Conn() grpc.ClientConnInterface { return c.cc }
+
 func invoke[R proto.Message](ctx context.Context, c *Control, method string, req proto.Message, resp R) (R, error) {
 	if err := c.cc.Invoke(ctx, controlService+method, req, resp); err != nil {
 		var zero R

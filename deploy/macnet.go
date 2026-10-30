@@ -34,7 +34,7 @@ func (h *Herdlet) macHost(api string, hv vz.Hypervisor, s vz.Session) (Backend, 
 		// herd-api is a host-side target: no actor reaches it through the gateway.
 		hostNames = append(hostNames, host)
 	}
-	guard, err := egress.NewGuard(egress.GuardConfig{HostNames: hostNames})
+	guard, err := egress.NewGuard(egress.GuardConfig{HostNames: hostNames, LabAllow: h.EgressAllow})
 	if err != nil {
 		return Backend{}, err
 	}

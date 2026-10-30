@@ -67,6 +67,10 @@ type Herdlet struct {
 	Virtiofsd     string
 	VirtiofsdArgs string
 	MacHost       string
+	// EgressAllow are the operator's lab allowances (-egress-allow-prefix): the herdlet reports them in its
+	// capabilities, a Mac's in-process herd-egress applies them, and herd all-in-one hands them to its herd-egress.
+	// On a Linux host that runs herd-egress apart, give herd-egress the same flag.
+	EgressAllow list
 
 	// VMM and Guests, if set, replace the host's hypervisor (tests run the fake here); Images, if set with them,
 	// gives the herdlet machines over that VMM, as the real host has.
@@ -99,6 +103,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Virtiofsd, "virtiofsd", "/usr/libexec/virtiofsd", "virtiofsd binary (Linux)")
 	fs.StringVar(&h.VirtiofsdArgs, "virtiofsd-args", "", "extra virtiofsd arguments, space-separated (Linux)")
 	fs.StringVar(&h.MacHost, "host", "", "this Mac's label for its MEMORY restore family (macOS; default: the hostname)")
+	fs.Var(&h.EgressAllow, "egress-allow-prefix", egressAllowUsage)
 }
 
 // RunFlags registers `herdlet run`'s flags: the host flags, and a herdlet credential to dial with instead of a join.
@@ -327,6 +332,9 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if err := h.preflight(); err != nil {
 		return err
 	}
+	if err := labAllow("herdlet", h.EgressAllow); err != nil {
+		return err
+	}
 	st, err := h.credentials(ctx)
 	if err != nil {
 		return err
@@ -355,7 +363,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	}
 	log.Printf("herdlet: rootfs images: %s", why)
 	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, VMM: host.VMM,
-		Snapshots: snaps, HypervisorVersion: host.Version, Machines: m,
+		Snapshots: snaps, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow,
 		Boot: vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}}
 	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console
 	// locked is VOLUMES at once).

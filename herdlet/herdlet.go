@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 
@@ -33,6 +34,9 @@ type Agent struct {
 	// HypervisorVersion and Reason are reported with the capabilities.
 	HypervisorVersion string
 	Reason            string
+	// EgressAllowPrefixes are the operator's lab allowances on this host's herd-egress; they are reported with the
+	// capabilities so a conformance report can say they were set.
+	EgressAllowPrefixes []string
 	// Rewrite, if set, replaces each outcome before it is sent; returning false sends nothing. It exists so
 	// conformance suites can make a herdlet lie or fall silent.
 	Rewrite func(link.Work, link.Outcome) (link.Outcome, bool)
@@ -350,7 +354,7 @@ func (a *Agent) declare(caps vmm.Capabilities) link.Capabilities {
 	return link.Capabilities{
 		Platform: caps.Platform, Arch: caps.Arch, SuspendMaxFidelity: caps.SuspendMaxFidelity,
 		RestoreFamily: caps.RestoreFamily, PortableRestoreFamily: vmm.PortableRestoreFamily,
-		HypervisorVersion: a.HypervisorVersion, Reason: reason,
+		HypervisorVersion: a.HypervisorVersion, Reason: reason, EgressAllowPrefixes: a.EgressAllowPrefixes,
 	}
 }
 
@@ -386,7 +390,7 @@ func (a *Agent) watchCapabilities(ctx context.Context, last link.Capabilities, s
 			continue
 		}
 		now := a.declare(caps)
-		if now == last {
+		if reflect.DeepEqual(now, last) {
 			continue
 		}
 		if err := send(link.Up{Capabilities: &now}); err != nil {

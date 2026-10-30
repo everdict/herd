@@ -93,7 +93,10 @@ type Result struct {
 
 // Report is a run against one target.
 type Report struct {
-	Target  string
+	Target string
+	// Header is printed before the cases: what about the target a reader of the report must know that the suite
+	// does not read itself (herd conformance adds whether herd's workers ran herd-egress with a lab allowance).
+	Header  []string
 	Results []Result
 }
 
@@ -135,8 +138,11 @@ func (r Report) Get(name string) (Result, bool) {
 	return Result{}, false
 }
 
-// Print writes the report: one line per case, then the target's skip list.
+// Print writes the report: its header, one line per case, then the target's skip list.
 func (r Report) Print(w io.Writer) {
+	for _, h := range r.Header {
+		fmt.Fprintln(w, h)
+	}
 	n := map[Outcome]int{}
 	for _, c := range r.Results {
 		n[c.Outcome]++

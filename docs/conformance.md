@@ -50,7 +50,8 @@ and its `X-Conformance-Credential` header; it never echoes a header back, so the
 `--echo-url` is the `http://` URL a guest reaches it at **through the target's egress**: a DNS name the target's
 gateway resolves to the suite's machine, at an address the gateway does not count host-side (herd-egress refuses
 loopback, private, link-local, CGNAT and metadata addresses whatever the policy says, so on a LAN the suite must run
-where the gateway sees a public address, or behind a port forward that has one).
+where the gateway sees a public address, or behind a port forward that has one, or the operator opens exactly the echo
+host's address with herd's lab allowance: [A lab echo host without a public address](#a-lab-echo-host-without-a-public-address)).
 
 **`egress-walk`** (`--egress-walk <URL>`, with `--echo-listen`, `--echo-url`; `--egress-bound`, default 15 s;
 `--host-side u1,u2` adds targets). The suite creates an actor, resumes it, and creates its `EgressPolicy` listing only
@@ -215,6 +216,54 @@ herd conformance --target herd-all-in-one --endpoint 192.168.1.10:7443 --token-f
 The egress cases need the VM's network to go through herd-egress: on a Mac that is the in-process gateway (ADR A-21);
 on Ubuntu it is the VM's TAP and nftables table (A-18), which the Cloud Hypervisor backend must have attached for the
 listed host to answer at all.
+
+### A lab echo host without a public address
+
+On a lab host the machine running the suite often has no public address, only a private or tailnet one (here
+`100.113.143.93`, in the shared space `100.64.0.0/10`), which herd-egress refuses as host-side whatever the policy
+lists. Two things make it reachable, and neither weakens the rule that a policy names hosts:
+
+1. **A DNS name for the echo host.** An `EgressPolicy` rule takes host names, never addresses (`--echo-url
+   http://100.113.143.93:18080/` fails at `CreateActorEgressPolicy` with `an IP address is not a hostname`, and a
+   guest's request to an address is refused by herd-egress all the same). The name must resolve **where the gateway
+   runs** (herd-egress on Linux, the herdlet on a Mac): the guest's DNS is herd-egress's synthetic one, and the gateway
+   resolves and dials the listed name itself. Either use a wildcard DNS that encodes the address,
+   `100.113.143.93.sslip.io` (the gateway host needs public DNS), or add a hosts entry on the gateway host:
+   `echo 100.113.143.93 echo.lab.example | sudo tee -a /etc/hosts`.
+2. **The lab allowance.** `-egress-allow-prefix 100.113.143.93/32` (repeatable) on `herd` (all-in-one: it hands it
+   to its herd-egress and its herdlet), on `herd-egress` and on `herdlet` (a joined Linux host runs both: give both the
+   flag, herd-egress to enforce it, the herdlet to report it; a Mac's herdlet enforces it in its in-process gateway).
+   It opens exactly the written prefix inside a default denied prefix and nothing else: `100.113.143.94` and the rest
+   of `100.64.0.0/10` stay refused, and so do the host's own addresses (`-host-addr`), the Control and router
+   endpoints and the metadata endpoints. A prefix that would open more than written is refused at start: one with
+   host bits set (`100.113.143.93/10`), one containing a whole default prefix (`100.64.0.0/10`, `0.0.0.0/0`), one
+   containing a metadata endpoint (`169.254.169.254`, `100.100.100.200`, `fd00:ec2::254`), or one in no default
+   prefix (nothing to open). Each component logs a set allowance at start (`WARNING: LAB EGRESS ALLOWANCE
+   -egress-allow-prefix ...`), the herdlet reports it in its worker capabilities (`herd.ext.v1.WorkerCapabilities
+   .egress_allow_prefixes`, shown by `herd-api workers`), and `herd conformance` opens its report with it:
+
+```text
+egress allowances: LAB -egress-allow-prefix 100.113.143.93/32 on worker aio (host-side addresses herd-egress does not refuse)
+```
+
+A run without one says `egress allowances: none on N workers`, and against Substrate `egress allowances: not
+reported by the target (Unimplemented)`. A report whose egress cases passed under an allowance is a lab run, not a
+production configuration. The run then is:
+
+```sh
+echo 100.113.143.93 echo.lab.example | sudo tee -a /etc/hosts   # or use 100.113.143.93.sslip.io below
+sudo herd -data /var/lib/herd -listen 192.168.1.10:7443 -router-listen 192.168.1.10:8443 -secrets /etc/herd/secrets \
+  -egress-allow-prefix 100.113.143.93/32
+herd conformance --target herd-all-in-one-lab --endpoint 192.168.1.10:7443 --token-file /tmp/herd.token --atespace conformance --template agent --router 192.168.1.10:8443 --probe env-exec \
+  --egress-walk https://example.com/ --echo-listen 100.113.143.93:18080 --echo-url http://echo.lab.example:18080/ \
+  --credential-uri ate-secret://dir/conformance/token --credential-file /tmp/cred
+```
+
+`TestEgressCasesThroughLabAllowPrefix` runs the egress walk and the credential header this way through the
+all-in-one's own herd-egress: the test's resolver maps `echo.lab.test` to `100.113.143.93` (its dialer reaches that
+address on loopback) and the all-in-one starts with `-egress-allow-prefix 100.113.143.93/32`; both pass and the
+report opens with the allowance. `TestEgressCasesRedWithoutLabAllowPrefix` is the same run without the flag: both
+cases fail with the echo host refused (403) although listed, and the header says no allowance was set.
 
 `go test ./conformance/substrateapi/` runs exactly this against herd all-in-one and against the join mode with two
 herdlets of different families (a VZ host declaring VOLUMES and a Cloud Hypervisor host declaring MEMORY), on the fake

@@ -167,7 +167,7 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		addrs.Egress, addrs.DNS = eln.Addr().String(), pc.LocalAddr().String()
 		eg := &Egress{API: addrs.API, Token: st.Grant.EgressCredential, Bindings: filepath.Join(a.Data, "egress-bindings.json"),
 			CAOut: filepath.Join(a.Data, "egress-ca.pem"), DNSAnswer: "198.18.0.1", Interval: time.Second,
-			Secrets: a.Secrets, NewGateway: a.NewGateway}
+			Secrets: a.Secrets, AllowPrefixes: h.EgressAllow, NewGateway: a.NewGateway}
 		start("herd-egress", func() error { return eg.Run(ctx, eln, pc) })
 	}
 	start("herdlet", func() error { return h.Run(ctx) })

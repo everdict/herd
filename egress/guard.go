@@ -12,6 +12,10 @@ import (
 // address the name resolves to before a dial, so a listed name that resolves to a host-side address is refused too.
 type Guard struct {
 	prefixes []netip.Prefix
+	// host are the host's own prefixes (GuardConfig.HostAddrs); a lab allowance never opens them.
+	host []netip.Prefix
+	// allow are the operator's lab allowances (GuardConfig.LabAllow): holes in prefixes.
+	allow    []netip.Prefix
 	names    map[string]bool
 	suffixes []string
 }
@@ -62,6 +66,55 @@ type GuardConfig struct {
 	HostNames []string
 	// AllowPrefixes removes default prefixes (exactly as written in DefaultDeniedPrefixes). Only tests use it.
 	AllowPrefixes []string
+	// LabAllow are the operator's lab allowances (-egress-allow-prefix): each one opens exactly its prefix inside a
+	// default denied prefix, e.g. 100.113.143.93/32 for a tailnet echo host, and nothing else (ParseLabAllow). A name
+	// still has to be listed by the actor's policy, and an IP literal is still refused as a destination.
+	LabAllow []string
+}
+
+// metadataAddrs are cloud metadata endpoints inside the default prefixes; no lab allowance may open one.
+var metadataAddrs = []netip.Addr{
+	netip.MustParseAddr("169.254.169.254"), netip.MustParseAddr("100.100.100.200"), netip.MustParseAddr("fd00:ec2::254"),
+}
+
+// ParseLabAllow parses one lab allowance. It refuses what would open more than the operator wrote: a prefix with
+// host bits set (100.113.143.93/10 reads as one address but means a /10), one that lies in no default denied
+// prefix (there is nothing to open), one that contains a whole default prefix (100.64.0.0/10 would remove it), and
+// one that contains a cloud metadata endpoint.
+func ParseLabAllow(s string) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("egress allow prefix %q: want an address with its prefix length, e.g. 100.113.143.93/32: %w", s, err)
+	}
+	if p.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("egress allow prefix %q: write an IPv4 prefix as IPv4", s)
+	}
+	if p != p.Masked() {
+		return netip.Prefix{}, fmt.Errorf("egress allow prefix %q has host bits set: it would mean %s; write the lab host's address with /%d", s, p.Masked(), p.Addr().BitLen())
+	}
+	inside := false
+	for _, d := range DefaultDeniedPrefixes {
+		dp, err := netip.ParsePrefix(d)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		if dp.Addr().Is4() != p.Addr().Is4() || !dp.Overlaps(p) {
+			continue
+		}
+		if p.Bits() <= dp.Bits() {
+			return netip.Prefix{}, fmt.Errorf("egress allow prefix %s would remove the whole default denied prefix %s; name the lab host's own address, e.g. a /32", p, dp)
+		}
+		inside = true
+	}
+	if !inside {
+		return netip.Prefix{}, fmt.Errorf("egress allow prefix %s is in no default denied prefix: there is nothing to allow", p)
+	}
+	for _, m := range metadataAddrs {
+		if p.Contains(m) {
+			return netip.Prefix{}, fmt.Errorf("egress allow prefix %s contains the metadata endpoint %s", p, m)
+		}
+	}
+	return p, nil
 }
 
 // NewGuard builds a Guard from the defaults plus cfg.
@@ -86,7 +139,14 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 		if err != nil {
 			return nil, fmt.Errorf("guard: host address %q: %w", s, err)
 		}
-		g.prefixes = append(g.prefixes, p)
+		g.host = append(g.host, p)
+	}
+	for _, s := range cfg.LabAllow {
+		p, err := ParseLabAllow(s)
+		if err != nil {
+			return nil, fmt.Errorf("guard: %w", err)
+		}
+		g.allow = append(g.allow, p)
 	}
 	for _, n := range append(append([]string(nil), DefaultDeniedNames...), cfg.HostNames...) {
 		n = strings.TrimSuffix(strings.ToLower(n), ".")
@@ -133,12 +193,24 @@ func (g *Guard) CheckName(name string) error {
 	return nil
 }
 
-// CheckAddr refuses an address in a denied range.
+// LabAllow returns the lab allowances the guard was built with.
+func (g *Guard) LabAllow() []netip.Prefix { return append([]netip.Prefix(nil), g.allow...) }
+
+// CheckAddr refuses an address in a denied range: a host prefix always, a default prefix unless a lab allowance
+// contains the address.
 func (g *Guard) CheckAddr(a netip.Addr) error {
 	if !a.IsValid() {
 		return &RefusedError{HostSide: true, Reason: "invalid address"}
 	}
 	for _, x := range []netip.Addr{a, a.Unmap()} {
+		for _, p := range g.host {
+			if p.Contains(x) {
+				return &RefusedError{HostSide: true, Reason: fmt.Sprintf("address %s is host-side (%s)", a, p)}
+			}
+		}
+		if g.allowed(x) {
+			continue
+		}
 		for _, p := range g.prefixes {
 			if p.Contains(x) {
 				return &RefusedError{HostSide: true, Reason: fmt.Sprintf("address %s is host-side (%s)", a, p)}
@@ -146,6 +218,15 @@ func (g *Guard) CheckAddr(a netip.Addr) error {
 		}
 	}
 	return nil
+}
+
+func (g *Guard) allowed(a netip.Addr) bool {
+	for _, p := range g.allow {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // RefusedError is a refusal; HostSide marks the guard's.

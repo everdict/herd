@@ -28,6 +28,22 @@ type list []string
 func (l *list) String() string     { return strings.Join(*l, ",") }
 func (l *list) Set(s string) error { *l = append(*l, s); return nil }
 
+// egressAllowUsage is -egress-allow-prefix's usage on herd-egress, herdlet and herd.
+const egressAllowUsage = "LAB ONLY: a prefix inside the host-side ranges herd-egress refuses, e.g. 100.113.143.93/32 for a tailnet echo host, that it no longer refuses (repeatable); a policy must still name the host, and nothing broader than written is opened. Logged at start and reported in the worker's capabilities"
+
+// labAllow checks the -egress-allow-prefix values (egress.ParseLabAllow) and logs a set one loudly as who.
+func labAllow(who string, prefixes []string) error {
+	for _, s := range prefixes {
+		if _, err := egress.ParseLabAllow(s); err != nil {
+			return fmt.Errorf("-egress-allow-prefix: %w", err)
+		}
+	}
+	if len(prefixes) > 0 {
+		log.Printf("%s: WARNING: LAB EGRESS ALLOWANCE -egress-allow-prefix %s: herd-egress does not refuse these host-side addresses, so an actor whose policy lists a name resolving into them reaches it; this host is not a production host", who, strings.Join(prefixes, ","))
+	}
+	return nil
+}
+
 // NFT is `herd-egress nft`: it renders one VM's TAP and nftables table.
 type NFT struct {
 	ID, TAP, Host, VM  string
@@ -84,6 +100,8 @@ type Egress struct {
 	Interval  time.Duration
 	HostAddrs list
 	HostNames list
+	// AllowPrefixes are the operator's lab allowances (-egress-allow-prefix, egress.GuardConfig.LabAllow).
+	AllowPrefixes list
 
 	// Token, if set, is used instead of TokenFile.
 	Token string
@@ -109,6 +127,7 @@ func (e *Egress) Flags(fs *flag.FlagSet) {
 	fs.DurationVar(&e.Interval, "interval", time.Second, "how often each actor's policy and the bindings are re-read")
 	fs.Var(&e.HostAddrs, "host-addr", "a host or herd-api address or prefix to refuse (repeatable)")
 	fs.Var(&e.HostNames, "host-name", "a host or herd-api name to refuse (repeatable)")
+	fs.Var(&e.AllowPrefixes, "egress-allow-prefix", egressAllowUsage)
 }
 
 // Run serves the gateway's transparent TCP listener on ln and its synthetic DNS on pc until ctx ends.
@@ -119,7 +138,10 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	if e.Bindings == "" {
 		return errors.New("-bindings is required")
 	}
-	guard, err := egress.NewGuard(egress.GuardConfig{HostAddrs: e.HostAddrs, HostNames: e.HostNames})
+	if err := labAllow("herd-egress", e.AllowPrefixes); err != nil {
+		return err
+	}
+	guard, err := egress.NewGuard(egress.GuardConfig{HostAddrs: e.HostAddrs, HostNames: e.HostNames, LabAllow: e.AllowPrefixes})
 	if err != nil {
 		return err
 	}

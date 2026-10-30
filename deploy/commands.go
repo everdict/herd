@@ -194,7 +194,7 @@ func Commands() []Command {
 				if err != nil {
 					return err
 				}
-				rep := substrateapi.Run(ctx, cfg)
+				rep := RunConformance(ctx, cfg)
 				rep.Print(out)
 				if !rep.OK() {
 					return fmt.Errorf("the suite is not green on %s", rep.Target)

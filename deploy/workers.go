@@ -49,7 +49,11 @@ func (w *Workers) List(ctx context.Context) ([]string, error) {
 	}
 	var out []string
 	for _, c := range resp.GetWorkers() {
-		out = append(out, fmt.Sprintf("%s\t%s\t%s\t%s\t%s", c.GetWorker(), c.GetPlatform(), c.GetArch(), c.GetSuspendMaxFidelity(), c.GetRestoreFamily()))
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", c.GetWorker(), c.GetPlatform(), c.GetArch(), c.GetSuspendMaxFidelity(), c.GetRestoreFamily())
+		if p := c.GetEgressAllowPrefixes(); len(p) > 0 {
+			line += "\tLAB egress-allow-prefix=" + strings.Join(p, ",")
+		}
+		out = append(out, line)
 	}
 	return out, nil
 }

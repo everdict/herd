@@ -67,6 +67,11 @@ message WorkerCapabilities {
 
   // Why the worker declares less than its platform could, e.g. "no unlocked user session" on a Mac.
   string reason = 8;
+
+  // The operator's lab allowances on this worker's egress (-egress-allow-prefix), e.g. "100.113.143.93/32": host-side
+  // prefixes its herd-egress no longer refuses, so a lab echo host without a public address can be listed by name.
+  // Empty on every production worker; a conformance report names them when set.
+  repeated string egress_allow_prefixes = 9;
 }
 
 message GetWorkerCapabilitiesRequest {

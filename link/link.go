@@ -42,6 +42,8 @@ type Capabilities struct {
 	PortableRestoreFamily string       `json:"portableRestoreFamily"`
 	HypervisorVersion     string       `json:"hypervisorVersion,omitempty"`
 	Reason                string       `json:"reason,omitempty"`
+	// EgressAllowPrefixes are the operator's lab allowances on the host's herd-egress (-egress-allow-prefix).
+	EgressAllowPrefixes []string `json:"egressAllowPrefixes,omitempty"`
 }
 
 // Register is a herdlet's first message.

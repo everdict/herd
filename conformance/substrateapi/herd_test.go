@@ -220,6 +220,7 @@ func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	if n != nil {
 		h.VMM.(*fakeguest.VMM).ShimFor = n.ShimFor
 		h.OnActor = n.OnActor
+		h.EgressAllow = n.allow
 	}
 	a := &deploy.AllInOne{Data: data, Listen: "127.0.0.1:0", RouterListen: "127.0.0.1:0", TunnelListen: "127.0.0.1:0",
 		EgressListen: "127.0.0.1:0", DNSListen: "127.0.0.1:0", Egress: true, Herdlet: h}

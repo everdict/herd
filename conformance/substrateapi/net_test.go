@@ -1,6 +1,7 @@
 package substrateapi_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/conformance/substrateapi"
+	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/link"
 	"google.golang.org/grpc"
@@ -88,8 +90,13 @@ func netshim(proxy, bin string) {
 }
 
 var (
-	testNet  = netip.MustParsePrefix("203.0.113.0/24")
-	testName = map[string]netip.Addr{"listed.test": netip.MustParseAddr("203.0.113.10"), "echo.test": netip.MustParseAddr("203.0.113.11")}
+	testNet = netip.MustParsePrefix("203.0.113.0/24")
+	// labEcho is a lab echo host's tailnet address (shared space, 100.64.0.0/10), which herd-egress refuses as
+	// host-side unless the operator allows it (-egress-allow-prefix); echo.lab.test is its name, as a hosts entry or
+	// <ip>.sslip.io gives it on a real host.
+	labEcho  = netip.MustParseAddr("100.113.143.93")
+	testName = map[string]netip.Addr{"listed.test": netip.MustParseAddr("203.0.113.10"), "echo.test": netip.MustParseAddr("203.0.113.11"),
+		"echo.lab.test": labEcho}
 )
 
 // resolver resolves the test's names only.
@@ -105,12 +112,12 @@ func (resolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, er
 	return nil, fmt.Errorf("no such host %s", host)
 }
 
-// dialer reaches a TEST-NET-3 address on loopback at the same port, and anything else as it is.
+// dialer reaches a TEST-NET-3 address and labEcho on loopback at the same port, and anything else as it is.
 type dialer struct{}
 
 func (dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	ap, err := netip.ParseAddrPort(addr)
-	if err == nil && testNet.Contains(ap.Addr()) {
+	if err == nil && (testNet.Contains(ap.Addr()) || ap.Addr() == labEcho) {
 		addr = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), ap.Port()).String()
 	}
 	var d net.Dialer
@@ -129,6 +136,8 @@ type vmNet struct {
 	self     string
 	secrets  string
 	bindings string
+	// allow is the all-in-one's -egress-allow-prefix.
+	allow []string
 
 	mu     sync.Mutex
 	gw     *egress.Gateway
@@ -450,4 +459,61 @@ func TestLongStreamRedUnderRouterIdleTimeout(t *testing.T) {
 	cfg := suiteConfig("herd-router-idle-timeout", addrs.API, idleProxy(t, addrs.Router, 150*time.Millisecond), tok)
 	cfg.LongStream, cfg.StreamFor, cfg.StreamGap = true, 1500*time.Millisecond, 500*time.Millisecond
 	wantFail(t, cfg, "long-stream")
+}
+
+// labSuite runs the egress walk and the credential header against herd all-in-one with its echo server named
+// echo.lab.test, which the gateway resolves to the tailnet address labEcho, as on a real lab host without a public
+// address; allow is the all-in-one's -egress-allow-prefix.
+func labSuite(t *testing.T, allow ...string) (substrateapi.Report, string) {
+	t.Helper()
+	n := newAllInOneVMNet(t)
+	n.allow = allow
+	addrs, tok := startAllInOneWith(t, n)
+	cfg := suiteConfig("herd-all-in-one-lab", addrs.API, addrs.Router, tok)
+	e, _, listedURL := echoes(t)
+	_, ep, _ := net.SplitHostPort(e.Addr())
+	optional(&cfg, e, "http://echo.lab.test:"+ep+"/", listedURL)
+	cfg.EgressBound = 3 * time.Second
+	cfg.LongStream, cfg.Template2 = false, ""
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	// As `herd conformance` runs it, so the report opens with the workers' egress allowances.
+	rep := deploy.RunConformance(ctx, cfg)
+	var b bytes.Buffer
+	rep.Print(&b)
+	t.Log("\n" + b.String())
+	return rep, b.String()
+}
+
+// TestEgressCasesThroughLabAllowPrefix (criteria allow-flag, visible, doc): herd all-in-one started with
+// -egress-allow-prefix 100.113.143.93/32 lets the egress walk flip to the lab echo host and the credential header
+// reach it by name, and the report's header says the allowance was set on the worker.
+func TestEgressCasesThroughLabAllowPrefix(t *testing.T) {
+	rep, out := labSuite(t, "100.113.143.93/32")
+	for _, c := range []string{"egress-walk", "credential-header"} {
+		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
+			t.Errorf("%s: %s %s; want PASS", c, r.Outcome, r.Detail)
+		}
+	}
+	want := "egress allowances: LAB -egress-allow-prefix 100.113.143.93/32 on worker aio"
+	if !strings.HasPrefix(out, want) {
+		t.Errorf("the report does not open with %q:\n%s", want, out)
+	}
+}
+
+// TestEgressCasesRedWithoutLabAllowPrefix (criterion allow-flag): without the allowance the lab echo host is
+// host-side, listed or not, so both cases fail, and the report's header says no allowance was set.
+func TestEgressCasesRedWithoutLabAllowPrefix(t *testing.T) {
+	rep, out := labSuite(t)
+	for _, c := range []string{"egress-walk", "credential-header"} {
+		r, _ := rep.Get(c)
+		if r.Outcome != substrateapi.Fail {
+			t.Errorf("%s: %s %s; want FAIL", c, r.Outcome, r.Detail)
+			continue
+		}
+		t.Logf("%s FAIL as wanted: %s", c, r.Detail)
+	}
+	if want := "egress allowances: none on 1 workers"; !strings.HasPrefix(out, want) {
+		t.Errorf("the report does not open with %q:\n%s", want, out)
+	}
 }
