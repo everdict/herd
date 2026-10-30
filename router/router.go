@@ -62,6 +62,8 @@ const (
 	ReasonSuspended = Reason(tunnel.ReasonSuspended)
 	// ReasonDeleted: the stream was cut because the actor is being deleted.
 	ReasonDeleted = Reason(tunnel.ReasonDeleted)
+	// ReasonNodeUnreachable: the actor's worker has no tunnel to this router.
+	ReasonNodeUnreachable = Reason(tunnel.ReasonNodeUnreachable)
 	// ReasonStreamLost: the stream ended without a known cause (the node's tunnel broke, the guest went away).
 	ReasonStreamLost Reason = "stream-lost"
 )
@@ -69,7 +71,12 @@ const (
 // Tunnels opens connections to a port of a VM through a worker's tunnel (tunnel.Server).
 type Tunnels interface {
 	Dial(ctx context.Context, worker, vm string, port uint32) (net.Conn, error)
+	// Connected reports whether worker's herdlet holds a tunnel to this router.
+	Connected(worker string) bool
 }
+
+// placement is where an actor runs.
+type placement struct{ worker, vm string }
 
 // Config wires a Router.
 type Config struct {
@@ -94,6 +101,7 @@ type Router struct {
 	cfg      Config
 	resuming sync.Map // "<space>/<name>" → struct{}: a resume is in flight
 	lastErr  sync.Map // "<space>/<name>" → string: why the last resume did not succeed
+	placed   sync.Map // "<space>/<name>" → placement: where herd-api last said the actor runs
 	parked   atomic.Int64
 	bg       sync.WaitGroup
 }
@@ -211,7 +219,7 @@ func (rt *Router) connect(ctx context.Context, token, space, name string, port u
 			rt.parked.Add(-1)
 		}
 	}()
-	var last string
+	var last, lastAPI string
 	for {
 		worker, vm, why, rerr := rt.resolve(ctx, token, space, name)
 		if rerr != nil {
@@ -224,6 +232,9 @@ func (rt *Router) connect(ctx context.Context, token, space, name string, port u
 			}
 			why = err.Error()
 		}
+		if strings.HasPrefix(why, "herd-api: ") {
+			lastAPI = why
+		}
 		if ctx.Err() == nil {
 			// A lookup cut short by the budget itself says nothing about the actor.
 			last = why
@@ -234,13 +245,29 @@ func (rt *Router) connect(ctx context.Context, token, space, name string, port u
 		}
 		select {
 		case <-ctx.Done():
-			return nil, rt.budgetError(space, name, last)
+			return nil, rt.budgetError(space, name, last, lastAPI)
 		case <-time.After(rt.cfg.PollInterval):
 		}
 	}
 }
 
-func (rt *Router) budgetError(space, name, last string) *routeError {
+// budgetError is the typed 503 of a request whose budget ended. The reason is derived from state, not from whichever
+// lookup happened to finish last: if the actor's last known worker holds no tunnel to this router, it is
+// node-unreachable whether or not herd-api answered in time (herd-api's error, if any, is added as detail);
+// otherwise it is parking-budget-exceeded.
+func (rt *Router) budgetError(space, name, last, lastAPI string) *routeError {
+	if v, ok := rt.placed.Load(space + "/" + name); ok {
+		if p := v.(placement); !rt.cfg.Tunnels.Connected(p.worker) {
+			d := fmt.Sprintf("actor %s/%s runs on worker %q, which has no tunnel to this router (parking budget %v)", space, name, p.worker, rt.cfg.ParkingBudget)
+			if lastAPI != "" {
+				d += "; " + lastAPI
+			}
+			return &routeError{http.StatusServiceUnavailable, codes.Unavailable, ReasonNodeUnreachable, d}
+		}
+	}
+	if last == "" {
+		last = lastAPI
+	}
 	d := fmt.Sprintf("actor %s/%s did not become reachable within the parking budget (%v): %s", space, name, rt.cfg.ParkingBudget, last)
 	if e, ok := rt.lastErr.Load(space + "/" + name); ok {
 		d += "; last resume: " + e.(string)
@@ -262,6 +289,12 @@ func (rt *Router) resolve(ctx context.Context, token, space, name string) (worke
 		return "", "", "herd-api: " + err.Error(), nil
 	}
 	st := a.GetStatus().GetState()
+	k := space + "/" + name
+	if node := a.GetStatus().GetAssignedNode(); st == ateapi.ActorState_ACTOR_STATE_RUNNING && node != "" {
+		rt.placed.Store(k, placement{worker: node, vm: a.GetMetadata().GetUid()})
+	} else {
+		rt.placed.Delete(k)
+	}
 	switch st {
 	case ateapi.ActorState_ACTOR_STATE_RUNNING:
 		if node := a.GetStatus().GetAssignedNode(); node != "" {

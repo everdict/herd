@@ -67,6 +67,8 @@ type stack struct {
 	dials      atomic.Int64 // tunnel dials the router made
 	resumes    atomic.Int64 // ResumeActor calls the router made
 	guestDials atomic.Int64 // guest connections the herdlet made
+	// apiDelay, when set, delays each GetActor herd-api serves (a herd-api slower than the parking budget).
+	apiDelay   atomic.Int64
 	stopTunnel context.CancelFunc
 	tunnelDone chan struct{}
 	ctx        context.Context
@@ -75,6 +77,8 @@ type stack struct {
 type stackOpts struct {
 	budget time.Duration
 }
+
+func (c countingTunnels) Connected(worker string) bool { return c.t.Connected(worker) }
 
 // countingTunnels counts the router's tunnel dials.
 type countingTunnels struct {
@@ -139,7 +143,12 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ag := grpc.NewServer()
+	ag := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		if d := time.Duration(s.apiDelay.Load()); d > 0 && strings.HasSuffix(info.FullMethod, "/GetActor") {
+			time.Sleep(d)
+		}
+		return h(ctx, req)
+	}))
 	api.Register(ag)
 	al := listen(t)
 	s.apiAddr = al.Addr().String()
@@ -177,7 +186,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 		t.Fatal(err)
 	}
 	s.vms = fakeguest.New(fake.New(vmm.Capabilities{Platform: vmm.PlatformCloudHypervisor, Arch: "amd64",
-		SuspendMaxFidelity: vmm.FidelityMemory, RestoreFamily: "microvm-ch-amd64-test"}, nil), t.TempDir(), []string{self, "shim"})
+		SuspendMaxFidelity: vmm.FidelityMemory, RestoreFamily: "microvm-ch-amd64-test"}, nil), shortTempDir(t), []string{self, "shim"})
 	s.tun = &herdlet.Tunnel{Worker: "h1", Guests: countingGuests{s}}
 	agent := &herdlet.Agent{Worker: "h1", Class: apiserver.SandboxClass, Slots: 8, VMM: s.vms, Snapshots: snaps, Tunnel: s.tun}
 	herdletCred := grpc.WithPerRPCCredentials(auth.Bearer(s.token(nil, true, "h1")))
@@ -238,6 +247,18 @@ func (s *stack) startTunnel(cred grpc.DialOption) {
 		_ = s.tun.Run(ctx, cc)
 	}()
 	s.stopTunnel, s.tunnelDone = cancel, done
+}
+
+// shortTempDir is a temporary directory short enough for unix socket paths under it: t.TempDir() can exceed macOS's
+// 104-byte sun_path.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "fg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
 }
 
 func (s *stack) token(spaces map[string]auth.Role, herdletCred bool, sub string) string {

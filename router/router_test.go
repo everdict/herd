@@ -213,9 +213,40 @@ func TestRouterNeverDialsNodes(t *testing.T) {
 	}
 	reason, err := listDir(ctx, c)
 	wantCode(t, "with the herdlet's tunnel down", err, codes.Unavailable)
-	if reason != string(router.ReasonParkingBudget) || !strings.Contains(status.Convert(err).Message(), "node-unreachable") {
-		t.Errorf("herd-reason %q, message %q: want %s naming node-unreachable", reason, status.Convert(err).Message(), router.ReasonParkingBudget)
+	if reason != string(router.ReasonNodeUnreachable) {
+		t.Errorf("herd-reason %q (%q), want %s", reason, status.Convert(err).Message(), router.ReasonNodeUnreachable)
 	}
+}
+
+// TestNodeUnreachableWhenHerdAPIIsSlow (route-by-name): the reason of a budget-exceeded 503 does not depend on
+// herd-api answering inside the budget. With the actor's worker holding no tunnel and herd-api slower than the
+// budget, the answer is node-unreachable, with herd-api's error as detail.
+func TestNodeUnreachableWhenHerdAPIIsSlow(t *testing.T) {
+	const budget = 300 * time.Millisecond
+	s := startStack(t, stackOpts{budget: budget})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	c := s.client(space1+"/a1", s.clientToken())
+	if _, err := listDir(ctx, c); err != nil {
+		t.Fatalf("with the tunnel up: %v", err)
+	}
+	s.stopTunnel()
+	<-s.tunnelDone
+	s.apiDelay.Store(int64(3 * budget))
+	for i := 0; i < 3; i++ {
+		start := time.Now()
+		reason, err := listDir(ctx, c)
+		took := time.Since(start)
+		wantCode(t, "herd-api slower than the budget, tunnel down", err, codes.Unavailable)
+		msg := status.Convert(err).Message()
+		if reason != string(router.ReasonNodeUnreachable) || !strings.Contains(msg, "h1") || !strings.Contains(msg, "herd-api") {
+			t.Errorf("try %d: herd-reason %q, message %q: want %s naming worker h1 and herd-api's error", i, reason, msg, router.ReasonNodeUnreachable)
+		}
+		if took > budget+time.Second {
+			t.Errorf("try %d: answered after %v, budget %v", i, took, budget)
+		}
+	}
+	s.apiDelay.Store(0)
 }
 
 // TestResumeOnRequest (resume-on-request): requests to a SUSPENDED actor are parked, one resume is asked of
