@@ -224,7 +224,10 @@ func (rt *Router) connect(ctx context.Context, token, space, name string, port u
 			}
 			why = err.Error()
 		}
-		last = why
+		if ctx.Err() == nil {
+			// A lookup cut short by the budget itself says nothing about the actor.
+			last = why
+		}
 		if !parked {
 			parked = true
 			rt.parked.Add(1)
