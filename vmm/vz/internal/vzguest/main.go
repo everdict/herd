@@ -5,6 +5,8 @@
 //	read <name>          the contents of /mnt/volumes/<name>
 //	write <name> <text>  writes <text> to /mnt/volumes/<name>, answers "ok"
 //	echo                 echoes every byte after the line until the host closes its side
+//	list                 the names in /mnt/volumes, one per line (a readdir: no cached lookup answers it)
+//	dropcaches           drops the guest's unused dentries and inodes, answers "ok"
 //
 // It exists so the backend is tested against a real guest without the container machinery herd-guest needs.
 package main
@@ -67,6 +69,22 @@ func handle(c net.Conn) {
 		fmt.Fprint(c, "ok")
 	case "echo":
 		_, _ = io.Copy(c, r)
+	case "list":
+		es, err := os.ReadDir(share)
+		if err != nil {
+			fmt.Fprintf(c, "error: %v", err)
+			return
+		}
+		for _, e := range es {
+			fmt.Fprintln(c, e.Name())
+		}
+	case "dropcaches":
+		// Mode 2 frees unused dentries and inodes, so the next open of a name looks it up on the share again.
+		if err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("2"), 0); err != nil {
+			fmt.Fprintf(c, "error: %v", err)
+			return
+		}
+		fmt.Fprint(c, "ok")
 	default:
 		fmt.Fprintf(c, "error: unknown request %q", verb)
 	}

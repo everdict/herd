@@ -381,3 +381,39 @@ func TestSnapshotFailureLeavesNothing(t *testing.T) {
 		t.Errorf("after the failed snapshot the VM is %s, want running", st)
 	}
 }
+
+// PLT-199: TestReal's MEMORY sequence on the fake (boot with a share, the guest's file lands in the share, MEMORY
+// snapshot, verified delete, restore). The restored machine is built with the share of the snapshot-time spec, and
+// that directory still holds the file: the host side re-attaches the tree as it was, so a restored guest that cannot
+// read the file is not explained by the share's host directory.
+func TestMemoryRestoreAttachesSnapshotTimeShare(t *testing.T) {
+	hv := vzfake.New()
+	v := newVMM(t, hv, vz.Config{Probe: probeGuest})
+	spec := specIn(t.TempDir())("real1")
+	share := spec.Shares[0].HostPath
+	if _, err := v.Boot(ctxT(t, 5*time.Second), spec); err != nil {
+		t.Fatal(err)
+	}
+	// What the guest's write through virtio-fs leaves on the host.
+	if err := os.WriteFile(filepath.Join(share, "out.txt"), []byte("from-guest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := v.Snapshot(ctxT(t, 5*time.Second), "real1", vmm.FidelityMemory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := v.Delete(ctxT(t, 5*time.Second), "real1"); p != vmm.PresenceGone || err != nil {
+		t.Fatalf("Delete = %v (%v)", p, err)
+	}
+	if _, err := v.Restore(ctxT(t, 5*time.Second), s, spec); err != nil {
+		t.Fatal(err)
+	}
+	ms := hv.Machines()
+	got := ms[len(ms)-1].Config().Shares
+	if len(got) != 1 || got[0] != spec.Shares[0] {
+		t.Fatalf("restored machine's shares = %+v, want the snapshot-time %+v", got, spec.Shares)
+	}
+	if b, err := os.ReadFile(filepath.Join(got[0].HostPath, "out.txt")); err != nil || string(b) != "from-guest" {
+		t.Errorf("the restored machine's share holds out.txt = %q (%v), want from-guest", b, err)
+	}
+}

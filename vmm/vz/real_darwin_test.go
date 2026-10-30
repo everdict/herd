@@ -118,6 +118,7 @@ func TestReal(t *testing.T) {
 	restored := hv.last()
 	if got := request(t, ctx, v, "read out.txt\n"); got != "from-guest-"+token {
 		t.Errorf("after restore, guest read out.txt = %q", got)
+		diagnoseShare(t, ctx, v, share, token)
 	}
 	if p, err := v.Delete(ctx, "real1"); p != vmm.PresenceGone || err != nil {
 		t.Errorf("Delete after restore = %v (%v), want gone", p, err)
@@ -183,6 +184,43 @@ func assertReallyStopped(t *testing.T, what string, m vz.Machine) {
 		}
 	case <-time.After(5 * time.Second):
 		// A connect that never completes did not reach a guest.
+	}
+}
+
+// diagnoseShare logs what tells apart the explanations for a restored guest that cannot read a file it wrote to
+// its share before the snapshot (PLT-199): the host directory lost the file; the restored virtio-fs device does not
+// serve that directory; or the device serves it and only the guest's cached view of names it looked up before the
+// snapshot (dentries and FUSE node ids of the saved session) no longer resolves.
+func diagnoseShare(t *testing.T, ctx context.Context, v *vz.VMM, share, token string) {
+	t.Helper()
+	var host []string
+	es, err := os.ReadDir(share)
+	for _, e := range es {
+		host = append(host, e.Name())
+	}
+	t.Logf("PLT-199: host share %s holds %q (%v)", share, host, err)
+	b, err := os.ReadFile(filepath.Join(share, "out.txt"))
+	hostHas := err == nil && string(b) == "from-guest-"+token
+	// A name the guest never looked up before the snapshot: answering it needs a fresh lookup on the share.
+	if err := os.WriteFile(filepath.Join(share, "fresh.txt"), []byte("fresh-"+token), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fresh := request(t, ctx, v, "read fresh.txt\n")
+	t.Logf("PLT-199: guest read fresh.txt (written by the host after restore) = %q", fresh)
+	t.Logf("PLT-199: guest read in.txt (looked up before the snapshot) = %q", request(t, ctx, v, "read in.txt\n"))
+	t.Logf("PLT-199: guest lists the share: %q", request(t, ctx, v, "list\n"))
+	t.Logf("PLT-199: guest drop caches = %q", request(t, ctx, v, "dropcaches\n"))
+	afterDrop := request(t, ctx, v, "read out.txt\n")
+	t.Logf("PLT-199: guest read out.txt after dropping caches = %q", afterDrop)
+	switch {
+	case !hostHas:
+		t.Logf("PLT-199 verdict: the host directory itself lost out.txt (%q, %v)", b, err)
+	case fresh != "fresh-"+token:
+		t.Logf("PLT-199 verdict: the host directory holds out.txt, but the restored virtio-fs device does not serve it (a fresh name does not resolve either)")
+	case afterDrop == "from-guest-"+token:
+		t.Logf("PLT-199 verdict: the device serves the snapshot-time directory; the guest's cached lookups from the saved session were stale, and dropping them fixed the read")
+	default:
+		t.Logf("PLT-199 verdict: the device serves the directory (a fresh name resolves), but names the guest held before the snapshot stay unresolvable even after dropping caches")
 	}
 }
 
