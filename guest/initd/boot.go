@@ -35,6 +35,8 @@ type Booted struct {
 	Rootfs  string
 	Workdir string
 	Bundle  string
+	// Volumes maps each volume's mount path in the container to its directory in the share.
+	Volumes map[string]string
 }
 
 // Pseudo mounts the guest's own pseudo filesystems.
@@ -158,8 +160,10 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 	for _, e := range c.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
 	}
+	mounted := map[string]string{}
 	for _, vm := range c.VolumeMounts {
 		cfg.Volumes = append(cfg.Volumes, oci.VolumeMount{Source: vols[vm.Name], Destination: vm.MountPath, ReadOnly: vm.ReadOnly})
+		mounted[vm.MountPath] = vols[vm.Name]
 	}
 	spec, err := oci.Build(cfg)
 	if err != nil {
@@ -172,7 +176,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string) (Booted, 
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600); err != nil {
 		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
-	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir}, nil
+	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted}, nil
 }
 
 // Boot runs the whole sequence after the pseudo filesystems: share, plan, volumes, containers.
@@ -190,4 +194,9 @@ func Boot(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, shareTag str
 	}
 	booted, err := Containers(ctx, m, rt, l, p, vols)
 	return p, booted, err
+}
+
+// Target is the started container as herd-guest's API serves it, with its volumes where the container sees them.
+func (b Booted) Target(rt oci.Runtime) *oci.Target {
+	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes}
 }

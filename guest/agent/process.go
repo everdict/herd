@@ -32,6 +32,14 @@ type container struct {
 	t     Target
 	store *execrec.Store
 	root  *os.Root
+	// vols are the target's volumes, longest mount path first.
+	vols []volume
+}
+
+// volume is a directory bound into the container at path: what lies under path is the volume's, not the rootfs's.
+type volume struct {
+	path string
+	root *os.Root
 }
 
 // Guest serves the API for a set of targets.
@@ -69,6 +77,10 @@ func New(targets ...Target) (*Guest, error) {
 		}
 		c := &container{t: t, store: st, root: root}
 		g.containers = append(g.containers, c)
+		if err := c.openVolumes(); err != nil {
+			g.Close()
+			return nil, err
+		}
 		g.byName[t.Name()] = c
 	}
 	for _, c := range g.containers {
@@ -97,6 +109,9 @@ func (g *Guest) Close() {
 	for _, c := range g.containers {
 		c.store.Close()
 		c.root.Close()
+		for _, v := range c.vols {
+			v.root.Close()
+		}
 	}
 }
 

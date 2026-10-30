@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -19,20 +20,50 @@ import (
 // ReadBufferSize is the chunk size of ReadFile, as agent-substrate/env's guest uses.
 const ReadBufferSize = 64 * 1024
 
-// resolve turns a request path (absolute inside the container, or relative to its workdir) into a path relative
-// to the container root for os.Root, which refuses anything that would leave the root, symlinks included.
-func resolve(c *container, p string) (string, error) {
+// resolve turns a request path (absolute inside the container, or relative to its workdir) into the os.Root it lies
+// in and a path relative to that root; os.Root refuses anything that would leave it, symlinks included. A path at
+// or below a volume's mount path lies in the volume's directory, as the container's processes see it. cpath is the
+// clean absolute path in the container.
+func resolve(c *container, p string) (root *os.Root, name, cpath string, err error) {
 	if p == "" {
-		return "", status.Errorf(codes.InvalidArgument, "file path cannot be empty")
+		return nil, "", "", status.Errorf(codes.InvalidArgument, "file path cannot be empty")
 	}
 	if !path.IsAbs(p) {
 		p = path.Join("/", c.t.Workdir(), p)
 	}
 	p = path.Clean(p)
-	if p == "/" {
-		return ".", nil
+	for _, v := range c.vols {
+		if p == v.path {
+			return v.root, ".", p, nil
+		}
+		if rest, ok := strings.CutPrefix(p, v.path+"/"); ok {
+			return v.root, rest, p, nil
+		}
 	}
-	return strings.TrimPrefix(p, "/"), nil
+	if p == "/" {
+		return c.root, ".", p, nil
+	}
+	return c.root, strings.TrimPrefix(p, "/"), p, nil
+}
+
+// openVolumes opens the target's volume directories, longest mount path first so a nested mount wins.
+func (c *container) openVolumes() error {
+	vt, ok := c.t.(VolumeTarget)
+	if !ok {
+		return nil
+	}
+	for at, dir := range vt.VolumeDirs() {
+		if !path.IsAbs(at) || path.Clean(at) != at || at == "/" {
+			return fmt.Errorf("agent: container %q: volume mount path %q is not a clean absolute path", c.t.Name(), at)
+		}
+		r, err := os.OpenRoot(dir)
+		if err != nil {
+			return fmt.Errorf("agent: container %q: volume at %s: %w", c.t.Name(), at, err)
+		}
+		c.vols = append(c.vols, volume{path: at, root: r})
+	}
+	sort.Slice(c.vols, func(i, j int) bool { return len(c.vols[i].path) > len(c.vols[j].path) })
+	return nil
 }
 
 func fileError(err error, verb, p string) error {
@@ -53,18 +84,18 @@ func (g *Guest) ReadFile(md func(string) string, req *ateenv.ReadFileRequest, se
 	if err != nil {
 		return err
 	}
-	name, err := resolve(c, req.GetPath())
+	root, name, _, err := resolve(c, req.GetPath())
 	if err != nil {
 		return err
 	}
 	flags := os.O_RDONLY
 	if req.GetMode() != 0 {
 		flags |= os.O_CREATE
-		if err := c.root.MkdirAll(path.Dir(name), 0o755); err != nil {
+		if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
 			return fileError(err, "creating parents of", req.GetPath())
 		}
 	}
-	f, err := c.root.OpenFile(name, flags, fs.FileMode(req.GetMode())&fs.ModePerm)
+	f, err := root.OpenFile(name, flags, fs.FileMode(req.GetMode())&fs.ModePerm)
 	if err != nil {
 		return fileError(err, "reading", req.GetPath())
 	}
@@ -120,14 +151,14 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 		}
 		if f == nil {
 			reqP = req.GetPath()
-			name, err := resolve(c, reqP)
+			root, name, _, err := resolve(c, reqP)
 			if err != nil {
 				return nil, err
 			}
 			if req.GetSeekOffset() < 0 {
 				return nil, status.Errorf(codes.InvalidArgument, "seek_offset cannot be negative")
 			}
-			if err := c.root.MkdirAll(path.Dir(name), 0o755); err != nil {
+			if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
 				return nil, fileError(err, "creating parents of", reqP)
 			}
 			mode := fs.FileMode(0o644)
@@ -138,7 +169,7 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 			if req.GetSeekOffset() > 0 {
 				flags = os.O_CREATE | os.O_WRONLY
 			}
-			if f, err = c.root.OpenFile(name, flags, mode); err != nil {
+			if f, err = root.OpenFile(name, flags, mode); err != nil {
 				return nil, fileError(err, "opening", reqP)
 			}
 			if req.GetSeekOffset() > 0 {
@@ -157,16 +188,17 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 	}
 }
 
-func fileInfo(c *container, name string, fi fs.FileInfo) *herdext.FileInfo {
+// fileInfo describes the entry name of root, which the container sees at cpath.
+func fileInfo(root *os.Root, name, cpath string, fi fs.FileInfo) *herdext.FileInfo {
 	out := &herdext.FileInfo{
-		Path:       path.Join("/", name),
+		Path:       cpath,
 		Name:       fi.Name(),
 		Size:       fi.Size(),
 		Mode:       uint32(fi.Mode().Perm()),
 		ModifiedAt: timestamppb.New(fi.ModTime()),
 	}
 	if name == "." {
-		out.Name = "/"
+		out.Name = path.Base(cpath) // "/" for the container root, the mount point's name for a volume's
 	}
 	switch {
 	case fi.Mode().IsRegular():
@@ -175,7 +207,7 @@ func fileInfo(c *container, name string, fi fs.FileInfo) *herdext.FileInfo {
 		out.Type = herdext.FileType_FILE_TYPE_DIRECTORY
 	case fi.Mode()&fs.ModeSymlink != 0:
 		out.Type = herdext.FileType_FILE_TYPE_SYMLINK
-		if t, err := c.root.Readlink(name); err == nil {
+		if t, err := root.Readlink(name); err == nil {
 			out.LinkTarget = t
 		}
 	default:
@@ -190,15 +222,15 @@ func (g *Guest) StatFile(md func(string) string, req *herdext.StatFileRequest) (
 	if err != nil {
 		return nil, err
 	}
-	name, err := resolve(c, req.GetPath())
+	root, name, cpath, err := resolve(c, req.GetPath())
 	if err != nil {
 		return nil, err
 	}
-	fi, err := c.root.Lstat(name)
+	fi, err := root.Lstat(name)
 	if err != nil {
 		return nil, fileError(err, "stat", req.GetPath())
 	}
-	return fileInfo(c, name, fi), nil
+	return fileInfo(root, name, cpath, fi), nil
 }
 
 // ListDirectory describes a directory's entries, sorted by name.
@@ -207,11 +239,11 @@ func (g *Guest) ListDirectory(md func(string) string, req *herdext.ListDirectory
 	if err != nil {
 		return nil, err
 	}
-	name, err := resolve(c, req.GetPath())
+	root, name, cpath, err := resolve(c, req.GetPath())
 	if err != nil {
 		return nil, err
 	}
-	d, err := c.root.Open(name)
+	d, err := root.Open(name)
 	if err != nil {
 		return nil, fileError(err, "listing", req.GetPath())
 	}
@@ -227,7 +259,7 @@ func (g *Guest) ListDirectory(md func(string) string, req *herdext.ListDirectory
 		if err != nil {
 			continue // removed while listing
 		}
-		out.Entries = append(out.Entries, fileInfo(c, path.Join(name, e.Name()), fi))
+		out.Entries = append(out.Entries, fileInfo(root, path.Join(name, e.Name()), path.Join(cpath, e.Name()), fi))
 	}
 	return out, nil
 }

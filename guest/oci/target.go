@@ -14,11 +14,16 @@ type Target struct {
 	RootfsDir     string
 	Dir           string
 	Runtime       Runtime
+	// Volumes maps each volume's mount path in the container to its directory in the guest (the share's): the binds are
+	// in the container's mount namespace only, so the guest's file API reaches them there.
+	Volumes map[string]string
 }
 
 func (t *Target) Name() string    { return t.ContainerName }
 func (t *Target) Rootfs() string  { return t.RootfsDir }
 func (t *Target) Workdir() string { return t.Dir }
+
+func (t *Target) VolumeDirs() map[string]string { return t.Volumes }
 
 func (t *Target) StartShim(ctx context.Context, dir string) error {
 	return t.Runtime.Exec(ctx, t.ContainerName, []string{GuestBinary, "shim", dir}, true)

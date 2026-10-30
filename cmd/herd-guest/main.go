@@ -102,7 +102,7 @@ func serve(args []string) error {
 		}
 		log.Printf("herd-guest: %d container(s) started", len(booted))
 		for _, b := range booted {
-			targets = append(targets, &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt})
+			targets = append(targets, b.Target(rt))
 		}
 	}
 	g, err := agent.New(targets...)

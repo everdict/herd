@@ -529,3 +529,73 @@ func sockPath(t *testing.T, name string) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, name)
 }
+
+// TestFilesInVolumes: the container's volumes are bound in its own mount namespace, which the guest's file API does
+// not share, so a path at or below a volume's mount path is served from the volume's directory (the share), the
+// innermost mount winning; the rootfs underneath the mount point is not touched.
+func TestFilesInVolumes(t *testing.T) {
+	tg := newTarget(t, "main")
+	share := t.TempDir()
+	work, cache := filepath.Join(share, "work"), filepath.Join(share, "cache")
+	for _, d := range []string{work, cache, filepath.Join(tg.Root, "work")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tg.Dir, tg.Volumes = "/work", map[string]string{"/work": work, "/work/cache": cache}
+	g, err := agent.New(tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	md := func(string) string { return "" }
+	write := func(p, body string) error {
+		sent := false
+		_, err := g.WriteFile(md, func() (*ateenv.WriteFileRequest, error) {
+			if sent {
+				return nil, io.EOF
+			}
+			sent = true
+			return &ateenv.WriteFileRequest{Path: p, Chunk: []byte(body)}, nil
+		})
+		return err
+	}
+	read := func(p string) (string, error) {
+		var b strings.Builder
+		err := g.ReadFile(md, &ateenv.ReadFileRequest{Path: p}, func(r *ateenv.ReadFileResponse) error {
+			b.Write(r.GetChunk())
+			return nil
+		})
+		return b.String(), err
+	}
+	for p, want := range map[string]string{"/work/conformance.txt": filepath.Join(work, "conformance.txt"),
+		"notes/a.md": filepath.Join(work, "notes", "a.md"), "/work/cache/blob": filepath.Join(cache, "blob")} {
+		if err := write(p, p); err != nil {
+			t.Fatalf("WriteFile(%s): %v", p, err)
+		}
+		if b, err := os.ReadFile(want); err != nil || string(b) != p {
+			t.Errorf("WriteFile(%s): %s holds %q, %v; want the write in the volume", p, want, b, err)
+		}
+		if got, err := read(p); err != nil || got != p {
+			t.Errorf("ReadFile(%s) = %q, %v", p, got, err)
+		}
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tg.Root, "work")); len(ents) != 0 {
+		t.Errorf("the rootfs under the mount point holds %d entries; want the volume's files only in the volume", len(ents))
+	}
+	fi, err := g.StatFile(md, &herdext.StatFileRequest{Path: "/work"})
+	if err != nil || fi.GetPath() != "/work" || fi.GetName() != "work" || fi.GetType() != herdext.FileType_FILE_TYPE_DIRECTORY {
+		t.Errorf("StatFile(/work) = %v, %v", fi, err)
+	}
+	ls, err := g.ListDirectory(md, &herdext.ListDirectoryRequest{Path: "/work/notes"})
+	if err != nil || len(ls.GetEntries()) != 1 || ls.GetEntries()[0].GetPath() != "/work/notes/a.md" {
+		t.Errorf("ListDirectory(/work/notes) = %v, %v", ls, err)
+	}
+	// A symlink in a volume does not lead out of it.
+	if err := os.Symlink("/etc/passwd", filepath.Join(work, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := read("/work/escape"); err == nil {
+		t.Errorf("ReadFile through a volume's symlink = %q; want refused", got)
+	}
+}

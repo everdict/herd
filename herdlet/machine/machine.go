@@ -112,6 +112,9 @@ func (m *Machines) spec(vmID string, t link.Template, disks []string) vmm.Spec {
 	return s
 }
 
+// errShareTaken is answered by prepare when the VM id already has a share on this host: another VM holds it.
+var errShareTaken = errors.New("the VM id is taken on this host")
+
 // prepare builds the template's images and lays out a fresh share for vmID with the plan and empty volumes. fill,
 // if set, runs on the share before the volumes are laid (a restore unpacks its volume tree there).
 func (m *Machines) prepare(ctx context.Context, vmID string, t link.Template, fill func(*os.Root) error) (vmm.Spec, map[string]string, error) {
@@ -136,6 +139,9 @@ func (m *Machines) prepare(ctx context.Context, vmID string, t link.Template, fi
 	}
 	share := filepath.Join(m.cfg.ShareDir, vmID)
 	if err := os.Mkdir(share, 0o755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return vmm.Spec{}, nil, fmt.Errorf("machine: share of %s: %w: %w", vmID, errShareTaken, err)
+		}
 		return vmm.Spec{}, nil, fmt.Errorf("machine: share of %s: %w", vmID, err)
 	}
 	root, err := os.OpenRoot(share)
@@ -267,22 +273,24 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 			return fmt.Errorf("machine: restore %s: a MEMORY snapshot of %q on a host of %q: %w", id, snap.RestoreFamily, caps.RestoreFamily, ErrFamily)
 		}
 		vmID = snap.VMID
-		if vmID != id {
-			if _, err := os.Lstat(filepath.Join(m.cfg.ShareDir, vmID)); err == nil {
-				// The VM id this memory restores under is taken on this host (a second fork of one MEMORY tag, or
-				// the tag's source running again): one memory cannot run twice under one id, so this actor
-				// cold-boots from the bundle's volume tree under its own id, as a VOLUMES restore does.
-				vmID, cold = id, true
-			}
-		}
 	default:
 		return fmt.Errorf("machine: restore %s at %v: %w", id, snap.Fidelity, vmm.ErrFidelityUnsupported)
 	}
-	spec, _, err := m.prepare(ctx, vmID, man.Template, func(root *os.Root) error {
+	fill := func(root *os.Root) error {
 		return extractVolumes(tr, root, man.Template.Volumes)
-	})
+	}
+	spec, _, err := m.prepare(ctx, vmID, man.Template, fill)
+	if errors.Is(err, errShareTaken) && vmID != id {
+		// The VM id this memory restores under is taken on this host (another fork of one MEMORY tag, restored
+		// before or at the same time, or the tag's source running again): one memory cannot run twice under one
+		// id, so this actor cold-boots from the bundle's volume tree under its own id, as a VOLUMES restore does.
+		// Creating the share is the claim, so of two forks at once exactly one gets the memory; the bundle is
+		// still unread, since fill runs only after the share was created.
+		vmID, cold = id, true
+		spec, _, err = m.prepare(ctx, vmID, man.Template, fill)
+	}
 	if err != nil {
-		if !errors.Is(err, fs.ErrExist) {
+		if !errors.Is(err, errShareTaken) {
 			_ = os.RemoveAll(filepath.Join(m.cfg.ShareDir, vmID))
 		}
 		return err

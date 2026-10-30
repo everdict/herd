@@ -33,11 +33,22 @@ type Target interface {
 	Signal(ctx context.Context, pgid int, sig syscall.Signal) error
 }
 
+// VolumeTarget is a Target with DurableDir volumes bound into it. The binds live in the container's own mount
+// namespace, so the guest does not see them under Rootfs: files below a volume's mount path are read and written in
+// the volume's directory, where the container's processes (and the host's share) see them.
+type VolumeTarget interface {
+	Target
+	// VolumeDirs maps each volume's mount path in the container (clean, absolute) to its directory in the guest.
+	VolumeDirs() map[string]string
+}
+
 // Local is a Target whose processes share the guest's namespaces; its "container" is a directory.
 type Local struct {
 	ContainerName string
 	Root          string
 	Dir           string
+	// Volumes, if set, are VolumeDirs: mount path in the container → directory.
+	Volumes map[string]string
 	// Shim is the command that runs the shim; the record directory is appended. Default: this executable with the
 	// argument "shim".
 	Shim []string
@@ -46,6 +57,8 @@ type Local struct {
 func (l *Local) Name() string    { return l.ContainerName }
 func (l *Local) Rootfs() string  { return l.Root }
 func (l *Local) Workdir() string { return l.Dir }
+
+func (l *Local) VolumeDirs() map[string]string { return l.Volumes }
 
 // ProcessPath maps a path in the container to the path its processes see: for a local target, the same path under
 // Root, since nothing changes their root.

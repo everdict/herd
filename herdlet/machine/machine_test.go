@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/image"
@@ -351,5 +352,88 @@ func TestSecondMemoryForkColdBoots(t *testing.T) {
 	defer h.vm.mu.Unlock()
 	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 || h.vm.booted[1].ID != "fork-2" {
 		t.Errorf("restored %d, booted %d (%v); want one memory restore and fork-2 cold-booted", len(h.vm.restored), len(h.vm.booted), h.vm.booted)
+	}
+}
+
+// gate is an Images that holds each Get until n callers are inside it (or a second has passed), so concurrent
+// restores reach the share's claim together.
+type gate struct {
+	Images
+	mu      sync.Mutex
+	n, in   int
+	release chan struct{}
+}
+
+func (g *gate) Get(ctx context.Context, ref string) (image.Rootfs, error) {
+	g.mu.Lock()
+	g.in++
+	if g.in == g.n {
+		close(g.release)
+	}
+	g.mu.Unlock()
+	select {
+	case <-g.release:
+	case <-time.After(time.Second):
+	}
+	return g.Images.Get(ctx, ref)
+}
+
+// TestConcurrentMemoryForks: two actors restored at once from one MEMORY bundle on its own host (two forks of one
+// tag created together) both start, each in a share of its own holding the parent's volume tree, and what one
+// writes the other does not see. Only one of them can have the memory under the snapshot's VM id; the other
+// cold-boots under its own.
+func TestConcurrentMemoryForks(t *testing.T) {
+	ctx := context.Background()
+	h := newHost(t, ubuntuCaps, registry())
+	if err := h.m.Boot(ctx, "parent", template()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.m.ShareDir("parent"), "data", "notes"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var bundle bytes.Buffer
+	if _, err := h.m.Snapshot(ctx, "parent", vmm.FidelityMemory, true, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := h.m.Delete(ctx, "parent"); p != vmm.PresenceGone {
+		t.Fatalf("release: %v, %v", p, err)
+	}
+	h.m.cfg.Images = &gate{Images: h.m.cfg.Images, n: 2, release: make(chan struct{})}
+	forks := []string{"fork-1", "fork-2"}
+	errs := make([]error, len(forks))
+	var wg sync.WaitGroup
+	for i, id := range forks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = h.m.Restore(ctx, id, bytes.NewReader(bundle.Bytes()))
+		}()
+	}
+	wg.Wait()
+	for i, id := range forks {
+		if errs[i] != nil {
+			t.Fatalf("Restore %s at the same time as its sibling: %v", id, errs[i])
+		}
+		if b, err := os.ReadFile(filepath.Join(h.m.ShareDir(id), "data", "notes")); err != nil || string(b) != "parent" {
+			t.Errorf("%s: volume holds %q, %v; want the parent's", id, b, err)
+		}
+	}
+	if a, b := h.m.ShareDir(forks[0]), h.m.ShareDir(forks[1]); a == b {
+		t.Fatalf("both forks run in %s", a)
+	}
+	for _, id := range forks {
+		if err := os.WriteFile(filepath.Join(h.m.ShareDir(id), "data", "notes"), []byte(id), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range forks {
+		if b, err := os.ReadFile(filepath.Join(h.m.ShareDir(id), "data", "notes")); err != nil || string(b) != id {
+			t.Errorf("%s reads %q, %v after both wrote; want its own write", id, b, err)
+		}
+	}
+	h.vm.mu.Lock()
+	defer h.vm.mu.Unlock()
+	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 {
+		t.Errorf("restored %d, booted %d; want one memory restore and one cold boot besides the parent's", len(h.vm.restored), len(h.vm.booted))
 	}
 }
