@@ -115,7 +115,7 @@ func (s *Server) CreateTag(ctx context.Context, req *ateapi.CreateTagRequest) (*
 		}
 		var res link.Result
 		var reason string
-		snap, res, reason = s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps))
+		snap, res, reason = s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), "")
 		switch res {
 		case link.ResultFailed:
 			return nil, status.Errorf(codes.FailedPrecondition, "snapshot failed: %s", reason)

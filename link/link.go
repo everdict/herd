@@ -94,9 +94,22 @@ type Work struct {
 	SnapshotKey string `json:"snapshotKey,omitempty"`
 	// Snapshot is what OpRestore restores.
 	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
+	// Cause says why herd-api asks for a snapshot or a delete (CauseSuspend, CauseDelete). The herdlet cuts the VM's
+	// tunnel streams with it, so clients learn why their stream ended.
+	Cause Cause `json:"cause,omitempty"`
 	// DeadlineUnixMilli bounds the work; past it the herdlet answers unknown.
 	DeadlineUnixMilli int64 `json:"deadlineUnixMilli,omitempty"`
 }
+
+// Cause is why a piece of work is asked for.
+type Cause string
+
+const (
+	// CauseSuspend: the snapshot or delete is part of suspending the actor.
+	CauseSuspend Cause = "suspend"
+	// CauseDelete: the delete is the actor's deletion.
+	CauseDelete Cause = "delete"
+)
 
 // Result is the three-valued outcome of a piece of work.
 type Result string

@@ -24,8 +24,8 @@ func presenceName(p string) string {
 // takeSnapshot asks the actor's herdlet for a snapshot at f under key and verifies the object in the snapshot store
 // against the digest the herdlet answered. Only a verified object comes back as done; an answer without one is
 // unknown, since a snapshot may or may not exist.
-func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity) (*link.SnapshotRef, link.Result, string) {
-	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key})
+func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity, cause link.Cause) (*link.SnapshotRef, link.Result, string) {
+	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key, Cause: cause})
 	if o.Result != link.ResultDone {
 		return nil, o.Result, o.Reason
 	}
@@ -118,7 +118,7 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 	}
 	gen := len(ar.actor.Status.Snapshots) + 1
 	key := snapshotKey("actors", ar.rec.Space, ar.rec.Name, ar.rec.UID, gen)
-	snap, res, reason := s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps))
+	snap, res, reason := s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), link.CauseSuspend)
 	switch res {
 	case link.ResultFailed:
 		// No snapshot was taken and the VM was left running.
@@ -149,7 +149,7 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 // release deletes a suspended actor's VM on its worker; the actor is SUSPENDED and the slot free only once the
 // herdlet answered the VM verified gone.
 func (s *Server) release(ctx context.Context, ar *actorRec) error {
-	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar)})
+	o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseSuspend})
 	if o.Result == link.ResultDone && o.Presence == link.PresenceGone {
 		ar.st.Worker, ar.st.Owed = "", nil
 		ar.setState(ateapi.ActorState_ACTOR_STATE_SUSPENDED)
@@ -269,7 +269,7 @@ func (s *Server) DeleteActor(ctx context.Context, req *ateapi.DeleteActorRequest
 
 func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	if ar.st.Worker != "" {
-		o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar)})
+		o := s.call(ctx, ar.st.Worker, link.Work{Op: link.OpDelete, VM: vmID(ar), Cause: link.CauseDelete})
 		if o.Result != link.ResultDone || o.Presence != link.PresenceGone {
 			ar.owe(owedDelete, fmt.Sprintf("VM not verified gone (%s): %s", presenceName(o.Presence), o.Reason), time.Now())
 			if err := s.save(ctx, ar); err != nil {

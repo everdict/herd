@@ -15,6 +15,7 @@ import (
 
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
+	"github.com/everdict/herd/tunnel"
 	"github.com/everdict/herd/vmm"
 	"google.golang.org/grpc"
 )
@@ -36,6 +37,9 @@ type Agent struct {
 	Rewrite func(link.Work, link.Outcome) (link.Outcome, bool)
 	// Boot is the spec template for a boot or restore; ID is set per VM.
 	Boot vmm.Spec
+	// Tunnel, if set, is this herdlet's tunnel to herd-router: a suspend or delete cuts the VM's streams with the
+	// reason, and a boot or restore lets the router reach the VM again.
+	Tunnel *Tunnel
 
 	vms sync.Map // VM id → vmLock
 }
@@ -162,15 +166,30 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		if _, err := a.VMM.Boot(ctx, a.spec(w.VM)); err != nil && !errors.Is(err, vmm.ErrExists) {
 			return classify(err)
 		}
+		a.reopen(w.VM)
 		return link.Outcome{Result: link.ResultDone}
 	case link.OpSnapshot:
-		return a.snapshot(ctx, w)
+		if w.Cause == link.CauseSuspend {
+			// What a client sees after this point would not be in the snapshot: cut its streams now.
+			a.cut(w.VM, w.Cause, "snapshot for suspend")
+		}
+		o := a.snapshot(ctx, w)
+		if w.Cause == link.CauseSuspend && o.Result == link.ResultFailed {
+			// No snapshot was taken and the actor stays running.
+			a.reopen(w.VM)
+		}
+		return o
 	case link.OpRestore:
-		return a.restore(ctx, w)
+		o := a.restore(ctx, w)
+		if o.Result == link.ResultDone {
+			a.reopen(w.VM)
+		}
+		return o
 	case link.OpDelete, link.OpInspect:
 		var p vmm.Presence
 		var err error
 		if w.Op == link.OpDelete {
+			a.cut(w.VM, w.Cause, "VM released")
 			p, err = a.VMM.Delete(ctx, w.VM)
 		} else {
 			p, err = a.VMM.Inspect(ctx, w.VM)
@@ -193,6 +212,24 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		return o
 	}
 	return link.Outcome{Result: link.ResultFailed, Reason: fmt.Sprintf("unknown op %q", w.Op)}
+}
+
+// cut ends the VM's tunnel streams with the reason the cause names, and refuses new ones.
+func (a *Agent) cut(vm string, c link.Cause, detail string) {
+	if a.Tunnel == nil {
+		return
+	}
+	r := tunnel.ReasonDeleted
+	if c == link.CauseSuspend {
+		r = tunnel.ReasonSuspended
+	}
+	a.Tunnel.Close(vm, r, detail)
+}
+
+func (a *Agent) reopen(vm string) {
+	if a.Tunnel != nil {
+		a.Tunnel.Reopen(vm)
+	}
 }
 
 func (a *Agent) snapshot(ctx context.Context, w link.Work) link.Outcome {
