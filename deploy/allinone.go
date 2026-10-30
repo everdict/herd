@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/join"
 )
 
@@ -29,7 +30,11 @@ type AllInOne struct {
 	// S3, S3Endpoint and S3Region keep snapshots in a bucket instead of <data>/snapshots (API.S3), so hosts that
 	// join this herd-api move actors without a shared filesystem.
 	S3, S3Endpoint, S3Region string
+	// Secrets is herd-egress's -secrets: the directory it resolves ate-secret://dir/<name>/<tail> credentials from.
+	Secrets string
 
+	// NewGateway, if set, is herd-egress's Egress.NewGateway.
+	NewGateway func(egress.Config) (*egress.Gateway, error)
 	// OnJoin, if set, sees the grant herd-api gave the herdlet.
 	OnJoin func(join.Grant)
 }
@@ -48,6 +53,7 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.EgressListen, "egress-listen", ":15001", "herd-egress transparent TCP listener")
 	fs.StringVar(&a.DNSListen, "dns-listen", ":15053", "herd-egress synthetic DNS listener (UDP)")
 	fs.BoolVar(&a.Egress, "egress", true, "run herd-egress")
+	fs.StringVar(&a.Secrets, "secrets", "", "herd-egress: directory for ate-secret://dir/<name>/<tail> credentials")
 	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead of <data>/snapshots, s3://bucket[/prefix] (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
 	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
 	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
@@ -160,7 +166,8 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		closers = append(closers, pc.Close)
 		addrs.Egress, addrs.DNS = eln.Addr().String(), pc.LocalAddr().String()
 		eg := &Egress{API: addrs.API, Token: st.Grant.EgressCredential, Bindings: filepath.Join(a.Data, "egress-bindings.json"),
-			CAOut: filepath.Join(a.Data, "egress-ca.pem"), DNSAnswer: "198.18.0.1", Interval: time.Second}
+			CAOut: filepath.Join(a.Data, "egress-ca.pem"), DNSAnswer: "198.18.0.1", Interval: time.Second,
+			Secrets: a.Secrets, NewGateway: a.NewGateway}
 		start("herd-egress", func() error { return eg.Run(ctx, eln, pc) })
 	}
 	start("herdlet", func() error { return h.Run(ctx) })

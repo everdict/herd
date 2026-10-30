@@ -3,6 +3,7 @@ package substrateapi_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -117,18 +118,23 @@ func (dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, 
 }
 
 // vmNet gives each fake VM its network: a loopback listener whose connections herd-egress's gateway serves as the
-// VM's actor. With bypass, the listener is a plain forward proxy instead: herd-egress is not on the path.
+// VM's actor. With bypass, the listener is a plain forward proxy instead: herd-egress is not on the path. With
+// secrets (newAllInOneVMNet), the gateway is the all-in-one's own herd-egress and the actors are bound through its
+// bindings file.
 type vmNet struct {
-	t      *testing.T
-	ctx    context.Context
-	gw     *egress.Gateway
-	bypass bool
-	bin    string
-	self   string
+	t        *testing.T
+	ctx      context.Context
+	bypass   bool
+	bin      string
+	self     string
+	secrets  string
+	bindings string
 
 	mu     sync.Mutex
+	gw     *egress.Gateway
 	actors map[string]egress.Actor
 	lns    map[string]string
+	bound  []map[string]string
 }
 
 const secretURI, secret = "ate-secret://dir/conformance/token", "s3cr3t-conformance-credential"
@@ -136,17 +142,8 @@ const secretURI, secret = "ate-secret://dir/conformance/token", "s3cr3t-conforma
 // newVMNet starts the gateway and keeps its actors' policies current from herd-api at api (every 200 ms).
 func newVMNet(t *testing.T, bypass bool) *vmNet {
 	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin := shortDir(t)
-	if err := os.Symlink(self, filepath.Join(bin, "wget")); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	n := &vmNet{t: t, ctx: ctx, bypass: bypass, bin: bin, self: self, actors: map[string]egress.Actor{}, lns: map[string]string{}}
+	n := vmNetBase(t)
+	n.bypass = bypass
 	guard, err := egress.NewGuard(egress.GuardConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +160,57 @@ func newVMNet(t *testing.T, bypass bool) *vmNet {
 	return n
 }
 
+func vmNetBase(t *testing.T) *vmNet {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := shortDir(t)
+	if err := os.Symlink(self, filepath.Join(bin, "wget")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &vmNet{t: t, ctx: ctx, bin: bin, self: self, actors: map[string]egress.Actor{}, lns: map[string]string{}}
+}
+
+// newAllInOneVMNet is the VMs' network through the all-in-one's own herd-egress: startAllInOneWith runs it with
+// -secrets set to a directory holding the suite's credential as conformance/token, and its gateway (NewGateway)
+// keeps everything the all-in-one configured (credentials, CA, Guard) but this test's resolver and dialer. Its
+// policies come from herd-api as herd-egress reads them, and an actor is bound through herd-egress's bindings file
+// as a herdlet binds a VM's TAP address.
+func newAllInOneVMNet(t *testing.T) *vmNet {
+	t.Helper()
+	n := vmNetBase(t)
+	n.secrets = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(n.secrets, "conformance"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(n.secrets, "conformance", "token"), []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// NewGateway is the all-in-one's deploy.AllInOne.NewGateway.
+func (n *vmNet) NewGateway(cfg egress.Config) (*egress.Gateway, error) {
+	cfg.Resolver, cfg.Dialer = resolver{}, dialer{}
+	gw, err := egress.New(cfg)
+	if err == nil {
+		n.mu.Lock()
+		n.gw = gw
+		n.mu.Unlock()
+	}
+	return gw, err
+}
+
+func (n *vmNet) gateway() *egress.Gateway {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.gw
+}
+
 // sync reads policies from herd-api at api with tok, as herd-egress does with its egress credential.
 func (n *vmNet) sync(api, tok string) {
 	cc, err := grpc.NewClient("passthrough:///"+api, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(auth.Bearer(tok)))
@@ -170,7 +218,7 @@ func (n *vmNet) sync(api, tok string) {
 		n.t.Fatal(err)
 	}
 	n.t.Cleanup(func() { _ = cc.Close() })
-	sy := &egress.Syncer{Gateway: n.gw, Source: egress.ControlSource{Conn: cc}, Interval: 200 * time.Millisecond}
+	sy := &egress.Syncer{Gateway: n.gateway(), Source: egress.ControlSource{Conn: cc}, Interval: 200 * time.Millisecond}
 	go func() { _ = sy.Run(n.ctx) }()
 }
 
@@ -179,8 +227,24 @@ func (n *vmNet) OnActor(vm string, a link.ActorRef) {
 	ea := egress.Actor{Space: a.Space, Name: a.Name, UID: a.UID}
 	n.mu.Lock()
 	n.actors[vm] = ea
+	if n.bindings != "" {
+		// herd-egress re-reads its bindings file every interval and unbinds whoever is not in it.
+		n.bound = append(n.bound, map[string]string{"space": a.Space, "name": a.Name, "uid": a.UID,
+			"source": fmt.Sprintf("10.88.%d.%d", len(n.bound)/64, len(n.bound)%64*4+2)})
+		b, err := json.Marshal(n.bound)
+		if err == nil {
+			err = os.WriteFile(n.bindings+".tmp", b, 0o600)
+		}
+		if err == nil {
+			err = os.Rename(n.bindings+".tmp", n.bindings)
+		}
+		if err != nil {
+			n.t.Errorf("egress bindings: %v", err)
+		}
+	}
+	gw := n.gw
 	n.mu.Unlock()
-	n.gw.Bind(ea)
+	gw.Bind(ea)
 }
 
 // ShimFor is the fake guest's per-VM shim: the netshim with the VM's proxy.
@@ -213,13 +277,14 @@ func (n *vmNet) listener(vm string) string {
 			}
 			n.mu.Lock()
 			a, ok := n.actors[vm]
+			gw := n.gw
 			n.mu.Unlock()
 			if !ok {
 				_ = c.Close()
 				continue
 			}
 			// The destination is the gateway's synthetic address: a proxied request names its own.
-			go n.gw.ServeConn(n.ctx, a, c, netip.MustParseAddrPort("198.18.0.1:80"))
+			go gw.ServeConn(n.ctx, a, c, netip.MustParseAddrPort("198.18.0.1:80"))
 		}
 	}()
 	return ln.Addr().String()
@@ -357,6 +422,25 @@ func TestEgressCasesRedWhenEgressBypassed(t *testing.T) {
 	cfg.EgressBound = 2 * time.Second
 	cfg.LongStream, cfg.Template2 = false, ""
 	wantFail(t, cfg, "egress-walk", "credential-header")
+}
+
+// TestCredentialHeaderThroughAllInOneEgress: herd all-in-one started with -secrets hands the directory to its own
+// herd-egress, which resolves the credential-header case's ate-secret://dir/conformance/token from it, so the echo
+// server sees the credential in place of the guest's placeholder (newAllInOneVMNet). The egress walk runs through
+// the same herd-egress.
+func TestCredentialHeaderThroughAllInOneEgress(t *testing.T) {
+	n := newAllInOneVMNet(t)
+	addrs, tok := startAllInOneWith(t, n)
+	cfg := suiteConfig("herd-all-in-one-secrets", addrs.API, addrs.Router, tok)
+	e, echoURL, listedURL := echoes(t)
+	optional(&cfg, e, echoURL, listedURL)
+	cfg.LongStream, cfg.Template2 = false, ""
+	rep := runSuite(t, cfg)
+	for _, c := range []string{"credential-header", "egress-walk"} {
+		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
+			t.Errorf("%s: %s %s; want PASS", c, r.Outcome, r.Detail)
+		}
+	}
 }
 
 // TestLongStreamRedUnderRouterIdleTimeout: with a router path that cuts a connection idle for less than the

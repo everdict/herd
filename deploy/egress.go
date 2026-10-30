@@ -87,6 +87,9 @@ type Egress struct {
 
 	// Token, if set, is used instead of TokenFile.
 	Token string
+	// NewGateway, if set, builds the gateway from the configuration the flags gave instead of egress.New (tests: a
+	// resolver and dialer of their own).
+	NewGateway func(egress.Config) (*egress.Gateway, error)
 }
 
 // Flags registers herd-egress's flags on fs.
@@ -139,7 +142,11 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 		}
 		cfg.JWTs = &egress.ES256Minter{Issuer: e.JWTIssuer, Key: k}
 	}
-	g, err := egress.New(cfg)
+	newGateway := e.NewGateway
+	if newGateway == nil {
+		newGateway = egress.New
+	}
+	g, err := newGateway(cfg)
 	if err != nil {
 		return err
 	}

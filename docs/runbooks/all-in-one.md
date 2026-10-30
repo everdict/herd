@@ -52,6 +52,19 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    Clients use herd-api at `<host>:7443` (Substrate Control API) and herd-router at `<host>:8443` with that token.
    Both serve cleartext HTTP/2: put a TLS terminator in front before exposing them beyond the host (ADR A-12).
 
+6. Optional: credentials for egress policies. An `EgressPolicy` whose `replace_headers` names
+   `ate-secret://dir/<name>/<tail>` has herd-egress inject the file `<name>/<tail>` of its secrets directory (the
+   actor never holds the value). The all-in-one takes that directory as `-secrets` and hands it to its herd-egress;
+   add it to the unit's `ExecStart` (`sudo systemctl edit --full herd`), for example:
+
+   ```sh
+   sudo install -d -m 0700 /etc/herd/secrets/github
+   sudo install -m 0600 token /etc/herd/secrets/github/token   # ate-secret://dir/github/token
+   /usr/local/bin/herd -data /var/lib/herd -listen 0.0.0.0:7443 -router-listen 0.0.0.0:8443 -secrets /etc/herd/secrets
+   ```
+
+   Without `-secrets` herd-egress has no credential provider and refuses a request whose credential it must inject.
+
 ## macOS (Apple Silicon, macOS 14+)
 
 1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement):

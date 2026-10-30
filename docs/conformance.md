@@ -70,7 +70,8 @@ to>`, `--echo-listen`, `--echo-url`). The policy lists the echo host with `effec
 conformance-placeholder`; the echo server must see exactly the credential in its place (not the placeholder, and the
 value is never printed). The guest's answer and its `env` must not contain the credential, and a request without the
 header reaches the echo server without one. herd-egress resolves `ate-secret://dir/<name>/<tail>` from its `-secrets`
-directory. Without injection the case is red (the echo server sees the placeholder).
+directory (`herd-egress -secrets` on a joined host, `herd -secrets` for an all-in-one, which hands it to its
+herd-egress). Without injection the case is red (the echo server sees the placeholder).
 
 **`long-stream`** (`--long-stream`; `--stream-for`, default 30m; `--stream-gap`, default 60s). The suite starts
 `/bin/sh -c` printing `tick i` every `--stream-gap` for `--stream-for`, then 20 `tail i` lines up to 1 s apart and
@@ -198,9 +199,13 @@ herd conformance --target herd-join --endpoint herd-api.internal:7443 --token-fi
 ```
 
 The optional cases on a real host (here herd-api and herd-router on the host's LAN address; the template `pair` has two containers mounting one DurableDir volume; the
-secret file sits in herd-egress's `-secrets` directory as `conformance/token`, and `/tmp/cred` holds the same value):
+secret file sits in herd-egress's `-secrets` directory as `conformance/token`, and `/tmp/cred` holds the same value).
+The all-in-one takes that directory as its own `-secrets` and hands it to its herd-egress, so it runs as:
 
 ```sh
+sudo install -d -m 0700 /etc/herd/secrets/conformance
+sudo install -m 0600 /tmp/cred /etc/herd/secrets/conformance/token
+sudo herd -data /var/lib/herd -listen 192.168.1.10:7443 -router-listen 192.168.1.10:8443 -secrets /etc/herd/secrets
 herd conformance --target herd-all-in-one --endpoint 192.168.1.10:7443 --token-file /tmp/herd.token --atespace conformance --template agent --router 192.168.1.10:8443 --probe env-exec \
   --egress-walk https://example.com/ --echo-listen :18080 --echo-url http://echo.example.net:18080/ \
   --credential-uri ate-secret://dir/conformance/token --credential-file /tmp/cred \
@@ -217,6 +222,10 @@ hypervisor with the real herd-guest in every VM, and once more through `herd con
 herd-egress's gateway (each VM gets an explicit-proxy listener whose connections the gateway serves as the VM's actor,
 and the test binary is the guest's `wget`), the gateway's policies come from herd-api over the Control API as
 herd-egress reads them, and its resolver maps `listed.test`/`echo.test` to TEST-NET-3 addresses that its dialer
-reaches on loopback, so its Guard is the real host's. The join run adds `two-containers` with the VOLUMES move. The Nomad mode runs
+reaches on loopback, so its Guard is the real host's. `TestCredentialHeaderThroughAllInOneEgress` runs the egress walk and the
+credential header through the all-in-one's own herd-egress instead, started with `-secrets` (only its resolver
+and dialer are the test's, and the test binds each actor through herd-egress's bindings file); without the directory
+handed to herd-egress the credential header is red (the gateway refuses the request whose credential it cannot
+resolve). The join run adds `two-containers` with the VOLUMES move. The Nomad mode runs
 the same binaries as the join mode (dist/nomad), so its run is the join invocation against the Nomad service
 addresses; it needs the supervisor's cluster.

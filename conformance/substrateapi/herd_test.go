@@ -223,6 +223,10 @@ func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	}
 	a := &deploy.AllInOne{Data: data, Listen: "127.0.0.1:0", RouterListen: "127.0.0.1:0", TunnelListen: "127.0.0.1:0",
 		EgressListen: "127.0.0.1:0", DNSListen: "127.0.0.1:0", Egress: true, Herdlet: h}
+	if n != nil && n.secrets != "" {
+		a.Secrets, a.NewGateway = n.secrets, n.NewGateway
+		n.bindings = filepath.Join(data, "egress-bindings.json")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan deploy.Addrs, 1)
 	done := make(chan error, 1)
@@ -249,7 +253,15 @@ func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	waitWorkers(t, addrs.API, tok, 1)
 	template(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
 	template2(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
-	if n != nil {
+	switch {
+	case n != nil && n.secrets != "":
+		// The all-in-one's herd-egress builds its gateway once it listens.
+		for deadline := time.Now().Add(10 * time.Second); n.gateway() == nil; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the all-in-one's herd-egress built no gateway")
+			}
+		}
+	case n != nil:
 		n.sync(addrs.API, tok)
 	}
 	return addrs, tok
