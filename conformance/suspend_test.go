@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/conformance"
@@ -143,18 +142,15 @@ func TestSuspendUnknownStaysSuspending(t *testing.T) {
 			// Once the herdlet answers, the owed suspend converges.
 			h.VMM.Clear()
 			h.Rewrite(nil)
-			// A herdlet that was silent may still be finishing the timed-out exchange: reconcile until the owed
-			// suspend converges, bounded, instead of after a fixed sleep (which flaked on the bolt store).
-			deadline := time.Now().Add(3 * time.Second)
-			for {
-				left, err := e.Server.Reconcile(ctx)
-				if err == nil && left == 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("Reconcile = %d owed, %v (still after 3 s)", left, err)
-				}
-				time.Sleep(20 * time.Millisecond)
+			// One Reconcile converges it, on a loaded host too: Reconcile's calls are bounded by
+			// conformance.ReconcileCallTimeout, not by the CallTimeout a loaded herdlet's snapshot (fsyncs) can
+			// outlast on every retry; a herdlet still finishing the timed-out exchange holds the VM until then.
+			stop := load(t, t.TempDir())
+			left, err := e.Server.Reconcile(ctx)
+			stop()
+			if err != nil || left != 0 {
+				_, owed := getActor(t, e, "a1")
+				t.Fatalf("Reconcile = %d owed, %v; want 0 (owed %q)", left, err, owed)
 			}
 			got, owed = getActor(t, e, "a1")
 			if got.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_SUSPENDED || owed != "" {

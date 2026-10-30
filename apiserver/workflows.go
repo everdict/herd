@@ -303,8 +303,10 @@ func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	return nil
 }
 
-// Reconcile retries every owed workflow step once and returns how many are still owed.
+// Reconcile retries every owed workflow step once and returns how many are still owed. Each herdlet call it makes waits
+// up to ReconcileCallTimeout.
 func (s *Server) Reconcile(ctx context.Context) (int, error) {
+	ctx = context.WithValue(ctx, reconciling{}, true)
 	recs, err := s.cfg.Store.List(ctx, store.KindActor, "")
 	if err != nil {
 		return 0, err

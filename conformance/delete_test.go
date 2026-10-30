@@ -1,6 +1,7 @@
 package conformance_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -86,8 +87,12 @@ func TestDeleteNotVerifiedStaysOwed(t *testing.T) {
 				if !strings.HasPrefix(owed, "delete: ") || !strings.Contains(owed, c.reason) {
 					t.Errorf("pass %d: owed %q, want the delete owed with %q", i, owed, c.reason)
 				}
-				// Retried and still not verified: still owed.
-				if left, err := e.Server.Reconcile(ctx); err != nil || left != 1 {
+				// Retried and still not verified: still owed. (Bounded by CallTimeout: a hung or silent herdlet would
+				// otherwise hold each pass for the whole ReconcileCallTimeout.)
+				rctx, cancel := context.WithTimeout(ctx, conformance.CallTimeout)
+				left, err := e.Server.Reconcile(rctx)
+				cancel()
+				if err != nil || left != 1 {
 					t.Errorf("pass %d: Reconcile = %d owed, %v; want 1", i, left, err)
 				}
 			}

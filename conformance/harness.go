@@ -93,6 +93,10 @@ var NewStore = func(t testing.TB) store.Store { return memstore.New() }
 // CallTimeout is how long herd-api waits for a herdlet in the harness.
 const CallTimeout = 400 * time.Millisecond
 
+// ReconcileCallTimeout is how long Reconcile waits for a herdlet in the harness: a bound that a loaded host's herdlet
+// (fsyncs of a snapshot, a starved scheduler) stays well inside, so one Reconcile converges what the herdlet answers.
+const ReconcileCallTimeout = 5 * time.Second
+
 // Start runs herd-api and the given herdlets; everything stops when the test ends.
 func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	t.Helper()
@@ -109,7 +113,8 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx}
 	e.Server, err = apiserver.New(apiserver.Config{
 		Store: e.Store, Snapshots: snaps, Hub: e.Hub, Authn: auth.StaticKey{Key: key}, Authz: auth.SpaceRoles{},
-		CallTimeout: CallTimeout,
+		CallTimeout:          CallTimeout,
+		ReconcileCallTimeout: ReconcileCallTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)

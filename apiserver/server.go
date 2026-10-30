@@ -48,6 +48,11 @@ type Config struct {
 	Authz     auth.Authorizer
 	// CallTimeout bounds each call to a herdlet (default 30 s).
 	CallTimeout time.Duration
+	// ReconcileCallTimeout bounds each call to a herdlet that Reconcile makes (default 4 × CallTimeout). A retry has
+	// no client waiting on it, and work that outlasts CallTimeout (a large snapshot, a loaded disk) would time out the
+	// same way on every pass and never converge; the herdlet also runs the retry only after an earlier exchange on
+	// the same VM that it is still finishing, which this bound covers too.
+	ReconcileCallTimeout time.Duration
 }
 
 // Server is herd-api.
@@ -67,6 +72,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.CallTimeout <= 0 {
 		cfg.CallTimeout = 30 * time.Second
 	}
+	if cfg.ReconcileCallTimeout <= 0 {
+		cfg.ReconcileCallTimeout = 4 * cfg.CallTimeout
+	}
 	s := &Server{cfg: cfg}
 	cfg.Hub.OnRegister = s.recordWorker
 	return s, nil
@@ -82,8 +90,15 @@ func (s *Server) lock(k store.Key) func() {
 	return mu.Unlock
 }
 
+// reconciling marks a context as Reconcile's: its herdlet calls are bounded by ReconcileCallTimeout.
+type reconciling struct{}
+
 func (s *Server) call(ctx context.Context, worker string, w link.Work) link.Outcome {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
+	timeout := s.cfg.CallTimeout
+	if ctx.Value(reconciling{}) != nil {
+		timeout = s.cfg.ReconcileCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return s.cfg.Hub.Call(ctx, worker, w)
 }

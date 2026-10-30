@@ -2,6 +2,10 @@ package conformance_test
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,4 +92,55 @@ func present(t *testing.T, h *conformance.Herdlet, a *ateapi.Actor) vmm.Presence
 		t.Fatalf("Inspect: %v", err)
 	}
 	return p
+}
+
+// load keeps the process busy until the returned stop is called: goroutines that spin on the CPU and goroutines that
+// write and fsync files in dir, the way a loaded host (other test binaries, disk traffic) slows a herdlet's work.
+func load(t *testing.T, dir string) (stop func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for n := 0; ; n++ {
+				if n%1024 == 0 {
+					select {
+					case <-done:
+						return
+					default:
+					}
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 4<<20)
+			p := filepath.Join(dir, fmt.Sprintf("load-%d", i))
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				f, err := os.Create(p)
+				if err != nil {
+					return
+				}
+				_, _ = f.Write(buf)
+				_ = f.Sync()
+				_ = f.Close()
+			}
+		}()
+	}
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			close(done)
+			wg.Wait()
+		})
+	}
+	t.Cleanup(stop)
+	return stop
 }
