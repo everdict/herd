@@ -14,6 +14,7 @@ import (
 
 	"github.com/containers/gvisor-tap-vsock/pkg/tap"
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
+	"github.com/everdict/herd/egress/gvstack"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -67,7 +68,7 @@ func New(file *os.File, addr, gw netip.Addr) (*VM, error) {
 		{Destination: header.IPv4EmptySubnet, Gateway: tcpip.AddrFrom4(gw.As4()), NIC: 1},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = sw.Accept(ctx, conn, types.VfkitProtocol) }()
+	go func() { _ = sw.Accept(ctx, gvstack.SwitchConn(conn), types.VfkitProtocol) }()
 	return &VM{ns: ns, conn: conn, cancel: cancel}, nil
 }
 

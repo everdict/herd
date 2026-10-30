@@ -24,6 +24,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/tap"
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
@@ -142,7 +143,7 @@ func New(conn net.Conn, cfg egress.StackConfig, mtu int) (*Stack, error) {
 		defer st.wg.Done()
 		defer cancel()
 		// Returns when conn is closed (Close) or the VM's end goes away.
-		_ = sw.Accept(ctx, conn, types.VfkitProtocol)
+		_ = sw.Accept(ctx, SwitchConn(conn), types.VfkitProtocol)
 	}()
 	go func() {
 		defer st.wg.Done()
@@ -153,6 +154,25 @@ func New(conn net.Conn, cfg egress.StackConfig, mtu int) (*Stack, error) {
 		_ = st.Close()
 	}()
 	return st, nil
+}
+
+// SwitchConn is conn as a gvisor-tap-vsock switch must be handed it: its writes never fail. On a failed write the
+// switch drops the connection from its own table while its reader may still be handling a frame it had read; that
+// frame puts the sender's MAC back into the switch's address table with no connection behind it, and the next frame
+// to that MAC dereferences nil in tap.(*Switch).txBuf (PLT-197). A write that fails closes conn instead and counts
+// the frame as sent, so the reader fails next and the switch's Accept removes the connection and its addresses
+// together. ENOBUFS is passed through: the switch retries that frame.
+func SwitchConn(conn net.Conn) net.Conn { return switchConn{conn} }
+
+type switchConn struct{ net.Conn }
+
+func (c switchConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if err == nil || errors.Is(err, syscall.ENOBUFS) {
+		return n, err
+	}
+	_ = c.Conn.Close()
+	return len(b), nil
 }
 
 // forward runs for each TCP SYN the VM sends: complete the handshake and hand the connection to Accept.
