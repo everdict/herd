@@ -5,10 +5,11 @@ token herd-api minted (ADR 0001 A-20). Hosts need only a network path to the con
 7444 (router tunnel): herdlets dial out, nothing dials a node. The commands below are checked by
 `docs/runbooks/runbooks_test.go`.
 
-Snapshots: herd-api verifies every snapshot in its store before it records it, and a VM restores from the snapshot
-files its backend wrote, so herd-api and every herdlet must see one snapshot directory. Export `/var/lib/herd/snapshots`
-from the control host (NFS or any shared filesystem) and mount it at the same path on every node. Without it actors
-run, but suspend, resume and fork fail verification.
+Snapshots: herd-api keeps them in an S3-compatible bucket (MinIO, AWS S3, ...) and hands that store — endpoint, bucket
+and credentials — to every herdlet in its join grant, so herdlets write and read snapshots there and no host mounts
+anything. herd-api verifies every snapshot in the bucket before it records it. Create a bucket (e.g. `herd-snapshots`)
+and an access key for it on the S3 endpoint first; every node must reach that endpoint. Without `HERD_S3`, herd-api
+keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that directory could use.
 
 ## On the control host
 
@@ -23,11 +24,17 @@ run, but suspend, resume and fork fail verification.
    ```
 
 2. Create the signing key and tell herd-api the router tunnel address herdlets dial (`<control-host>` is this host's
-   address as the nodes reach it):
+   address as the nodes reach it) and the snapshot bucket (`<s3-endpoint>` is the S3 endpoint as herd-api and every
+   node reach it, e.g. `http://minio.example:9000`):
 
    ```sh
    sudo herd-api keygen -out /etc/herd/jwt.key
    echo "HERD_ADVERTISE_TUNNEL=<control-host>:7444" | sudo tee /etc/herd/herd-api.env
+   echo "HERD_S3=s3://herd-snapshots" | sudo tee -a /etc/herd/herd-api.env
+   echo "HERD_S3_ENDPOINT=<s3-endpoint>" | sudo tee -a /etc/herd/herd-api.env
+   echo "AWS_ACCESS_KEY_ID=<access key>" | sudo tee -a /etc/herd/herd-api.env
+   echo "AWS_SECRET_ACCESS_KEY=<secret key>" | sudo tee -a /etc/herd/herd-api.env
+   sudo chmod 0600 /etc/herd/herd-api.env
    ```
 
 3. Install and start herd-api and herd-router (`dist/systemd/herd-api.service`, `dist/systemd/herd-router.service`):
@@ -46,8 +53,8 @@ run, but suspend, resume and fork fail verification.
 
 ## On each Ubuntu node
 
-1. Install Cloud Hypervisor, virtiofsd and herd as in all-in-one.md steps 1–2, mount the shared snapshot directory at
-   `/var/lib/herd/snapshots`, and check the host:
+1. Install Cloud Hypervisor, virtiofsd and herd as in all-in-one.md steps 1–2 (no snapshot directory to mount: the
+   join hands the node herd-api's bucket), and check the host:
 
    ```sh
    sudo herdlet doctor -virtiofsd /usr/libexec/virtiofsd
@@ -63,8 +70,8 @@ run, but suspend, resume and fork fail verification.
    ```
 
 3. Install and start herdlet and herd-egress (`dist/systemd/herdlet.service`, `dist/systemd/herd-egress.service`). The
-   first start joins: it exchanges the token for this worker's credential and the egress credential and keeps them
-   in `/var/lib/herdlet`; later starts reuse them, so the token may expire.
+   first start joins: it exchanges the token for this worker's credential, the egress credential and herd-api's
+   snapshot store, and keeps them in `/var/lib/herdlet`; later starts reuse them, so the token may expire.
 
    ```sh
    sudo install -m 0644 herd/dist/systemd/herdlet.service herd/dist/systemd/herd-egress.service /etc/systemd/system/

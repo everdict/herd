@@ -11,6 +11,7 @@ import (
 
 	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/snapstore/storetest"
 )
 
 func TestPutVerifyDelete(t *testing.T) {
@@ -103,4 +104,29 @@ func TestNoSyncKeepsTheContract(t *testing.T) {
 	if b, err := io.ReadAll(rc); err != nil || string(b) != "memory" {
 		t.Fatalf("Open = %q, %v", b, err)
 	}
+}
+
+// TestContract: the disk store keeps the snapshot store contract (the one snapstore/s3 runs too).
+func TestContract(t *testing.T) {
+	dir := t.TempDir()
+	storetest.Run(t, storetest.Harness{
+		Open: func(t *testing.T) snapstore.Store {
+			s, err := disk.New(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		},
+		Tamper: func(t *testing.T, key string) {
+			p := filepath.Join(dir, "objects", filepath.FromSlash(key))
+			b, err := os.ReadFile(p)
+			if err != nil || len(b) == 0 {
+				t.Fatalf("tamper %s: %v", key, err)
+			}
+			b[0] ^= 0xff
+			if err := os.WriteFile(p, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	})
 }

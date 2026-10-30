@@ -27,7 +27,9 @@ import (
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/store"
 	"github.com/everdict/herd/store/boltstore"
 	"github.com/everdict/herd/store/memstore"
@@ -78,11 +80,18 @@ func OpenStore(spec string) (store.Store, error) {
 
 // API is herd-api's configuration.
 type API struct {
-	Listen          string
-	KeyFile         string
-	Audience        string
-	Store           string
-	Snapshots       string
+	Listen    string
+	KeyFile   string
+	Audience  string
+	Store     string
+	Snapshots string
+	// S3 (s3://bucket[/prefix]), if set, keeps snapshots in that bucket at S3Endpoint instead of the Snapshots
+	// directory, and every join hands herdlets the store (join.Grant.Snapshots). S3Credentials default to
+	// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN.
+	S3              string
+	S3Endpoint      string
+	S3Region        string
+	S3Credentials   s3.Credentials
 	CallTimeout     time.Duration
 	Reconcile       time.Duration
 	AdvertiseTunnel string
@@ -100,7 +109,10 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.KeyFile, "key-file", "", "HS256 signing key for bearer tokens (at least 32 bytes)")
 	fs.StringVar(&a.Audience, "audience", "", "required JWT audience, if any")
 	fs.StringVar(&a.Store, "store", "memory", "record store: memory or bolt:<path> (one herd-api per file)")
-	fs.StringVar(&a.Snapshots, "snapshots", "", "snapshot store directory (herdlets must see the same directory)")
+	fs.StringVar(&a.Snapshots, "snapshots", "", "snapshot store directory (all-in-one, or hosts that share it; see -s3)")
+	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead, s3://bucket[/prefix]; joins hand herdlets the store (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
+	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
+	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
 	fs.DurationVar(&a.CallTimeout, "call-timeout", 30*time.Second, "how long to wait for a herdlet's answer")
 	fs.DurationVar(&a.Reconcile, "reconcile", 10*time.Second, "how often to retry owed workflow steps")
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
@@ -116,15 +128,12 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 			return err
 		}
 	}
-	if a.Snapshots == "" {
-		return errors.New("-snapshots is required")
-	}
 	st, err := OpenStore(a.Store)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	snaps, err := disk.New(a.Snapshots)
+	snaps, s3cfg, err := a.snapshots()
 	if err != nil {
 		return err
 	}
@@ -136,7 +145,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	if err != nil {
 		return err
 	}
-	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, TTL: a.CredentialTTL,
+	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {
 				if c.Worker == w {
@@ -253,4 +262,34 @@ type Keygen struct {
 // Flags registers the keygen command's flags.
 func (k *Keygen) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&k.Out, "out", "/etc/herd/jwt.key", "key file to write (mode 0600); an existing key is kept")
+}
+
+// snapshots opens herd-api's snapshot store: the S3 bucket -s3 names, whose configuration joins hand to herdlets,
+// or the -snapshots directory.
+func (a *API) snapshots() (snapstore.Store, *s3.Config, error) {
+	if a.S3 == "" {
+		if a.Snapshots == "" {
+			return nil, nil, errors.New("-snapshots or -s3 is required")
+		}
+		s, err := disk.New(a.Snapshots)
+		return s, nil, err
+	}
+	cfg, err := s3.ParseURL(a.S3)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-s3: %w", err)
+	}
+	c := a.S3Credentials
+	if c.AccessKeyID == "" && c.SecretAccessKey == "" {
+		c = s3.Credentials{AccessKeyID: os.Getenv("AWS_ACCESS_KEY_ID"), SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			SessionToken: os.Getenv("AWS_SESSION_TOKEN")}
+	}
+	cfg.Endpoint, cfg.Region = a.S3Endpoint, a.S3Region
+	cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken = c.AccessKeyID, c.SecretAccessKey, c.SessionToken
+	s, err := s3.New(cfg, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-s3: %w", err)
+	}
+	cfg = s.Config()
+	log.Printf("herd-api: snapshots in s3://%s/%s at %s", cfg.Bucket, cfg.Prefix, cfg.Endpoint)
+	return s, &cfg, nil
 }

@@ -2,8 +2,8 @@
 // verifies the object against that digest before it records the snapshot, and records it before it releases the
 // worker (durable before release, R-D6).
 //
-// Implementations: disk (a local directory, the all-in-one and shared-filesystem modes). An S3 implementation comes
-// later behind the same interface.
+// Implementations: disk (a local directory, the all-in-one and shared-filesystem modes) and s3 (a bucket every host
+// reaches, which the join hands to herdlets). Both run the contract in storetest.
 package snapstore
 
 import (

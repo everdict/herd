@@ -168,3 +168,29 @@ func TestCommandSplitting(t *testing.T) {
 		t.Errorf("redirect: %q", got)
 	}
 }
+
+// TestJoinNeedsNoSharedMount: the join runbook asks no host to mount herd-api's snapshot directory, and no herdlet it
+// runs is pointed at one (-snapshots): a joined herdlet uses the store its join hands it.
+func TestJoinNeedsNoSharedMount(t *testing.T) {
+	b, err := os.ReadFile("join.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regexp.MustCompile(`(?i)\bmount (it|the shared)|\bNFS\b|shared filesystem`).Match(b) {
+		t.Error("join.md asks hosts to share a snapshot directory")
+	}
+	for _, line := range shellBlocks(string(b)) {
+		for _, words := range commands(line) {
+			if bin, args, ok := herdCommand(words); ok && bin == "herdlet" {
+				for _, a := range args {
+					if a == "-snapshots" || a == "--snapshots" || strings.HasPrefix(a, "-snapshots=") || strings.HasPrefix(a, "--snapshots=") {
+						t.Errorf("join.md runs `herdlet %s`", strings.Join(args, " "))
+					}
+				}
+			}
+		}
+	}
+	if !strings.Contains(string(b), "HERD_S3=") {
+		t.Error("join.md does not configure herd-api's S3 snapshot store")
+	}
+}

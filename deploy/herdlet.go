@@ -25,7 +25,9 @@ import (
 	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/vmm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -81,7 +83,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Labels, "labels", "", "worker labels, k=v,k=v")
 	fs.IntVar(&h.Slots, "slots", 4, "actors this host holds")
 	fs.StringVar(&h.StateDir, "state", "/var/lib/herdlet", "state directory: join grant, VMs, shares, image cache")
-	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's (on several hosts a shared filesystem; default: <state>/snapshots)")
+	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's (default: the S3 store herd-api handed out at join, else <state>/snapshots)")
 	fs.StringVar(&h.Router, "router", "", "herd-router tunnel address (default: the one herd-api handed out at join)")
 	fs.StringVar(&h.Kernel, "kernel", "/usr/local/share/herd/kernel", "guest kernel from guest/build.sh (bzImage on amd64, Image on arm64)")
 	fs.StringVar(&h.Initrd, "initrd", "/usr/local/share/herd/initrd.img", "guest initramfs with herd-guest as /init")
@@ -340,11 +342,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if h.Slots < 1 {
 		return fmt.Errorf("-slots %d", h.Slots)
 	}
-	snapDir := h.Snapshots
-	if snapDir == "" {
-		snapDir = filepath.Join(h.StateDir, "snapshots")
-	}
-	snaps, err := disk.New(snapDir)
+	snaps, err := h.snapshots(st.Grant)
 	if err != nil {
 		return err
 	}
@@ -464,4 +462,22 @@ func (h *Herdlet) flusher(g machine.GuestDialer) machine.Flusher {
 		port = 8080
 	}
 	return machine.GuestFlush{Guests: g, Port: port}
+}
+
+// snapshots opens the herdlet's snapshot store: the -snapshots directory if given, else the S3 store herd-api handed
+// out at join (no shared filesystem), else <state>/snapshots.
+func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
+	if h.Snapshots == "" && g.Snapshots != nil {
+		s, err := s3.New(*g.Snapshots, nil)
+		if err != nil {
+			return nil, fmt.Errorf("the join's snapshot store: %w", err)
+		}
+		log.Printf("herdlet: snapshots in s3://%s/%s at %s (from the join)", g.Snapshots.Bucket, g.Snapshots.Prefix, g.Snapshots.Endpoint)
+		return s, nil
+	}
+	dir := h.Snapshots
+	if dir == "" {
+		dir = filepath.Join(h.StateDir, "snapshots")
+	}
+	return disk.New(dir)
 }

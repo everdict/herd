@@ -1,8 +1,8 @@
 // Package join is how a host becomes a herdlet with one token (spec R-D4, ADR 0001 A-20): herd-api mints a join
 // token, and `herdlet join <herd-api> --token <t>` exchanges it, over one unary call on the same gRPC port, for a
 // herdlet credential naming that worker, an egress credential for the host's herd-egress, and the herd-router
-// tunnel address to dial. The join token itself grants nothing else: it cannot open a link or a tunnel and reads
-// nothing on the Control API.
+// tunnel address to dial (and, when herd-api keeps snapshots in S3, that store). The join token itself grants
+// nothing else: it cannot open a link or a tunnel and reads nothing on the Control API.
 package join
 
 import (
@@ -17,6 +17,7 @@ import (
 
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore/s3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -42,8 +43,12 @@ type Grant struct {
 	// EgressCredential lets the host's herd-egress read the actors' egress policies.
 	EgressCredential string `json:"egressCredential"`
 	// Tunnel is the herd-router tunnel address herdlets dial; empty when herd-api advertises none.
-	Tunnel    string `json:"tunnel,omitempty"`
-	ExpiresAt int64  `json:"expiresAt"`
+	Tunnel string `json:"tunnel,omitempty"`
+	// Snapshots is herd-api's S3 snapshot store (endpoint, bucket, credentials) when it keeps snapshots in one: the
+	// herdlet writes and reads snapshots there, so a joined host needs no shared filesystem. Nil when herd-api's
+	// store is a directory.
+	Snapshots *s3.Config `json:"snapshots,omitempty"`
+	ExpiresAt int64      `json:"expiresAt"`
 }
 
 // Server answers joins. Its key is herd-api's token key.
@@ -54,6 +59,8 @@ type Server struct {
 	Connected func(worker string) bool
 	// Tunnel is advertised to every joining herdlet.
 	Tunnel string
+	// Snapshots, if set, is handed to every joining herdlet (Grant.Snapshots).
+	Snapshots *s3.Config
 	// TTL is the lifetime of the credentials a join grants (default one year).
 	TTL time.Duration
 	// OnGrant, if set, sees every grant before it is answered.
@@ -114,7 +121,7 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "join: %v", err)
 	}
-	g := &Grant{Worker: req.Worker, Credential: cred, EgressCredential: egress, Tunnel: s.Tunnel, ExpiresAt: exp}
+	g := &Grant{Worker: req.Worker, Credential: cred, EgressCredential: egress, Tunnel: s.Tunnel, Snapshots: s.Snapshots, ExpiresAt: exp}
 	if s.OnGrant != nil {
 		s.OnGrant(*g)
 	}

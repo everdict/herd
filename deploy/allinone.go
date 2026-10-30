@@ -26,6 +26,9 @@ type AllInOne struct {
 	DNSListen    string
 	Egress       bool
 	Herdlet      Herdlet
+	// S3, S3Endpoint and S3Region keep snapshots in a bucket instead of <data>/snapshots (API.S3), so hosts that
+	// join this herd-api move actors without a shared filesystem.
+	S3, S3Endpoint, S3Region string
 
 	// OnJoin, if set, sees the grant herd-api gave the herdlet.
 	OnJoin func(join.Grant)
@@ -45,6 +48,9 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.EgressListen, "egress-listen", ":15001", "herd-egress transparent TCP listener")
 	fs.StringVar(&a.DNSListen, "dns-listen", ":15053", "herd-egress synthetic DNS listener (UDP)")
 	fs.BoolVar(&a.Egress, "egress", true, "run herd-egress")
+	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead of <data>/snapshots, s3://bucket[/prefix] (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
+	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
+	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
 	hf := flag.NewFlagSet("herdlet", flag.ContinueOnError)
 	a.Herdlet.HostFlags(hf)
 	hf.VisitAll(func(f *flag.Flag) {
@@ -116,6 +122,7 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 	}()
 
 	api := &API{Key: key, Store: "bolt:" + filepath.Join(a.Data, "herd.db"), Snapshots: snapDir,
+		S3: a.S3, S3Endpoint: a.S3Endpoint, S3Region: a.S3Region,
 		CallTimeout: 30 * time.Second, Reconcile: 10 * time.Second, AdvertiseTunnel: addrs.Tunnel,
 		CredentialTTL: 365 * 24 * time.Hour, OnJoin: a.OnJoin}
 	start("herd-api", func() error { return api.Run(ctx, apiLn) })
@@ -130,6 +137,10 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 	h := a.Herdlet
 	h.API, h.Token, h.TokenFile = addrs.API, tok, ""
 	h.StateDir, h.Snapshots, h.Router, h.CredentialFile, h.JoinOnly = filepath.Join(a.Data, "herdlet"), snapDir, "", "", false
+	if a.S3 != "" {
+		// The herdlet uses the store its join hands it, as every other host does.
+		h.Snapshots = ""
+	}
 	if err := h.preflight(); err != nil {
 		return err
 	}
