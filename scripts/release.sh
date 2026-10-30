@@ -33,10 +33,14 @@ for p in linux/amd64 linux/arm64 darwin/arm64; do
 			build "$goos" "$goarch" 1 "$c" "$dir/$c"
 			codesign --force --entitlements "$here/vmm/vz/vz.entitlements" -s - "$dir/$c"
 			# herdlet doctor refuses a Mac herdlet without the entitlement; fail here first.
-			if [ "$(codesign -d --entitlements - --xml "$dir/$c" | plutil -extract com.apple.security.virtualization raw -o - -)" != true ]; then
+			# PlistBuddy, not plutil -extract: plutil reads the dots in com.apple.security.virtualization as a key path.
+			codesign -d --entitlements - --xml "$dir/$c" >"$dir/.$c.entitlements.plist" 2>/dev/null
+			if [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.virtualization' "$dir/.$c.entitlements.plist" 2>/dev/null)" != true ]; then
+				rm -f "$dir/.$c.entitlements.plist"
 				echo "release.sh: $dir/$c is not signed with com.apple.security.virtualization" >&2
 				exit 1
 			fi
+			rm -f "$dir/.$c.entitlements.plist"
 		else
 			echo "release.sh: skipping darwin $c (Virtualization.framework needs cgo on a Mac)" >&2
 		fi
