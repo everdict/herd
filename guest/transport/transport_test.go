@@ -87,7 +87,6 @@ func fakeHybridVsock(t *testing.T, open uint32) string {
 
 func itoa(n uint32) string { return strconv.FormatUint(uint64(n), 10) }
 
-
 func TestDialHybridVsock(t *testing.T) {
 	sock := fakeHybridVsock(t, 8080)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

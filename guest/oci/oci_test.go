@@ -63,7 +63,6 @@ func TestSpecRefusesVolumeOutsideTheShare(t *testing.T) {
 	}
 }
 
-
 func TestCrunCommands(t *testing.T) {
 	var calls []string
 	rt := &oci.Crun{Runner: func(_ context.Context, name string, args ...string) ([]byte, error) {

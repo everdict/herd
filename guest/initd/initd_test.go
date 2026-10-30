@@ -168,16 +168,16 @@ func TestBootRefusesAVolumeThatLeavesTheShare(t *testing.T) {
 
 func TestPlanValidation(t *testing.T) {
 	bad := map[string]string{
-		"volume name with ..":  `{"volumes":[{"name":".."}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
-		"volume name .herd":    `{"volumes":[{"name":".herd"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
-		"volume name a/b":      `{"volumes":[{"name":"a/b"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
-		"undeclared volume":    `{"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"/w"}]}]}`,
-		"relative mount path":  `{"volumes":[{"name":"w"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"w"}]}]}`,
-		"mount path with ..":   `{"volumes":[{"name":"w"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"/a/../b"}]}]}`,
+		"volume name with ..":   `{"volumes":[{"name":".."}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
+		"volume name .herd":     `{"volumes":[{"name":".herd"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
+		"volume name a/b":       `{"volumes":[{"name":"a/b"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"]}]}`,
+		"undeclared volume":     `{"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"/w"}]}]}`,
+		"relative mount path":   `{"volumes":[{"name":"w"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"w"}]}]}`,
+		"mount path with ..":    `{"volumes":[{"name":"w"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"/a/../b"}]}]}`,
 		"mount over herd-guest": `{"volumes":[{"name":"w"}],"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"volumeMounts":[{"name":"w","mountPath":"/.herd"}]}]}`,
-		"image not a device":   `{"containers":[{"name":"m","image":{"device":"/tmp/x","fsType":"erofs"},"command":["x"]}]}`,
-		"no container":         `{"volumes":[]}`,
-		"unknown field":        `{"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"privileged":true}]}`,
+		"image not a device":    `{"containers":[{"name":"m","image":{"device":"/tmp/x","fsType":"erofs"},"command":["x"]}]}`,
+		"no container":          `{"volumes":[]}`,
+		"unknown field":         `{"containers":[{"name":"m","image":{"device":"/dev/vdb","fsType":"erofs"},"command":["x"],"privileged":true}]}`,
 	}
 	for name, plan := range bad {
 		if _, err := initd.ParsePlan([]byte(plan)); err == nil {
