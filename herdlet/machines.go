@@ -71,11 +71,6 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 		if err := m.Restore(ctx, w.VM, rc); err != nil {
 			return classify(err)
 		}
-		if vm := m.VMID(w.VM); vm != w.VM && w.Actor != nil && a.OnActor != nil {
-			// A MEMORY restore runs under the VM id it was taken from (a fork's): its network learns the actor
-			// under that id too.
-			a.OnActor(vm, *w.Actor)
-		}
 		a.reopen(w.VM)
 		return link.Outcome{Result: link.ResultDone}
 	case link.OpDelete, link.OpInspect:

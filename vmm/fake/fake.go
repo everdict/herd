@@ -3,8 +3,12 @@
 package fake
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/everdict/herd/vmm"
@@ -23,6 +27,13 @@ func (s *Store) put(snap vmm.Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snaps[snap.ID] = snap
+}
+
+// Drop forgets every snapshot, as a host that lost its snapshot directory has.
+func (s *Store) Drop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snaps = map[string]vmm.Snapshot{}
 }
 
 func (s *Store) get(id string) (vmm.Snapshot, bool) {
@@ -207,4 +218,59 @@ func (f *Fake) Delete(ctx context.Context, id string) (vmm.Presence, error) {
 		return vmm.PresencePresent, fmt.Errorf("fake: delete %s: %w", id, vmm.ErrDeleteNotVerified)
 	}
 	return p, nil
+}
+
+var _ vmm.SnapshotCarrier = (*Fake)(nil)
+
+// carriedFile is the one file a fake snapshot carries: its record.
+const carriedFile = "fake-snapshot.json"
+
+// ExportSnapshot gives the snapshot's record as its one file, when the fake's store holds it.
+func (f *Fake) ExportSnapshot(ctx context.Context, s vmm.Snapshot) ([]vmm.SnapshotFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("fake: export: %w", err)
+	}
+	stored, ok := f.store.get(s.ID)
+	if !ok || stored != s {
+		return nil, fmt.Errorf("fake: export: snapshot %q: %w", s.ID, vmm.ErrNotFound)
+	}
+	b, err := json.Marshal(stored)
+	if err != nil {
+		return nil, err
+	}
+	return []vmm.SnapshotFile{{Name: carriedFile, Size: int64(len(b)),
+		Open: func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }}}, nil
+}
+
+// ImportSnapshot puts the carried record in the fake's store, when it names s.
+func (f *Fake) ImportSnapshot(ctx context.Context, s vmm.Snapshot, next func() (vmm.SnapshotFile, io.Reader, error)) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("fake: import: %w", err)
+	}
+	if stored, ok := f.store.get(s.ID); ok && stored == s {
+		return nil
+	}
+	var got *vmm.Snapshot
+	for {
+		file, r, err := next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("fake: import %s: %w", s.ID, err)
+		}
+		if file.Name != carriedFile {
+			return fmt.Errorf("fake: import %s: unexpected file %q", s.ID, file.Name)
+		}
+		var rec vmm.Snapshot
+		if err := json.NewDecoder(io.LimitReader(r, file.Size)).Decode(&rec); err != nil {
+			return fmt.Errorf("fake: import %s: %w", s.ID, err)
+		}
+		got = &rec
+	}
+	if got == nil || *got != s {
+		return fmt.Errorf("fake: import %s: the files carry %+v", s.ID, got)
+	}
+	f.store.put(s)
+	return nil
 }

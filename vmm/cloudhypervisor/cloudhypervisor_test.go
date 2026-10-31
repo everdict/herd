@@ -69,6 +69,9 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	r := &rig{host: newFakeHost(t), root: shortDir(t)}
 	r.volumes = filepath.Join(r.root, "volumes")
+	if err := os.WriteFile(filepath.Join(r.root, "rootfs.raw"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(r.volumes, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +86,7 @@ func (r *rig) vmm(stateDir string, cpu cpuidTable) *VMM {
 
 func (r *rig) spec(id string) vmm.Spec {
 	return vmm.Spec{ID: id, Kernel: "/guest/bzImage", Initrd: "/guest/initramfs", Cmdline: "console=ttyS0",
-		Rootfs: []string{"/guest/rootfs.raw"}, VCPUs: 1, MemoryMiB: 512,
+		Rootfs: []string{filepath.Join(r.root, "rootfs.raw")}, VCPUs: 1, MemoryMiB: 512,
 		Shares: []vmm.Share{{Tag: "volumes", HostPath: r.volumes}}}
 }
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,6 +51,9 @@ type Config struct {
 	Processes Processes
 	// ExitTimeout bounds how long Delete waits for the processes to exit before it answers present; zero means 10 s.
 	ExitTimeout time.Duration
+	// KernelLog, if set, answers the kernel's recent messages about pid (an OOM kill, a segfault, an audit record),
+	// which a failed start logs with the VM's own logs; nil means KmsgLog, which reads /dev/kmsg.
+	KernelLog func(pid int) []string
 }
 
 // VMM is the Cloud Hypervisor backend: one cloud-hypervisor process per VM, driven over its REST API, plus one
@@ -77,6 +81,9 @@ func New(cfg Config) *VMM {
 	}
 	if cfg.ExitTimeout == 0 {
 		cfg.ExitTimeout = 10 * time.Second
+	}
+	if cfg.KernelLog == nil {
+		cfg.KernelLog = KmsgLog
 	}
 	return &VMM{cfg: cfg, removeAll: os.RemoveAll, vms: map[string]*instance{}}
 }
@@ -178,10 +185,16 @@ func (v *VMM) start(ctx context.Context, spec vmm.Spec, drive func(context.Conte
 		err = drive(ctx, in)
 	}
 	if err != nil {
+		// The VM's logs are read before its directory goes, and logged with how its processes ended.
+		logs := readEvidence(in.dir)
 		// Tear down on a context of its own: the caller's may be the one that just ran out.
 		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*v.cfg.ExitTimeout)
 		defer cancel()
-		if p, derr := v.teardown(tctx, spec.ID, in); p != vmm.PresenceGone {
+		p, derr := v.teardown(tctx, spec.ID, in)
+		if why := v.report(spec.ID, in, logs); why != "" {
+			err = fmt.Errorf("%w; %s", err, why)
+		}
+		if p != vmm.PresenceGone {
 			return vmm.VM{}, fmt.Errorf("%w (and the failed VM is %v: %v)", err, p, derr)
 		}
 		return vmm.VM{}, err
@@ -211,7 +224,9 @@ func (v *VMM) launch(ctx context.Context, spec vmm.Spec, in *instance) error {
 		}
 	}
 	sock := apiSocket(in.dir)
-	p, err := v.spawn(in, ProcSpec{Path: v.cfg.Binary, Args: []string{"--api-socket", "path=" + sock},
+	// -v: Cloud Hypervisor logs each step at info level to its stdout and stderr (the log), so a VMM that dies leaves
+	// the last step it reached in the evidence of the failed start.
+	p, err := v.spawn(in, ProcSpec{Path: v.cfg.Binary, Args: []string{"--api-socket", "path=" + sock, "-v"},
 		Log: filepath.Join(in.dir, "cloud-hypervisor.log"), Marker: sock}, "cloud-hypervisor")
 	if err != nil {
 		return err
@@ -446,12 +461,14 @@ func (v *VMM) Restore(ctx context.Context, s vmm.Snapshot, spec vmm.Spec) (vmm.V
 	if s.Fidelity == vmm.FidelityVolumes {
 		return v.Boot(ctx, spec)
 	}
-	if spec.ID != s.VMID {
-		// The device state in the snapshot names the VM's socket paths, which are keyed by its id.
-		return vmm.VM{}, fmt.Errorf("%w: a MEMORY snapshot of %s restores as %s, not %s", vmm.ErrInvalidSpec, s.VMID, s.VMID, spec.ID)
-	}
 	return v.start(ctx, spec, func(ctx context.Context, in *instance) error {
-		if err := in.api.put(ctx, epRestore, restoreConfig{SourceURL: "file://" + dir, MemoryRestoreMode: "Copy"}); err != nil {
+		// The snapshot's config names the paths of the host and state directory it was taken on: Cloud Hypervisor
+		// restores from a copy of it that names this VM's.
+		src, err := v.restoreSource(dir, spec, in.dir)
+		if err != nil {
+			return err
+		}
+		if err := in.api.put(ctx, epRestore, restoreConfig{SourceURL: "file://" + src, MemoryRestoreMode: "Copy"}); err != nil {
 			return err
 		}
 		return in.api.put(ctx, epResume, nil)
@@ -467,21 +484,33 @@ func (v *VMM) snapshotDir(s vmm.Snapshot) (string, error) {
 		return "", notFound("not a snapshot id")
 	}
 	dir := filepath.Join(v.cfg.SnapshotDir, s.ID)
+	if err := checkMeta(dir, s); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", notFound("not in " + v.cfg.SnapshotDir)
+		}
+		return "", err
+	}
+	return dir, nil
+}
+
+// checkMeta checks that herd's record in dir names the reported snapshot s: fs.ErrNotExist without one, vmm.ErrNotFound
+// for another snapshot's.
+func checkMeta(dir string, s vmm.Snapshot) error {
 	data, err := os.ReadFile(filepath.Join(dir, metaFile))
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", notFound("not in " + v.cfg.SnapshotDir)
+		return err
 	}
 	if err != nil {
-		return "", fmt.Errorf("cloud-hypervisor: snapshot %q: %w", s.ID, err)
+		return fmt.Errorf("cloud-hypervisor: snapshot %q: %w", s.ID, err)
 	}
 	var m snapshotMeta
 	if err := json.Unmarshal(data, &m); err != nil {
-		return "", fmt.Errorf("cloud-hypervisor: snapshot %q: %w", s.ID, err)
+		return fmt.Errorf("cloud-hypervisor: snapshot %q: %w", s.ID, err)
 	}
 	if m != (snapshotMeta{ID: s.ID, VMID: s.VMID, Fidelity: s.Fidelity, RestoreFamily: s.RestoreFamily}) {
-		return "", notFound(fmt.Sprintf("store holds %+v", m))
+		return fmt.Errorf("cloud-hypervisor: snapshot %q: store holds %+v: %w", s.ID, m, vmm.ErrNotFound)
 	}
-	return dir, nil
+	return nil
 }
 
 // instance returns the VM's processes, from memory or from its pid files; nil when the VM has no directory.
@@ -633,6 +662,9 @@ func (v *VMM) Delete(ctx context.Context, id string) (vmm.Presence, error) {
 	if in == nil {
 		return vmm.PresenceGone, nil
 	}
+	// Logged: a delete is the one way herd itself ends a VM, so a VM that died under another step shows here if
+	// it was asked to.
+	log.Printf("cloud-hypervisor: delete %s requested", id)
 	if in.ch != nil {
 		if exited, err := in.ch.Exited(); err == nil && !exited {
 			for _, ep := range []string{epShutdown, epVMMShutdown} {
@@ -665,6 +697,7 @@ func (v *VMM) teardown(ctx context.Context, id string, in *instance) (vmm.Presen
 			break
 		}
 		for _, p := range left {
+			log.Printf("cloud-hypervisor: %s: sending %v to pid %d", id, sig, p.Pid())
 			_ = p.Signal(sig)
 		}
 		if err := waitExited(ctx, left, half); err != nil {

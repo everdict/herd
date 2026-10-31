@@ -314,12 +314,13 @@ func equalJSON(t *testing.T, a, b any) bool {
 	return bytes.Equal(mustJSON(t, a), mustJSON(t, b))
 }
 
-// TestSecondMemoryForkColdBoots: two actors restored from one MEMORY bundle on its own host (two forks of one tag)
-// both start. The first restores the memory under the snapshot's VM id; that id is then taken, so the second
-// cold-boots from the bundle's volume tree under its own id instead of failing on the taken share.
+// TestSecondMemoryForkColdBoots: two actors restored from one MEMORY bundle on one host with VM links (two forks of
+// one tag) both start, each under its own VM id. The first restores the memory on the snapshot's link (the guest
+// keeps its address); that link is then taken, so the second cold-boots from the bundle's volume tree on a link of
+// its own instead of running a second copy of one address.
 func TestSecondMemoryForkColdBoots(t *testing.T) {
 	ctx := context.Background()
-	h := newHost(t, ubuntuCaps, registry())
+	h := newNetHost(t, registry(), "10.88.0.0/16").host
 	if err := h.m.Boot(ctx, "parent", template()); err != nil {
 		t.Fatal(err)
 	}
@@ -342,15 +343,15 @@ func TestSecondMemoryForkColdBoots(t *testing.T) {
 			t.Errorf("%s: volume holds %q, %v", id, b, err)
 		}
 	}
-	if got := h.m.ShareDir("fork-1"); filepath.Base(got) != "parent" {
-		t.Errorf("fork-1 runs in %s, want the snapshot's VM id", got)
+	if got := h.m.ShareDir("fork-1"); filepath.Base(got) != "fork-1" {
+		t.Errorf("fork-1 runs in %s, want its own id", got)
 	}
 	if got := h.m.ShareDir("fork-2"); filepath.Base(got) != "fork-2" {
 		t.Errorf("fork-2 runs in %s, want its own id", got)
 	}
 	h.vm.mu.Lock()
 	defer h.vm.mu.Unlock()
-	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 || h.vm.booted[1].ID != "fork-2" {
+	if len(h.vm.restored) != 1 || h.vm.restored[0].ID != "fork-1" || len(h.vm.booted) != 2 || h.vm.booted[1].ID != "fork-2" {
 		t.Errorf("restored %d, booted %d (%v); want one memory restore and fork-2 cold-booted", len(h.vm.restored), len(h.vm.booted), h.vm.booted)
 	}
 }
@@ -380,11 +381,11 @@ func (g *gate) Get(ctx context.Context, ref string) (image.Rootfs, error) {
 
 // TestConcurrentMemoryForks: two actors restored at once from one MEMORY bundle on its own host (two forks of one
 // tag created together) both start, each in a share of its own holding the parent's volume tree, and what one
-// writes the other does not see. Only one of them can have the memory under the snapshot's VM id; the other
-// cold-boots under its own.
+// writes the other does not see. Only one of them can have the memory on the snapshot's link; the other cold-boots
+// on a link of its own.
 func TestConcurrentMemoryForks(t *testing.T) {
 	ctx := context.Background()
-	h := newHost(t, ubuntuCaps, registry())
+	h := newNetHost(t, registry(), "10.88.0.0/16").host
 	if err := h.m.Boot(ctx, "parent", template()); err != nil {
 		t.Fatal(err)
 	}
@@ -435,5 +436,61 @@ func TestConcurrentMemoryForks(t *testing.T) {
 	defer h.vm.mu.Unlock()
 	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 {
 		t.Errorf("restored %d, booted %d; want one memory restore and one cold boot besides the parent's", len(h.vm.restored), len(h.vm.booted))
+	}
+}
+
+// TestMemoryForksWithoutLinksBothResume: on a host whose VMs have no link there is no address to keep apart, so two
+// forks of one MEMORY tag both resume the memory, each under its own VM id and in a share of its own, while the
+// tag's source still runs there: a fork never runs under another actor's VM id.
+func TestMemoryForksWithoutLinksBothResume(t *testing.T) {
+	ctx := context.Background()
+	h := newHost(t, ubuntuCaps, registry())
+	if err := h.m.Boot(ctx, "parent", template()); err != nil {
+		t.Fatal(err)
+	}
+	var bundle bytes.Buffer
+	if _, err := h.m.Snapshot(ctx, "parent", vmm.FidelityMemory, false, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"fork-1", "fork-2"} {
+		if err := h.m.Restore(ctx, id, bytes.NewReader(bundle.Bytes())); err != nil {
+			t.Fatalf("Restore %s: %v", id, err)
+		}
+		if got := h.m.VMID(id); got != id {
+			t.Errorf("%s runs as VM %s, want its own id", id, got)
+		}
+	}
+	h.vm.mu.Lock()
+	defer h.vm.mu.Unlock()
+	if len(h.vm.restored) != 2 || h.vm.restored[0].ID != "fork-1" || h.vm.restored[1].ID != "fork-2" || len(h.vm.booted) != 1 {
+		t.Errorf("restored %v, booted %d; want both forks' memory restored under their own ids", h.vm.restored, len(h.vm.booted))
+	}
+}
+
+// TestForkIsNotReachedByItsParentsID: a fork restored from its parent's MEMORY snapshot on another host runs under
+// its own VM id, so work on the parent's id there (herd-api releasing or inspecting a VM of the parent on that host)
+// does not reach the fork's VM. A fork that ran under its parent's VM id (before PLT-212 round 3) was deleted by it.
+func TestForkIsNotReachedByItsParentsID(t *testing.T) {
+	ctx := context.Background()
+	reg := registry()
+	a, b := newHost(t, ubuntuCaps, reg), newHost(t, ubuntuCaps, reg)
+	if err := a.m.Boot(ctx, "parent", template()); err != nil {
+		t.Fatal(err)
+	}
+	var bundle bytes.Buffer
+	if _, err := a.m.Snapshot(ctx, "parent", vmm.FidelityMemory, false, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.m.Restore(ctx, "fork-1", bytes.NewReader(bundle.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := b.m.Inspect(ctx, "parent"); p != vmm.PresenceGone {
+		t.Errorf("the parent's id on the fork's host: %v (%v), want gone", p, err)
+	}
+	if p, err := b.m.Delete(ctx, "parent"); p != vmm.PresenceGone {
+		t.Fatalf("Delete of the parent's id on the fork's host: %v (%v)", p, err)
+	}
+	if p, err := b.m.Inspect(ctx, "fork-1"); p != vmm.PresencePresent {
+		t.Errorf("fork-1 after a delete of its parent's id there: %v (%v), want present", p, err)
 	}
 }

@@ -20,6 +20,8 @@ import (
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/imagetest"
 	"github.com/everdict/herd/join"
+	"github.com/everdict/herd/snapstore/s3"
+	"github.com/everdict/herd/snapstore/s3/s3test"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
 	"github.com/everdict/herd/vmm/fakeguest"
@@ -399,5 +401,66 @@ func waitWorkers(t *testing.T, addr, tok string, n int) {
 			t.Fatalf("herd-api has %d workers (%v), want %d", len(resp.GetWorkers()), err, n)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSuiteGreenOnJoinOfLinuxHostsAtMemory runs the suite against a join of two Linux hosts of one restore family,
+// as the Nomad walk's two Ubuntu VMs are: herd-api keeps snapshots in an S3 bucket and hands it to both herdlets in
+// their join grant, and each host keeps its hypervisor snapshots to itself (its own vm-snapshots). The template
+// suspends at MEMORY, the move case takes an actor from one host to the other at MEMORY, and fork-via-tag forks a
+// MEMORY tag wherever herd-api places the forks. Before PLT-212 the memory stayed on the host that took it, so the
+// move (and a fork placed on the other host) failed with `snapshot ...: vmm: not found`.
+func TestSuiteGreenOnJoinOfLinuxHostsAtMemory(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "jwt.key")
+	key, err := deploy.EnsureKey(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := s3.Credentials{AccessKeyID: "herd", SecretAccessKey: "herd-secret"}
+	bucket := s3test.Start(t, s3test.New("us-east-1", creds))
+	ctx, cancel := context.WithCancel(context.Background())
+	var stops []chan error
+	t.Cleanup(func() {
+		cancel()
+		for _, c := range stops {
+			<-c
+		}
+	})
+	serve := func(f func() error) {
+		c := make(chan error, 1)
+		stops = append(stops, c)
+		go func() { c <- f() }()
+	}
+	apiLn, cl, tl := listen(t), listen(t), listen(t)
+	api := &deploy.API{Key: key, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: bucket.URL,
+		S3Credentials: creds, CallTimeout: 10 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
+	serve(func() error { return api.Run(ctx, apiLn) })
+	rt := &deploy.Router{Key: key, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	serve(func() error { return rt.Run(ctx, cl, tl) })
+
+	jt, err := join.MintToken(key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"herd-fresh-1", "herd-fresh-2"} {
+		h := herdlet(t, filepath.Join(dir, w), w, "pool="+w, ubuntu, nil) // no -snapshots: the join's bucket
+		h.API, h.Token = apiLn.Addr().String(), jt
+		serve(func() error { return h.Run(ctx) })
+	}
+	tok := token(t, key)
+	waitWorkers(t, apiLn.Addr().String(), tok, 2)
+	template(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	template2(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	cfg := suiteConfig("herd-join-linux", apiLn.Addr().String(), cl.Addr().String(), tok)
+	cfg.ExpectFidelity = ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	cfg.MoveFrom, cfg.MoveTo = map[string]string{"pool": "herd-fresh-1"}, map[string]string{"pool": "herd-fresh-2"}
+	cfg.Template2, cfg.ContainerHeader = "pair", agent.ContainerHeader
+	rep := runSuite(t, cfg)
+	wantSkips(t, rep, "egress-walk", "credential-header", "long-stream")
+	for _, c := range []string{"move", "fork-via-tag", "two-containers"} {
+		if r, _ := rep.Get(c); r.Outcome != substrateapi.Pass {
+			t.Errorf("%s: %v", c, r)
+		}
 	}
 }

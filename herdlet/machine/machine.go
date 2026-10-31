@@ -1,7 +1,8 @@
 // Package machine is the part of herdlet that turns an actor template into a microVM (spec R2, ADR A-19): it builds
 // each container's image into a read-only rootfs (package image), lays the template's DurableDir volumes out as
 // directories of the VM's own virtio-fs share and writes herd-guest's plan there, boots the VM through vmm.VMM, keeps
-// warm VMs per template (Pool), and packs and unpacks the snapshot bundle a VOLUMES move carries between hosts.
+// warm VMs per template (Pool), and packs and unpacks the snapshot bundle a move carries between hosts (with a
+// MEMORY snapshot's hypervisor files, when the VMM carries them).
 //
 // VM ids: an actor's VM is known to herd-api by the actor's id. A warm VM is booted under an id of its own and
 // adopted by the actor that takes it; Machines maps the one to the other.
@@ -61,7 +62,7 @@ type Machines struct {
 	cfg Config
 
 	mu sync.Mutex
-	// ids maps an actor's VM id to the VMM's id for it, when they differ (an adopted warm VM, a MEMORY restore).
+	// ids maps an actor's VM id to the VMM's id for it, when they differ (an adopted warm VM).
 	ids map[string]string
 	// tpl is the template each VMM id was booted from.
 	tpl map[string]link.Template
@@ -265,7 +266,8 @@ func (m *Machines) Boot(ctx context.Context, id string, t link.Template) error {
 // its bundle to w. With stop (a suspend), the VM is stopped right after the VMM's snapshot and before the volume tree
 // is read, so the tree is the one the actor left and the guest writes nothing more, and its link is taken down
 // (verified; the lease stays for Restart); if writing the bundle then fails, Restart boots it again from its share.
-// A MEMORY bundle records the VM's link, which its memory keeps.
+// A MEMORY bundle records the VM's link, which its memory keeps, and carries the VMM's snapshot files when the VMM
+// is a vmm.SnapshotCarrier.
 func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop bool, w io.Writer) (vmm.Snapshot, error) {
 	vmID := m.resolve(id)
 	m.mu.Lock()
@@ -309,6 +311,15 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 		if r, err := m.cfg.Images.Get(ctx, c.Image); err == nil {
 			man.Images[c.Image] = r.Digest
 		}
+	}
+	if c, ok := m.cfg.VMM.(vmm.SnapshotCarrier); ok && snap.Fidelity == vmm.FidelityMemory {
+		// The memory goes into the bundle: what herd-api verifies in the store is then all a restore on another host
+		// of the family needs, and the snapshot outlives this host.
+		files, err := c.ExportSnapshot(ctx, snap)
+		if err != nil {
+			return vmm.Snapshot{}, fmt.Errorf("machine: snapshot %s: carrying its memory: %w", id, err)
+		}
+		man.Memory = files
 	}
 	if err := writeBundle(w, man, filepath.Join(m.cfg.ShareDir, vmID)); err != nil {
 		return vmm.Snapshot{}, err
@@ -371,8 +382,9 @@ var ErrFamily = vmm.ErrRestoreFamilyMismatch
 
 // Restore starts the actor id from a bundle: a VOLUMES bundle cold-boots the template here with its volume tree,
 // whichever host or platform produced it (the images are built for this host's platform from the same references);
-// a MEMORY bundle restores only in its own restore family, under the VM id it was taken from and on the link it was
-// taken on. A MEMORY bundle of another family is refused before anything on this host is touched.
+// a MEMORY bundle restores only in its own restore family, under the actor's own VM id and on the link it was
+// taken on where this host can give it (else it cold-boots), from the snapshot files the bundle carries (vmm.SnapshotCarrier) or, for a bundle without them, from the
+// VMM's own snapshot directory. A MEMORY bundle of another family is refused before anything on this host is touched.
 func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 	tr := tar.NewReader(r)
 	man, err := readManifest(tr)
@@ -392,23 +404,41 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		if caps.SuspendMaxFidelity < vmm.FidelityMemory || caps.RestoreFamily != snap.RestoreFamily {
 			return fmt.Errorf("machine: restore %s: a MEMORY snapshot of %q on a host of %q: %w", id, snap.RestoreFamily, caps.RestoreFamily, ErrFamily)
 		}
-		vmID, want = snap.VMID, man.Network
+		want = man.Network
+		if (want != nil) != (m.cfg.Network != nil) {
+			// The memory's devices are not this host's: a guest that had a link cannot keep it on a host that gives VMs
+			// none (Cloud Hypervisor refuses a device set other than the snapshot's), and one without a link would not
+			// see the link this host gives every VM. The actor cold-boots from the bundle's volume tree instead.
+			log.Printf("machine: restore %s: the memory of %s was taken with link %v, this host gives VMs links: %v: cold boot from its volumes", id, snap.VMID, want != nil, m.cfg.Network != nil)
+			cold, want = true, nil
+		}
 	default:
 		return fmt.Errorf("machine: restore %s at %v: %w", id, snap.Fidelity, vmm.ErrFidelityUnsupported)
 	}
 	fill := func(root *os.Root) error {
+		var keep func(func() (vmm.SnapshotFile, io.Reader, error)) error
+		if c, ok := m.cfg.VMM.(vmm.SnapshotCarrier); ok && snap.Fidelity == vmm.FidelityMemory && len(man.Memory) > 0 && !cold {
+			keep = func(next func() (vmm.SnapshotFile, io.Reader, error)) error {
+				if err := c.ImportSnapshot(ctx, snap, next); err != nil {
+					return fmt.Errorf("machine: restore %s: the memory the bundle carries: %w", id, err)
+				}
+				return nil
+			}
+		}
+		if err := readMemory(tr, man, keep); err != nil {
+			return err
+		}
 		return extractVolumes(tr, root, man.Template.Volumes)
 	}
 	spec, _, err := m.prepare(ctx, vmID, man.Template, fill, want)
-	if errors.Is(err, errShareTaken) && vmID != id || errors.Is(err, errLinkTaken) {
-		// The VM id this memory restores under is taken on this host (another fork of one MEMORY tag, restored
-		// before or at the same time, or the tag's source running again), or the link its memory keeps is another
-		// VM's: one memory cannot run twice under one id or address, so this actor cold-boots from the bundle's
-		// volume tree under its own id and on a link of its own, as a VOLUMES restore does. Creating the share is
-		// the claim, so of two forks at once exactly one gets the memory; the bundle is still unread, since fill
-		// runs only after the share was created.
-		log.Printf("machine: restore %s: the memory of %s cannot run here (%v): cold boot from its volumes on a link of its own", id, vmID, err)
-		vmID, cold = id, true
+	if errors.Is(err, errLinkTaken) {
+		// The link this memory keeps (the guest's address and MAC) is another VM's on this host: the snapshot's
+		// source running here, or another fork of one MEMORY tag restored before or at the same time. One address
+		// cannot run twice on one host, so this actor cold-boots from the bundle's volume tree on a link of its own,
+		// as a VOLUMES restore does. The lease is the claim, so of two forks at once exactly one gets the memory;
+		// the bundle is still unread, since fill runs only after the lease and the share.
+		log.Printf("machine: restore %s: the memory of %s cannot run here (%v): cold boot from its volumes on a link of its own", id, snap.VMID, err)
+		cold = true
 		spec, _, err = m.prepare(ctx, vmID, man.Template, fill, nil)
 	}
 	if err != nil {
@@ -421,6 +451,10 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 	err = m.up(ctx, vmID)
 	if err == nil && snap.Fidelity == vmm.FidelityMemory && !cold {
 		_, err = m.cfg.VMM.Restore(ctx, snap, spec)
+		if errors.Is(err, vmm.ErrNotFound) && len(man.Memory) == 0 {
+			// Not a cold boot in its place: the client asked for the memory, and a VOLUMES restore is no MEMORY one.
+			err = fmt.Errorf("machine: restore %s: the bundle carries no memory files (written by a VMM that keeps them, or before bundle version 2), and this host does not hold them: %w", id, err)
+		}
 	} else if err == nil {
 		_, err = m.cfg.VMM.Boot(ctx, spec)
 	}

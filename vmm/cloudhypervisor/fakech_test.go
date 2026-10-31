@@ -29,6 +29,7 @@ type fakeHost struct {
 	nextPid        int
 	procs          map[int]*fakeProc
 	hang           map[string]bool
+	die            map[string]string // the VMM writes this to its log and exits mid-call, as a crashed Cloud Hypervisor
 	unreachable    map[string]bool
 	delay          map[string]time.Duration
 	ignoreShutdown bool // the VMM answers shutdown, keeps running and survives signals
@@ -61,7 +62,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 func (h *fakeHost) clear() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.hang, h.unreachable, h.delay = map[string]bool{}, map[string]bool{}, map[string]time.Duration{}
+	h.hang, h.unreachable, h.delay, h.die = map[string]bool{}, map[string]bool{}, map[string]time.Duration{}, map[string]string{}
 	h.ignoreShutdown, h.fsSurvive = false, false
 }
 
@@ -95,12 +96,21 @@ type fakeProc struct {
 	pid    int
 	kind   string
 	marker string
+	log    string
+	status string
 	once   sync.Once
 	done   chan struct{}
 	stop   func()
 }
 
 func (p *fakeProc) Pid() int { return p.pid }
+
+// ExitStatus is how a crashed fake VMM ended; empty otherwise.
+func (p *fakeProc) ExitStatus() string {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	return p.status
+}
 
 func (p *fakeProc) Signal(sig syscall.Signal) error {
 	p.h.mu.Lock()
@@ -131,7 +141,7 @@ func (p *fakeProc) exit() {
 func (h *fakeHost) Start(ps ProcSpec) (Process, error) {
 	h.mu.Lock()
 	h.nextPid++
-	p := &fakeProc{h: h, pid: h.nextPid, marker: ps.Marker, done: make(chan struct{})}
+	p := &fakeProc{h: h, pid: h.nextPid, marker: ps.Marker, log: ps.Log, done: make(chan struct{})}
 	h.starts = append(h.starts, ps.Path)
 	h.mu.Unlock()
 	switch ps.Path {
@@ -210,9 +220,26 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ep := strings.TrimPrefix(r.URL.Path, "/api/v1/")
 	c.h.record(ep)
 	c.h.mu.Lock()
-	hang, unreachable, delay, ignore := c.h.hang[ep], c.h.unreachable[ep], c.h.delay[ep], c.h.ignoreShutdown
+	hang, unreachable, delay, ignore, die := c.h.hang[ep], c.h.unreachable[ep], c.h.delay[ep], c.h.ignoreShutdown, c.h.die[ep]
 	c.h.mu.Unlock()
 	switch {
+	case die != "":
+		if die != silentDeath {
+			_ = os.WriteFile(c.proc.log, []byte(die+"\n"), 0o600)
+		}
+		c.h.mu.Lock()
+		c.proc.status = "signal: aborted (core dumped)"
+		if die == silentDeath {
+			c.proc.status = "signal: killed"
+		}
+		c.h.mu.Unlock()
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+		c.proc.exit()
+		return
 	case unreachable:
 		if hj, ok := w.(http.Hijacker); ok {
 			if conn, _, err := hj.Hijack(); err == nil {
@@ -330,6 +357,10 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := checkHostPaths(&cfg); err != nil {
+			fail(http.StatusInternalServerError, err.Error())
+			return
+		}
 		c.h.mu.Lock()
 		c.h.recordNets(epRestore, cfg.Net)
 		c.h.mu.Unlock()
@@ -435,3 +466,29 @@ func (h *fakeHost) recordNets(ep string, nets []netConfig) {
 		h.nets = append(h.nets, fmt.Sprintf("%s tap=%s,mac=%s", ep, n.Tap, n.MAC))
 	}
 }
+
+// checkHostPaths applies what real Cloud Hypervisor needs of the host when it restores a VM from a saved config: every
+// disk image it opens, and the directories it creates the vsock socket and the serial and console files in.
+func checkHostPaths(c *vmConfig) error {
+	for _, d := range c.Disks {
+		if _, err := os.Stat(d.Path); err != nil {
+			return fmt.Errorf("disk: %w", err)
+		}
+	}
+	if c.Vsock != nil {
+		if _, err := os.Stat(filepath.Dir(c.Vsock.Socket)); err != nil {
+			return fmt.Errorf("vsock: %w", err)
+		}
+	}
+	for _, cc := range []*consoleConfig{c.Serial, c.Console} {
+		if cc != nil && cc.File != "" {
+			if _, err := os.Stat(filepath.Dir(cc.File)); err != nil {
+				return fmt.Errorf("console: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// silentDeath as a die fault makes the fake VMM exit mid-call writing nothing, as a process killed by a signal.
+const silentDeath = "(silent)"

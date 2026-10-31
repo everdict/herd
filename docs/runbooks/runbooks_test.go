@@ -304,3 +304,253 @@ func TestRunbooksInstallHerdsVirtiofsd(t *testing.T) {
 		}
 	}
 }
+
+// archiveFiles are the files a release archive unpacks (scripts/release.sh): the binaries, the guest kernel and
+// initramfs and, in the Linux archives, herd's virtiofsd.
+var archiveFiles = map[string][]string{
+	"linux":  {"herd", "herd-api", "herdlet", "herd-router", "herd-egress", "kernel", "initrd.img", "virtiofsd"},
+	"darwin": {"herd", "herd-api", "herdlet", "herd-router", "herd-egress", "kernel", "initrd.img"},
+}
+
+// section is one "## " part of a runbook: the commands of one kind of host.
+type section struct {
+	runbook, title, text string
+}
+
+func sections(rb, md string) []section {
+	var out []section
+	cur := section{runbook: rb}
+	for _, l := range strings.Split(md, "\n") {
+		if t, ok := strings.CutPrefix(l, "## "); ok {
+			out = append(out, cur)
+			cur = section{runbook: rb, title: t}
+			continue
+		}
+		cur.text += l + "\n"
+	}
+	return append(out, cur)
+}
+
+func (s section) goos() string {
+	if strings.Contains(strings.ToLower(s.title), "mac") {
+		return "darwin"
+	}
+	return "linux"
+}
+
+var stepRE = regexp.MustCompile(`(?m)^(\d+)\. `)
+
+// steps is the text of numbered steps from..to of a section.
+func (s section) steps(from, to int) string {
+	locs := stepRE.FindAllStringSubmatchIndex(s.text, -1)
+	var b strings.Builder
+	for i, loc := range locs {
+		n := 0
+		fmt.Sscan(s.text[loc[2]:loc[3]], &n)
+		end := len(s.text)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		if n >= from && n <= to {
+			b.WriteString(s.text[loc[0]:end])
+		}
+	}
+	return b.String()
+}
+
+// layout is the files a host holds after the shell lines ran: what install(1) put where and what an archive
+// unpacked with tar -C.
+func layout(goos string, lines []string, files map[string]bool) {
+	dirs := map[string]bool{}
+	for _, line := range lines {
+		for _, words := range commands(line) {
+			for len(words) > 0 && words[0] == "sudo" {
+				words = words[1:]
+			}
+			if len(words) == 0 {
+				continue
+			}
+			switch words[0] {
+			case "tar":
+				for i, w := range words {
+					if w == "-C" && i+1 < len(words) {
+						for _, f := range archiveFiles[goos] {
+							files[path.Join(words[i+1], f)] = true
+						}
+					}
+				}
+			case "install":
+				var ops []string
+				dir := false
+				for i := 1; i < len(words); i++ {
+					switch w := words[i]; {
+					case w == "-d":
+						dir = true
+					case w == "-m" || w == "-o" || w == "-g":
+						i++
+					case strings.HasPrefix(w, "-"):
+					default:
+						ops = append(ops, path.Clean(w))
+					}
+				}
+				if dir {
+					for _, d := range ops {
+						dirs[d] = true
+					}
+					continue
+				}
+				if len(ops) < 2 {
+					continue
+				}
+				dst := ops[len(ops)-1]
+				for _, src := range ops[:len(ops)-1] {
+					if len(ops) > 2 || dirs[dst] || strings.HasSuffix(words[len(words)-1], "/") {
+						files[path.Join(dst, path.Base(src))] = true
+					} else {
+						files[dst] = true
+					}
+				}
+			}
+		}
+	}
+}
+
+var (
+	stepsRefRE = regexp.MustCompile(`all-in-one\.md steps? (\d+)(?:[–-](\d+))?`)
+	inlineRE   = regexp.MustCompile("`([^`]*herdlet doctor[^`]*)`")
+)
+
+// TestEveryDoctorLinePasses (criterion runbook-doctor): every `herdlet doctor` a runbook runs, in a shell block or
+// in its text, passes on a host set up exactly as that runbook says up to there: the files its install and tar lines
+// (and the all-in-one steps it refers to, and an unpacked release archive where it says so) put on the host, KVM,
+// ip(8) and nft(8). nomad.md's prerequisite `sudo ./herd/herdlet doctor -virtiofsd ./herd/virtiofsd` on a client
+// that holds only Cloud Hypervisor and the unpacked archive: the kernel and initrd defaults
+// (/usr/local/share/herd/...) are not there, red.
+func TestEveryDoctorLinePasses(t *testing.T) {
+	var aioUbuntu section
+	all := map[string][]section{}
+	for _, rb := range runbooks {
+		b, err := os.ReadFile(rb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all[rb] = sections(rb, string(b))
+		for _, s := range all[rb] {
+			if rb == "all-in-one.md" && strings.HasPrefix(s.title, "Ubuntu") {
+				aioUbuntu = s
+			}
+		}
+	}
+	n := 0
+	for _, rb := range runbooks {
+		for _, s := range all[rb] {
+			goos := s.goos()
+			files := map[string]bool{}
+			for _, m := range stepsRefRE.FindAllStringSubmatch(s.text, -1) {
+				from, to := 0, 0
+				fmt.Sscan(m[1], &from)
+				to = from
+				if m[2] != "" {
+					fmt.Sscan(m[2], &to)
+				}
+				layout(goos, shellBlocks("```sh\n"+strings.Join(shellBlocks(aioUbuntu.steps(from, to)), "\n")+"\n```"), files)
+			}
+			if strings.Contains(s.text, "unpacked archive") {
+				for _, f := range archiveFiles[goos] {
+					files[path.Join("herd", f)] = true
+				}
+			}
+			var lines []string
+			for _, l := range strings.Split(s.text, "\n") {
+				for _, m := range inlineRE.FindAllStringSubmatch(l, -1) {
+					if m[1] == "herdlet doctor" {
+						continue // the command named, not a command line to run
+					}
+					lines = append(lines, m[1])
+				}
+			}
+			ordered := append(shellBlocks(s.text), lines...)
+			for i, line := range ordered {
+				for _, words := range commands(line) {
+					bin, args, ok := herdCommand(words)
+					if !ok || bin != "herdlet" || len(args) == 0 || args[0] != "doctor" {
+						continue
+					}
+					n++
+					// The host as the runbook left it before this line (inline lines: after every block of the section).
+					got := map[string]bool{}
+					for k := range files {
+						got[k] = true
+					}
+					upTo := ordered[:i]
+					if i >= len(ordered)-len(lines) {
+						upTo = ordered[:len(ordered)-len(lines)]
+					}
+					layout(goos, upTo, got)
+					if fails := doctorOn(t, goos, got, args[1:]); len(fails) > 0 {
+						t.Errorf("%s (%s): `%s` fails on the host the runbook sets up: %v", rb, s.title, line, fails)
+					}
+				}
+			}
+		}
+	}
+	t.Logf("%d doctor lines checked", n)
+	if n < 4 {
+		t.Errorf("found %d doctor lines in the runbooks, want every one (at least 4)", n)
+	}
+}
+
+// doctorOn runs deploy.Doctor with the doctor line's flags on a host that holds files (paths relative to the
+// directory the runbook works in, or absolute) and the system's ip and nft.
+func doctorOn(t *testing.T, goos string, files map[string]bool, args []string) map[string]string {
+	t.Helper()
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	h := &deploy.Herdlet{}
+	h.RunFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("doctor %v: %v", args, err)
+	}
+	has := func(p string) bool { return files[path.Clean(p)] }
+	pathDirs := []string{"/usr/local/bin", "/usr/bin", "/usr/sbin", "/bin", "/sbin"}
+	system := map[string]bool{"/usr/sbin/ip": true, "/usr/sbin/nft": true}
+	arch := "amd64"
+	if goos == "darwin" {
+		arch = "arm64"
+	}
+	host := deploy.Host{GOOS: goos, GOARCH: arch, VZ: true,
+		OpenRW: func(string) error { return nil },
+		LookPath: func(name string) (string, error) {
+			if strings.Contains(name, "/") {
+				if has(name) {
+					return name, nil
+				}
+				return "", os.ErrNotExist
+			}
+			for _, d := range pathDirs {
+				if p := path.Join(d, name); has(p) || system[p] {
+					return p, nil
+				}
+			}
+			return "", fmt.Errorf("%s: not in PATH", name)
+		},
+		Stat: func(p string) error {
+			if has(p) {
+				return nil
+			}
+			return os.ErrNotExist
+		},
+		Help: func(p string) (string, error) {
+			if path.Base(p) == "virtiofsd" && has(p) {
+				return "--socket-path --shared-dir --cache --migration-mode --readonly --sandbox --seccomp", nil
+			}
+			return "", fmt.Errorf("%s: not herd's virtiofsd", p)
+		},
+	}
+	fails := map[string]string{}
+	for _, c := range deploy.Doctor(h, host) {
+		if !c.OK {
+			fails[c.Name] = c.Detail
+		}
+	}
+	return fails
+}

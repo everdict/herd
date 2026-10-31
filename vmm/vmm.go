@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 )
 
@@ -253,3 +254,24 @@ func (e *NotImplementedError) Error() string {
 
 // Is makes errors.Is(err, ErrNotImplemented) true.
 func (e *NotImplementedError) Is(target error) bool { return target == ErrNotImplemented }
+
+// SnapshotCarrier is a VMM whose snapshots can be carried to another host: herdlet puts the files of a MEMORY
+// snapshot it took into the snapshot's bundle, so the snapshot store holds everything a restore needs, and gives them
+// back on the host that restores it (ADR A-28). A VMM that is not one keeps its MEMORY snapshots on the host that
+// took them.
+type SnapshotCarrier interface {
+	// ExportSnapshot lists the files of snapshot s on this host. ErrNotFound if s is not here.
+	ExportSnapshot(ctx context.Context, s Snapshot) ([]SnapshotFile, error)
+	// ImportSnapshot keeps the files next yields (io.EOF after the last) as snapshot s on this host, so Restore(s)
+	// finds it. A snapshot s already here is kept and the files are not read. On error nothing is kept.
+	ImportSnapshot(ctx context.Context, s Snapshot, next func() (SnapshotFile, io.Reader, error)) error
+}
+
+// SnapshotFile is one file of a snapshot.
+type SnapshotFile struct {
+	// Name is a plain file name, without a directory.
+	Name string
+	Size int64
+	// Open reads the file (ExportSnapshot only).
+	Open func() (io.ReadCloser, error) `json:"-"`
+}

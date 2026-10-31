@@ -18,12 +18,15 @@ import (
 
 // A bundle is the snapshot object a herdlet writes to the snapshot store (ADR A-19): one tar holding first
 // bundleManifest (the VMM's snapshot record, the template with its image references and container spec) and then
-// the volume tree under volumes/<name>/. It is everything a VOLUMES move needs; a MEMORY snapshot's memory files
-// stay where the VMM wrote them, so it restores only on that host.
+// then, for a MEMORY snapshot of a VMM that carries its snapshots (vmm.SnapshotCarrier), the VMM's snapshot files
+// under memory/<name> (Manifest.Memory), and the volume tree under volumes/<name>/. A VOLUMES bundle is everything a
+// move needs; a MEMORY bundle with its memory files is everything a restore on any host of its family needs (ADR
+// A-28). A MEMORY bundle without them (version 1, or a VMM that is no carrier) restores only where they were written.
 const (
 	bundleManifest = "herd-bundle.json"
+	bundleMemory   = "memory"
 	bundleVolumes  = "volumes"
-	bundleVersion  = 1
+	bundleVersion  = 2
 )
 
 // Manifest is the bundle's first entry.
@@ -38,6 +41,8 @@ type Manifest struct {
 	Arch     string       `json:"arch"`
 	// Network is the link a MEMORY snapshot's VM ran on (Config.Network): its memory keeps the address.
 	Network *initd.Network `json:"network,omitempty"`
+	// Memory names the VMM's snapshot files the bundle carries under memory/, in order (version 2).
+	Memory []vmm.SnapshotFile `json:"memory,omitempty"`
 }
 
 func marshalPlan(p *initd.Plan) ([]byte, error) {
@@ -48,8 +53,8 @@ func marshalPlan(p *initd.Plan) ([]byte, error) {
 	return b, nil
 }
 
-// writeBundle writes m and then the tree of every volume of the share. It does not follow symlinks: a link in a
-// volume is stored as a link.
+// writeBundle writes m, the files m.Memory names (opened through them) and then the tree of every volume of the
+// share. It does not follow symlinks: a link in a volume is stored as a link.
 func writeBundle(w io.Writer, m Manifest, share string) error {
 	tw := tar.NewWriter(w)
 	b, err := json.Marshal(m)
@@ -61,6 +66,11 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 	}
 	if _, err := tw.Write(b); err != nil {
 		return err
+	}
+	for _, f := range m.Memory {
+		if err := writeMemoryFile(tw, f); err != nil {
+			return fmt.Errorf("machine: bundle: memory file %s: %w", f.Name, err)
+		}
 	}
 	for _, v := range m.Template.Volumes {
 		top := filepath.Join(share, v)
@@ -136,8 +146,8 @@ func readManifest(tr *tar.Reader) (Manifest, error) {
 	if err := json.NewDecoder(io.LimitReader(tr, 1<<20)).Decode(&m); err != nil {
 		return Manifest{}, fmt.Errorf("machine: bundle manifest: %w", err)
 	}
-	if m.Version != bundleVersion {
-		return Manifest{}, fmt.Errorf("machine: bundle version %d, want %d", m.Version, bundleVersion)
+	if m.Version < 1 || m.Version > bundleVersion || m.Version == 1 && len(m.Memory) > 0 {
+		return Manifest{}, fmt.Errorf("machine: bundle version %d, want 1 to %d", m.Version, bundleVersion)
 	}
 	return m, nil
 }
@@ -212,4 +222,54 @@ func wrapEscape(name string, err error) error {
 		return fmt.Errorf("%w: bundle entry %q: %v", ErrOutsideShare, name, err)
 	}
 	return fmt.Errorf("machine: bundle: %s: %w", name, err)
+}
+
+// writeMemoryFile writes one of the VMM's snapshot files as memory/<name>, exactly its recorded size.
+func writeMemoryFile(tw *tar.Writer, f vmm.SnapshotFile) error {
+	if f.Open == nil {
+		return errors.New("no way to read it")
+	}
+	r, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := tw.WriteHeader(&tar.Header{Name: bundleMemory + "/" + f.Name, Mode: 0o600, Size: f.Size, Typeflag: tar.TypeReg, Format: tar.FormatPAX}); err != nil {
+		return err
+	}
+	_, err = io.CopyN(tw, r, f.Size)
+	return err
+}
+
+// readMemory reads the memory files m.Memory names, which follow the manifest, and hands them to keep (nil skips
+// them). keep may stop before the last; the rest are skipped, so the reader is at the volume tree afterwards.
+func readMemory(tr *tar.Reader, m Manifest, keep func(next func() (vmm.SnapshotFile, io.Reader, error)) error) error {
+	i := 0
+	next := func() (vmm.SnapshotFile, io.Reader, error) {
+		if i == len(m.Memory) {
+			return vmm.SnapshotFile{}, nil, io.EOF
+		}
+		want := m.Memory[i]
+		h, err := tr.Next()
+		if err != nil {
+			return vmm.SnapshotFile{}, nil, fmt.Errorf("machine: bundle: memory file %s: %w", want.Name, err)
+		}
+		if h.Name != bundleMemory+"/"+want.Name || h.Typeflag != tar.TypeReg || h.Size != want.Size {
+			return vmm.SnapshotFile{}, nil, fmt.Errorf("machine: bundle: entry %q (%d bytes) where memory file %s (%d bytes) belongs", h.Name, h.Size, want.Name, want.Size)
+		}
+		i++
+		return vmm.SnapshotFile{Name: want.Name, Size: want.Size}, tr, nil
+	}
+	if keep != nil {
+		if err := keep(next); err != nil {
+			return err
+		}
+	}
+	for {
+		if _, _, err := next(); errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
 }

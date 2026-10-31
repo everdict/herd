@@ -211,3 +211,41 @@ func TestDeleteWithLinkLeftIsNotGone(t *testing.T) {
 		})
 	}
 }
+
+// TestMemoryWithALinkColdBootsOnAHostWithoutLinks: a MEMORY bundle taken with a link restored on a host whose VMs get
+// none (and one taken without a link on a host that gives links) cold-boots from its volume tree, never hands the
+// hypervisor a snapshot whose devices the VM it restores into does not have.
+func TestMemoryWithALinkColdBootsOnAHostWithoutLinks(t *testing.T) {
+	ctx := context.Background()
+	reg := registry()
+	store := fake.NewStore()
+	linked := newNetHost(t, reg, "10.88.0.0/16", store)
+	if err := linked.m.Boot(ctx, "actor-1", template()); err != nil {
+		t.Fatal(err)
+	}
+	var withLink bytes.Buffer
+	if _, err := linked.m.Snapshot(ctx, "actor-1", vmm.FidelityMemory, true, &withLink); err != nil {
+		t.Fatal(err)
+	}
+	plain := newHost(t, ubuntuCaps, reg)
+	if err := plain.m.Restore(ctx, "actor-1", bytes.NewReader(withLink.Bytes())); err != nil {
+		t.Fatalf("restore of a linked memory on a host without links: %v", err)
+	}
+	if len(plain.vm.restored) != 0 || len(plain.vm.booted) != 1 {
+		t.Errorf("restored %d, booted %d; want a cold boot", len(plain.vm.restored), len(plain.vm.booted))
+	}
+	if err := plain.m.Boot(ctx, "actor-2", template()); err != nil {
+		t.Fatal(err)
+	}
+	var noLink bytes.Buffer
+	if _, err := plain.m.Snapshot(ctx, "actor-2", vmm.FidelityMemory, true, &noLink); err != nil {
+		t.Fatal(err)
+	}
+	other := newNetHost(t, reg, "10.88.0.0/16", store)
+	if err := other.m.Restore(ctx, "actor-2", bytes.NewReader(noLink.Bytes())); err != nil {
+		t.Fatalf("restore of an unlinked memory on a host with links: %v", err)
+	}
+	if len(other.vm.restored) != 0 || len(other.vm.booted) != 1 || other.vm.booted[0].NIC == nil {
+		t.Errorf("restored %d, booted %v; want a cold boot on a link", len(other.vm.restored), other.vm.booted)
+	}
+}

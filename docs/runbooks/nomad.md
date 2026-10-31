@@ -11,7 +11,8 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
   clients (`plugin "raw_exec" { config { enabled = true } }`): herdlet needs `/dev/kvm`, TAP devices and nftables on
   the host, which only `raw_exec` gives it.
 - On every Linux client: Cloud Hypervisor v54.0 at `/usr/local/bin/cloud-hypervisor`, as in all-in-one.md step 1,
-  and `herdlet doctor` passing (from the unpacked archive: `sudo ./herd/herdlet doctor -virtiofsd ./herd/virtiofsd`).
+  and `herdlet doctor` passing (from the unpacked archive, with the job's kernel, initramfs and virtiofsd:
+  `sudo ./herd/herdlet doctor -kernel ./herd/kernel -initrd ./herd/initrd.img -virtiofsd ./herd/virtiofsd`).
   The release archive holds the guest kernel and initramfs and herd's virtiofsd; the job reads them from the task
   directory.
 - One client holds the host volume `herd-data` (the bbolt store allows one herd-api).
