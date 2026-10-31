@@ -120,5 +120,9 @@ TOKEN=$(sudo herd-api token -key-file /etc/herd/jwt.key -sub everdict -space tea
 herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
 ```
 
+A Substrate-API client (Everdict's herder) reads the same records with `Control.ListWorkers`: each node is a
+`Worker` of sandbox class `microvm`, ACTIVE while connected, with its slots as `capacity.actors` and its declared
+fidelity and restore family as its runtime's compat attributes (ADR 0001 A-4).
+
 A join is refused with a token herd-api did not sign, an expired one, or any credential that is not a join token; a
 join cannot take the name of a worker that is connected.

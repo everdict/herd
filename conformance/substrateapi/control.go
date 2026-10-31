@@ -180,3 +180,7 @@ func (c *Control) CreateActorEgressPolicy(ctx context.Context, space, actor stri
 func (c *Control) UpdateActorEgressPolicy(ctx context.Context, space, actor string, p *ateapi.EgressPolicy) (*ateapi.EgressPolicy, error) {
 	return invoke(ctx, c, "UpdateActorEgressPolicy", &ateapi.UpdateActorEgressPolicyRequest{Actor: ref(space, actor), EgressPolicy: p}, &ateapi.EgressPolicy{})
 }
+
+func (c *Control) ListWorkers(ctx context.Context, opts *ateapi.ListOptions) (*ateapi.ListWorkersResponse, error) {
+	return invoke(ctx, c, "ListWorkers", &ateapi.ListWorkersRequest{Options: opts}, &ateapi.ListWorkersResponse{})
+}

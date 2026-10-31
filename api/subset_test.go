@@ -25,6 +25,7 @@ var controlSubset = map[string]rpc{
 	"CreateActor":             {"CreateActorRequest", "Actor"},
 	"GetActor":                {"GetActorRequest", "Actor"},
 	"ListActors":              {"ListActorsRequest", "ListActorsResponse"},
+	"ListWorkers":             {"ListWorkersRequest", "ListWorkersResponse"},
 	"UpdateActor":             {"UpdateActorRequest", "Actor"},
 	"DeleteActor":             {"DeleteActorRequest", "Actor"},
 	"SuspendActor":            {"SuspendActorRequest", "SuspendActorResponse"},

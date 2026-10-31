@@ -101,6 +101,11 @@ service Control {
     option (method).resource = "Tag";
   }
 
+  // List Workers.
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse) {
+    option (method).resource = "Worker";
+  }
+
   // List Actors.
   rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {
     option (method).resource = "Actor";
@@ -1786,6 +1791,21 @@ message ListOptions {
   string page_token = 2;
 }
 
+message ListWorkersRequest {
+  // Pagination controls.
+  //
+  // +k8s:optional
+  ListOptions options = 1;
+}
+
+message ListWorkersResponse {
+  // The page of workers. This list may be empty even if there are more results.
+  repeated Worker workers = 1;
+
+  // Pagination token for the next page. Empty if this is the last page.
+  string next_page_token = 2;
+}
+
 // List actors with pagination. Provides "soft" guarantees: actors may be
 // missed or duplicated if the system state changes during pagination.
 message ListActorsRequest {
@@ -1807,6 +1827,243 @@ message ListActorsResponse {
 
   // Pagination token for the next page. Empty if this is the last page.
   string next_page_token = 2;
+}
+
+// Worker is a schedulable worker pod.
+//
+// Global-scoped: metadata.atespace is always empty. metadata.name is assigned
+// by the control plane and is opaque to clients — never parse it or derive it
+// from anything else; read pod identity from the named fields below.
+//
+// labels and epoch are the only mutable fields; every other field is
+// either immutable after creation or output-only. UpdateWorker replaces the whole resource, so
+// an immutable field that a request changes — including by omitting it, which
+// would clear it — is rejected with INVALID_ARGUMENT.
+message Worker {
+  option (resource) = {
+    scope : SCOPE_GLOBAL
+    plural : "Workers"
+  };
+
+  // Output-only: name, uid, version and timestamps are all server-assigned.
+  // uid and version are echoed back on UpdateWorker as preconditions.
+  //
+  // +k8s:required
+  // +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
+  ResourceMetadata metadata = 1;
+
+  // Kubernetes coordinates. Immutable, set at creation.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  // +k8s:immutable
+  string worker_namespace = 2;
+  // +k8s:required
+  // +k8s:format=k8s-long-name
+  // +k8s:immutable
+  string worker_pool = 3;
+  // +k8s:required
+  // +k8s:format=k8s-long-name
+  // +k8s:immutable
+  string worker_pod = 4;
+  // +k8s:required
+  // +k8s:format=k8s-uuid
+  // +k8s:immutable
+  string worker_pod_uid = 5;
+  // +k8s:required
+  // +k8s:format=k8s-long-name
+  // +k8s:immutable
+  string node_name = 6;
+  // worker_spiffe_id is the SPIFFE ID the worker pod's certificate carries.
+  // atenet-router requires it on the certificate of the worker's atunnel.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=2048
+  // +k8s:customValidation # a SPIFFE ID
+  // +k8s:immutable
+  string worker_spiffe_id = 7;
+
+  // labels mirror the WorkerPool object's Kubernetes labels, which selectors
+  // match against.
+  // Kubernetes does not cap an object's label count, so the bound below is
+  // a generous guardrail, not a mirror of an upstream limit.
+  //
+  // +k8s:optional
+  // +k8s:maxProperties=64
+  // +k8s:eachKey=+k8s:format=k8s-label-key
+  // +k8s:eachVal=+k8s:format=k8s-label-value
+  map<string, string> labels = 8;
+
+  // Output-only server-managed state. Absent from Create/Update request
+  // payloads; whatever a request carries here is ignored. A client moves
+  // state only through DrainWorker, MarkWorkerAvailable and
+  // MarkWorkerUnavailable, and the assignments are the scheduler's.
+  //
+  // +k8s:optional
+  WorkerStatus status = 9;
+}
+
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  // Ready; schedulable.
+  WORKER_STATE_ACTIVE = 1;
+  // Pod terminating. Not schedulable. Final: a draining Worker never becomes
+  // active or unavailable again.
+  WORKER_STATE_DRAINING = 2;
+  // Registered but not Ready, or its the worker restarting. Not schedulable. Every
+  // Worker starts here until MarkWorkerAvailable.
+  WORKER_STATE_UNAVAILABLE = 3;
+  // Keep this in sync with WorkerStatus.state's maximum.
+}
+
+message WorkerStatus {
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the WorkerState enum
+  WorkerState state = 1;
+
+  // The total resource capacity of the Worker.
+  //
+  // A Worker should report every dimension of resources it has available to be
+  // consumed by Actors. Any resource not specified here is assumed to be 0. An
+  // Actor which requests a resource which is not present in a Worker's
+  // capacity will prevent that Actor from running on that Worker.
+  //
+  // Shrinking capacity below allocated prevents new placements but does not
+  // evicts running Actors.
+  //
+  // +k8s:optional
+  WorkerResources capacity = 2;
+
+  // The allocated resources of the Worker.  This is the sum of all the
+  // resources consumed by the Actors currently assigned to this Worker,
+  // including their runtime's actor_overhead.
+  //
+  // +k8s:optional
+  WorkerResources allocated = 3;
+
+  // observed_epoch is the latest epoch whose earlier Actors the control plane
+  // has crashed and released. While it is below registered_epoch, Actors placed
+  // before the worker's last restart may still be reported as running.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 observed_epoch = 4;
+
+  // The sandbox classes this Worker runs and the runtimes it runs them under,
+  // as the registered worker process reports them through
+  // WorkerService.SetWorkerSandboxRuntimes. Cleared when a new worker process
+  // registers, and nothing is placed on the Worker until it reports them. One
+  // entry today, like WorkerPoolSpec.sandboxClasses. Its sandbox_class is the
+  // Worker's class.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=1 # keep in sync with WorkerPoolSpec.sandboxClasses
+  // +k8s:listType=map
+  // +k8s:listMapKey=sandbox_class
+  repeated WorkerSandboxClass sandbox_classes = 5;
+
+  // ips are the worker pod's IPs, at most one per IP family, in the order
+  // Kubernetes reports them; the first is in the cluster's primary family.
+  // The worker process reports them when it registers, so they follow a pod
+  // sandbox that is recreated with new IPs.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=2
+  // +k8s:listType=atomic
+  // +k8s:customValidation # until `format=k8s-ip` is supported
+  repeated string ips = 6;
+
+  // issued_epoch is the last epoch handed out by
+  // WorkerService.AcquireWorkerEpoch. Each worker process acquires one at
+  // startup.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 issued_epoch = 7;
+
+  // registered_epoch is the epoch of the worker process that registered last,
+  // through WorkerService.RegisterWorker. Only one worker process runs in a pod
+  // at a time, and a process registers only an epoch it acquired, so a rise
+  // means every earlier process has exited and lost its sandboxes. The control
+  // plane then crashes the Actors that ran under an earlier epoch. 0 until the
+  // first registration; a Worker takes no Actors before then.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 registered_epoch = 8;
+}
+
+// WorkerSandboxClass is one sandbox class a Worker runs, with the runtimes
+// it runs it under. A Worker has one entry per WorkerPool sandboxClasses
+// entry, so exactly one today.
+message WorkerSandboxClass {
+  // e.g. "gvisor", "microvm", as on WorkerPool.spec.sandboxClasses[].name.
+  //
+  // +k8s:required
+  // +k8s:maxLength=63
+  // +k8s:customValidation # gvisor or microvm
+  string sandbox_class = 1;
+
+  // Runtime new and cold-booted actors of this class start under. Snapshots
+  // matching its version can also warm-boot on this worker.
+  //
+  // +k8s:required
+  WorkerSandboxRuntime default_runtime = 2;
+
+  // Additional runtimes of this class (excluding default_runtime) that this
+  // worker can restore snapshots from right now.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=32
+  // +k8s:listType=atomic
+  repeated WorkerSandboxRuntime restorable_runtimes = 3;
+}
+
+// WorkerSandboxRuntime is one runtime a Worker runs for the class of its
+// WorkerSandboxClass entry. ActorSandboxRuntime, the stamp on an assignment
+// or snapshot, pairs the entry's sandbox_class with this runtime's version.
+message WorkerSandboxRuntime {
+  // Compatibility version stamped onto an actor's snapshot when a checkpoint
+  // is taken on this runtime. Snapshots matching it can warm-boot on this
+  // runtime.
+  // TODO: Add the additional compatibility versions this runtime can also
+  // restore snapshots from.
+  //
+  // +k8s:required
+  VersionedSandboxCompat version = 1;
+
+  // The resource overhead incurred by a Worker for each Actor running under
+  // this runtime, on top of the Actor's stated limits. Placement considers
+  // this when deciding if a Worker has enough capacity for an Actor, and it is
+  // accounted for in allocated. If not specified, Actors under this runtime
+  // are assumed to have negligible overhead.
+  //
+  // +k8s:optional
+  RuntimeOverhead actor_overhead = 2;
+
+  // TODO: Add an informational SandboxConfig version name (e.g. "gvisor-2")
+  // once workers report one.
+}
+
+// RuntimeOverhead is the memory an Actor uses on its Worker outside its own
+// limits: a fixed amount, plus an amount in proportion to its memory limit.
+message RuntimeOverhead {
+  // memory_bytes is a fixed amount of memory for each Actor.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  // +k8s:maximum=1099511627776 # 1TiB
+  int64 memory_bytes = 1;
+
+  // memory_bytes_per_gib is memory per GiB of the Actor's memory limit, e.g.
+  // host page tables for a microVM's guest RAM. It scales in proportion and
+  // rounds down to a byte, so an Actor with a 512MiB limit adds half of it.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  // +k8s:maximum=1073741824 # 1GiB
+  int64 memory_bytes_per_gib = 2;
 }
 
 // ActorSandboxRuntime is the runtime an actor runs under, as recorded on its
@@ -1873,6 +2130,33 @@ message AttributeEntry {
   // +k8s:required
   // +k8s:maxLength=256
   string value = 2;
+}
+
+// WorkerResources represents a set of resources.
+message WorkerResources {
+  // cpu_millicores is CPU in millicores (1000 = one core). Compared against
+  // the Actor's resource limits for placement.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  // +k8s:maximum=999999 # less than 1000 cores
+  int64 cpu_millicores = 1;
+
+  // memory_bytes is memory in bytes. Compared against the Actor's resource
+  // limits for placement.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 memory_bytes = 2;
+
+  // A count of Actors.  Workers can use this to limit the number of Actors
+  // that can be placed on them, constraining the costs of other things that
+  // are not captured in the resources above, but which still have costs -
+  // netns, mounts, file descriptors, etc.
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
+  int32 actors = 3;
 }
 
 // ResourceAnnotation marks a message as an API resource. See

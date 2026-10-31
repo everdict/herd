@@ -2,6 +2,7 @@
 CreateActor
 GetActor
 ListActors
+ListWorkers
 UpdateActor
 DeleteActor
 SuspendActor

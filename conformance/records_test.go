@@ -27,14 +27,15 @@ func TestSubsetServed(t *testing.T) {
 		}
 		n++
 		err := e.Client.Raw(ctxT(t), m, &ateapi.GetActorRequest{}, &ateapi.Actor{})
-		if c := status.Code(err); c == codes.Unimplemented || c == codes.OK {
+		// ListWorkers names nothing, so an empty request is a valid one (the first page of workers).
+		if c := status.Code(err); c == codes.Unimplemented || (c == codes.OK && m != "ListWorkers") {
 			t.Errorf("%s with an empty request: %v (want a served method refusing the request)", m, err)
 		}
 	}
-	if n != 17 {
-		t.Errorf("subset.txt lists %d methods, want 17", n)
+	if n != 18 {
+		t.Errorf("subset.txt lists %d methods, want 18", n)
 	}
-	for _, m := range []string{"RevertActor", "ListTags", "UpdateTag", "ListActorTemplates"} {
+	for _, m := range []string{"RevertActor", "ListTags", "UpdateTag", "ListActorTemplates", "GetWorker"} {
 		wantCode(t, m, e.Client.Raw(ctxT(t), m, &ateapi.GetActorRequest{}, &ateapi.Actor{}), codes.Unimplemented)
 	}
 }

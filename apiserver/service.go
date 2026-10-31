@@ -17,6 +17,7 @@ type ControlServer interface {
 	CreateActor(context.Context, *ateapi.CreateActorRequest) (*ateapi.Actor, error)
 	GetActor(context.Context, *ateapi.GetActorRequest) (*ateapi.Actor, error)
 	ListActors(context.Context, *ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error)
+	ListWorkers(context.Context, *ateapi.ListWorkersRequest) (*ateapi.ListWorkersResponse, error)
 	UpdateActor(context.Context, *ateapi.UpdateActorRequest) (*ateapi.Actor, error)
 	DeleteActor(context.Context, *ateapi.DeleteActorRequest) (*ateapi.Actor, error)
 	SuspendActor(context.Context, *ateapi.SuspendActorRequest) (*ateapi.SuspendActorResponse, error)
@@ -84,6 +85,7 @@ var ControlServiceDesc = grpc.ServiceDesc{
 		unary(controlService, "GetTag", ControlServer.GetTag),
 		unary(controlService, "DeleteTag", ControlServer.DeleteTag),
 		unary(controlService, "ListActors", ControlServer.ListActors),
+		unary(controlService, "ListWorkers", ControlServer.ListWorkers),
 		unary(controlService, "CreateActorTemplate", ControlServer.CreateActorTemplate),
 		unary(controlService, "GetActorTemplate", ControlServer.GetActorTemplate),
 		unary(controlService, "DeleteActorTemplate", ControlServer.DeleteActorTemplate),

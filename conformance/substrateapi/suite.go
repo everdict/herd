@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -103,7 +104,7 @@ type Report struct {
 // Cases are the suite's cases, in the order they run.
 var Cases = []string{
 	"create-from-template", "resume", "request", "suspend", "resume-on-request", "fork-via-tag", "delete-verified",
-	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "move",
+	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "move",
 	"egress-walk", "credential-header", "long-stream", "two-containers",
 }
 
@@ -197,6 +198,8 @@ type run struct {
 	tpl  *ateapi.ActorTemplate
 	made []string // actors created, for cleanup
 	tags []string
+	// ranOn is the worker the resume case's actor was assigned (WorkerAssignment.worker), once it passed.
+	ranOn string
 }
 
 // Run runs every case against the target and returns the report; a target that cannot be reached at all fails
@@ -291,6 +294,7 @@ func Run(ctx context.Context, cfg Config) Report {
 		{"refuse-stale-version", r.staleVersion},
 		{"suspend-async", r.suspendAsync},
 		{"refuse-unknown-actor", r.unknownActor},
+		{"list-workers", r.listWorkers},
 		{"move", r.move},
 		{"egress-walk", r.egressWalk},
 		{"credential-header", r.credentialHeader},
@@ -492,6 +496,7 @@ func (r *run) resume(ctx context.Context) (string, error) {
 	if a.GetStatus().GetWorkerAssignment() == nil {
 		return "", fmt.Errorf("actor %s is RUNNING with no worker assignment", a.GetMetadata().GetName())
 	}
+	r.ranOn = a.GetStatus().GetWorkerAssignment().GetWorker().GetName()
 	return "RUNNING on " + a.GetStatus().GetAssignedNode(), nil
 }
 
@@ -883,4 +888,58 @@ func (r *run) cleanup() {
 	for _, t := range r.tags {
 		_, _ = r.c.DeleteTag(ctx, r.cfg.Atespace, t)
 	}
+}
+
+// listWorkers: ListWorkers, paged to the end, names every worker (global: no atespace) with the sandbox class it runs,
+// and lists the worker the resume case's actor ran on. A target that does not serve it declares a skip.
+func (r *run) listWorkers(ctx context.Context) (string, error) {
+	seen := map[string]bool{}
+	var names []string
+	classes := map[string]bool{}
+	token := ""
+	for pages := 0; ; pages++ {
+		if pages == 100 {
+			return "", errors.New("ListWorkers: still a next_page_token after 100 pages")
+		}
+		resp, err := r.c.ListWorkers(ctx, &ateapi.ListOptions{PageToken: token})
+		if err := gate("ListWorkers", err); err != nil {
+			return "", err
+		}
+		for _, w := range resp.GetWorkers() {
+			md := w.GetMetadata()
+			switch {
+			case md.GetName() == "":
+				return "", fmt.Errorf("ListWorkers: a worker with no name: %v", w)
+			case md.GetAtespace() != "":
+				return "", fmt.Errorf("ListWorkers: worker %s is in atespace %q; Workers are global", md.GetName(), md.GetAtespace())
+			case seen[md.GetName()]:
+				return "", fmt.Errorf("ListWorkers: worker %s listed twice", md.GetName())
+			case len(w.GetStatus().GetSandboxClasses()) == 0:
+				return "", fmt.Errorf("ListWorkers: worker %s reports no sandbox class", md.GetName())
+			}
+			for _, c := range w.GetStatus().GetSandboxClasses() {
+				if c.GetSandboxClass() == "" {
+					return "", fmt.Errorf("ListWorkers: worker %s reports an empty sandbox class", md.GetName())
+				}
+				classes[c.GetSandboxClass()] = true
+			}
+			seen[md.GetName()] = true
+			names = append(names, md.GetName())
+		}
+		if token = resp.GetNextPageToken(); token == "" {
+			break
+		}
+	}
+	if len(names) == 0 {
+		return "", errors.New("ListWorkers lists no worker")
+	}
+	if r.ranOn != "" && !seen[r.ranOn] {
+		return "", fmt.Errorf("ListWorkers does not list %s, the worker the resume case's actor ran on (listed: %s)", r.ranOn, strings.Join(names, ", "))
+	}
+	var cs []string
+	for c := range classes {
+		cs = append(cs, c)
+	}
+	sort.Strings(cs)
+	return fmt.Sprintf("%d workers (%s), sandbox classes %s", len(names), strings.Join(names, ", "), strings.Join(cs, ", ")), nil
 }
