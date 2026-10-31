@@ -151,7 +151,14 @@ type Outcome struct {
 	// Snapshot is what OpSnapshot wrote.
 	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
 	Reason   string       `json:"reason,omitempty"`
+	// Code, if set, is what kind of failure a failed outcome is (Code* constants), for herd-api to answer by.
+	Code string `json:"code,omitempty"`
 }
+
+// CodeUnavailable: the work failed on something outside the host that can serve again later (an image registry
+// that refused with 429 or 503 past the herdlet's backoff); herd-api answers it as Unavailable, not as a failure
+// of the actor.
+const CodeUnavailable = "unavailable"
 
 // Presence names for Outcome.Presence.
 const (

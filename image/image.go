@@ -48,6 +48,9 @@ type Config struct {
 type Image struct {
 	// Digest is the platform manifest's digest: the cache key.
 	Digest string
+	// Index is the digest the reference named or its tag resolved to: an index's for a multi-platform image, else
+	// Digest. A reference pinned to it names the same image on every platform and every host, whatever the tag does.
+	Index  string `json:",omitempty"`
 	Config Config
 	// Layers are in order, lowest first.
 	Layers []Descriptor
@@ -76,6 +79,9 @@ var (
 	ErrDigest      = errors.New("image: digest mismatch")
 	ErrUnsupported = errors.New("image: unsupported")
 	ErrBadLayer    = errors.New("image: bad layer")
+	// ErrUnavailable: the registry answered that it cannot serve now (429, 503) for longer than the Source waits.
+	// Nothing is wrong with the reference or the host; the same request can succeed later.
+	ErrUnavailable = errors.New("image: registry unavailable")
 )
 
 // Ref is a parsed image reference: [registry/]repository[:tag][@digest].
@@ -146,3 +152,20 @@ func (r Ref) String() string {
 
 // ValidDigest reports whether d is a sha256 digest in OCI form.
 func ValidDigest(d string) bool { return digestRE.MatchString(d) }
+
+// Pin is ref pinned to digest (Image.Index), keeping its tag for the reader: the digest decides what is pulled. A
+// reference that names a digest of its own is already pinned and is returned as written.
+func Pin(ref, digest string) (string, error) {
+	r, err := ParseRef(ref)
+	if err != nil {
+		return "", err
+	}
+	if r.Digest != "" {
+		return ref, nil
+	}
+	if !ValidDigest(digest) {
+		return "", fmt.Errorf("%w: pinning %s to %q", ErrDigest, ref, digest)
+	}
+	r.Digest = digest
+	return r.String(), nil
+}

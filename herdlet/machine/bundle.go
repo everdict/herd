@@ -36,6 +36,9 @@ type Manifest struct {
 	Template link.Template `json:"template"`
 	// Images maps each image reference to the platform manifest digest it ran as on the producing host.
 	Images map[string]string `json:"images,omitempty"`
+	// Pins maps each image reference to the digest it was pinned to (image.Rootfs.Index): a restore on any host and
+	// platform builds the image from it and never resolves the reference's tag again.
+	Pins map[string]string `json:"pins,omitempty"`
 	// Platform is the producing host's.
 	Platform vmm.Platform `json:"platform"`
 	Arch     string       `json:"arch"`

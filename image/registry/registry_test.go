@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/imagetest"
@@ -158,5 +159,104 @@ func TestNoPlatform(t *testing.T) {
 	c := &Client{PlainHTTP: func(string) bool { return true }}
 	if _, err := c.Resolve(context.Background(), ref, image.Platform{OS: "linux", Architecture: "riscv64"}); !errors.Is(err, image.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// pinned is a two-platform image on an imagetest.Server, reached through a client whose waits are recorded.
+func pinned(t *testing.T) (*imagetest.Server, image.Ref, *Client, *[]time.Duration) {
+	s := imagetest.NewServer()
+	ts := httptest.NewServer(s)
+	t.Cleanup(ts.Close)
+	var ms []imagetest.Manifest
+	for _, arch := range []string{"amd64", "arm64"} {
+		ms = append(ms, imagetest.Manifest{Platform: image.Platform{OS: "linux", Architecture: arch},
+			Layers: [][]byte{imagetest.Layer(imagetest.File{Name: "arch", Body: arch})}})
+	}
+	s.Push("team/tool", "1", ms...)
+	ref, err := image.ParseRef(strings.TrimPrefix(ts.URL, "http://") + "/team/tool:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	c := &Client{sleep: func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return ctx.Err()
+	}}
+	return s, ref, c, &waits
+}
+
+// TestRetryAfterHonoured: a 429 or 503 is retried after the registry's Retry-After (seconds or an HTTP date), or
+// after a doubling backoff from a second without one, and the pull then succeeds. Today the first 429 fails it.
+func TestRetryAfterHonoured(t *testing.T) {
+	s, ref, c, waits := pinned(t)
+	s.Refuse(imagetest.Answer{Status: http.StatusTooManyRequests, RetryAfter: "7"},
+		imagetest.Answer{Status: http.StatusServiceUnavailable},
+		imagetest.Answer{Status: http.StatusTooManyRequests},
+		imagetest.Answer{Status: http.StatusTooManyRequests, RetryAfter: time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)})
+	img, err := c.Resolve(context.Background(), ref, image.Platform{OS: "linux", Architecture: "arm64"})
+	if err != nil {
+		t.Fatalf("Resolve after four refusals: %v", err)
+	}
+	if !image.ValidDigest(img.Index) || img.Index == img.Digest {
+		t.Errorf("index %q, platform digest %q", img.Index, img.Digest)
+	}
+	want := []time.Duration{7 * time.Second, time.Second, 2 * time.Second, 0}
+	if len(*waits) != len(want) {
+		t.Fatalf("waited %v, want %v", *waits, want)
+	}
+	for i := range want {
+		if (*waits)[i] != want[i] {
+			t.Errorf("wait %d: %v, want %v", i, (*waits)[i], want[i])
+		}
+	}
+}
+
+// TestRefusalIsUnavailable: a registry that keeps refusing answers a typed unavailable after the bounded retries,
+// and so does a Retry-After past MaxWait or past the context's deadline, without waiting for it. Today the first
+// 429 is a generic error.
+func TestRefusalIsUnavailable(t *testing.T) {
+	arm := image.Platform{OS: "linux", Architecture: "arm64"}
+	s, ref, c, waits := pinned(t)
+	for range 10 {
+		s.Refuse(imagetest.Answer{Status: http.StatusTooManyRequests, RetryAfter: "1"})
+	}
+	_, err := c.Resolve(context.Background(), ref, arm)
+	var u *UnavailableError
+	if !errors.Is(err, image.ErrUnavailable) || !errors.As(err, &u) || u.Attempts != DefaultRetries+1 || u.RetryAfter != time.Second {
+		t.Fatalf("err = %v (%+v), want ErrUnavailable after %d attempts", err, u, DefaultRetries+1)
+	}
+	if len(*waits) != DefaultRetries {
+		t.Errorf("waited %v, want %d waits", *waits, DefaultRetries)
+	}
+
+	s, ref, c, waits = pinned(t)
+	s.Refuse(imagetest.Answer{Status: http.StatusTooManyRequests, RetryAfter: "3600"})
+	if _, err := c.Resolve(context.Background(), ref, arm); !errors.As(err, &u) || u.RetryAfter != time.Hour || len(*waits) != 0 {
+		t.Fatalf("Retry-After past MaxWait: err = %v, waits %v; want ErrUnavailable at once", err, *waits)
+	}
+
+	s, ref, c, waits = pinned(t)
+	s.Refuse(imagetest.Answer{Status: http.StatusServiceUnavailable, RetryAfter: "5"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := c.Resolve(ctx, ref, arm); !errors.Is(err, image.ErrUnavailable) || len(*waits) != 0 {
+		t.Fatalf("Retry-After past the deadline: err = %v, waits %v; want ErrUnavailable at once", err, *waits)
+	}
+}
+
+func TestRetryAfterForms(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	for v, want := range map[string]time.Duration{
+		"0": 0, "120": 2 * time.Minute, now.Add(90 * time.Second).Format(http.TimeFormat): 90 * time.Second,
+		now.Add(-time.Minute).Format(http.TimeFormat): 0,
+	} {
+		if got, ok := retryAfter(v, now); !ok || got != want {
+			t.Errorf("retryAfter(%q) = %v, %v; want %v", v, got, ok, want)
+		}
+	}
+	for _, v := range []string{"", "soon", "-1", "1.5"} {
+		if _, ok := retryAfter(v, now); ok {
+			t.Errorf("retryAfter(%q) read as a wait", v)
+		}
 	}
 }

@@ -1,6 +1,8 @@
 // Package registry is the image.Source that pulls from an OCI distribution registry over HTTP (Docker Hub, GHCR, a
 // local registry): manifests and indexes by tag or digest, anonymous bearer tokens on a 401 challenge, and every
-// manifest checked against the digest it was asked for. Blob digests are checked by the image cache.
+// manifest checked against the digest it was asked for. Blob digests are checked by the image cache. A 429 or 503
+// is retried after its Retry-After (or a doubling backoff), a bounded number of times and never past the request's
+// deadline, and then answers UnavailableError (image.ErrUnavailable).
 package registry
 
 import (
@@ -10,8 +12,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/everdict/herd/image"
 )
@@ -30,9 +34,45 @@ type Client struct {
 	// PlainHTTP says which registry hosts are spoken to without TLS; default: localhost and 127.0.0.1 only.
 	PlainHTTP func(host string) bool
 
+	// Retries is how often a request the registry refused with 429 or 503 is sent again before it answers
+	// ErrUnavailable (default DefaultRetries; negative: never).
+	Retries int
+	// MaxWait bounds each wait before a retry (default DefaultMaxWait). The wait is the registry's Retry-After, or a
+	// doubling backoff from one second without one; a Retry-After longer than MaxWait is not waited for, and the
+	// request answers ErrUnavailable at once, carrying it; so does one that the request context's deadline would cut.
+	MaxWait time.Duration
+
 	mu     sync.Mutex
 	tokens map[string]string // registry + repository → bearer token
+	// sleep waits d unless ctx ends first; tests replace it.
+	sleep func(ctx context.Context, d time.Duration) error
 }
+
+// Defaults of Client.Retries and Client.MaxWait: a refused pull waits at most about a minute in all.
+const (
+	DefaultRetries = 4
+	DefaultMaxWait = 30 * time.Second
+)
+
+// UnavailableError is answered for a request the registry kept refusing with 429 or 503 (image.ErrUnavailable).
+type UnavailableError struct {
+	URL    string
+	Status string
+	// RetryAfter is the registry's last Retry-After (0 when it sent none).
+	RetryAfter time.Duration
+	// Attempts is how often the request was sent.
+	Attempts int
+}
+
+func (e *UnavailableError) Error() string {
+	s := fmt.Sprintf("registry: GET %s: %s after %d attempts", e.URL, e.Status, e.Attempts)
+	if e.RetryAfter > 0 {
+		s += fmt.Sprintf(" (retry after %v)", e.RetryAfter)
+	}
+	return s
+}
+
+func (e *UnavailableError) Unwrap() error { return image.ErrUnavailable }
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
@@ -79,6 +119,7 @@ func (c *Client) Resolve(ctx context.Context, ref image.Ref, p image.Platform) (
 		return image.Image{}, err
 	}
 	digest := image.DigestOf(b)
+	index := digest
 	var m manifest
 	if err := json.Unmarshal(b, &m); err != nil {
 		return image.Image{}, fmt.Errorf("registry: manifest %s: %w", ref, err)
@@ -125,7 +166,7 @@ func (c *Client) Resolve(ctx context.Context, ref image.Ref, p image.Platform) (
 	if err != nil {
 		return image.Image{}, err
 	}
-	return image.Image{Digest: digest, Config: cfg, Layers: m.Layers}, nil
+	return image.Image{Digest: digest, Index: index, Config: cfg, Layers: m.Layers}, nil
 }
 
 // fetchManifest GETs a manifest by tag or digest; one fetched by digest must hash to it.
@@ -162,7 +203,8 @@ func (c *Client) Blob(ctx context.Context, ref image.Ref, d image.Descriptor) (i
 func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*http.Response, error) {
 	u := c.base(ref.Registry) + "/v2/" + ref.Repository + path
 	key := ref.Registry + "/" + ref.Repository
-	for attempt := 0; ; attempt++ {
+	refused, backoff, authed := 0, time.Second, false
+	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, fmt.Errorf("registry: %w", err)
@@ -183,7 +225,27 @@ func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*
 		switch {
 		case resp.StatusCode == http.StatusOK:
 			return resp, nil
-		case resp.StatusCode == http.StatusUnauthorized && attempt == 0:
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
+			refused++
+			after, told := retryAfter(resp.Header.Get("Retry-After"), time.Now())
+			resp.Body.Close()
+			wait := backoff
+			if told {
+				wait = after
+			} else {
+				backoff *= 2
+			}
+			// A wait the caller's deadline would cut is not begun: the caller hears why now, not that it ran out.
+			deadline, bounded := ctx.Deadline()
+			if refused > c.retries() || wait > c.maxWait() || bounded && time.Until(deadline) <= wait {
+				return nil, &UnavailableError{URL: u, Status: resp.Status, RetryAfter: after, Attempts: refused}
+			}
+			if err := c.wait(ctx, wait); err != nil {
+				return nil, fmt.Errorf("registry: GET %s: waiting %v after %s: %w", u, wait, resp.Status, err)
+			}
+			continue
+		case resp.StatusCode == http.StatusUnauthorized && !authed:
+			authed = true
 			chal := resp.Header.Get("WWW-Authenticate")
 			resp.Body.Close()
 			tok, err := c.token(ctx, chal, ref)
@@ -241,6 +303,10 @@ func (c *Client) token(ctx context.Context, challenge string, ref image.Ref) (st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			after, _ := retryAfter(resp.Header.Get("Retry-After"), time.Now())
+			return "", &UnavailableError{URL: realm.Redacted(), Status: resp.Status, RetryAfter: after, Attempts: 1}
+		}
 		return "", fmt.Errorf("registry: token for %s: %s", ref, resp.Status)
 	}
 	var t struct {
@@ -277,4 +343,52 @@ func splitParams(s string) []string {
 		}
 	}
 	return append(out, cur.String())
+}
+
+func (c *Client) retries() int {
+	switch {
+	case c.Retries < 0:
+		return 0
+	case c.Retries == 0:
+		return DefaultRetries
+	}
+	return c.Retries
+}
+
+func (c *Client) maxWait() time.Duration {
+	if c.MaxWait > 0 {
+		return c.MaxWait
+	}
+	return DefaultMaxWait
+}
+
+func (c *Client) wait(ctx context.Context, d time.Duration) error {
+	if c.sleep != nil {
+		return c.sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// retryAfter reads a Retry-After header: delay-seconds or an HTTP date (RFC 9110 §10.2.3). A date in the past is
+// a wait of zero.
+func retryAfter(v string, now time.Time) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+		return time.Duration(n) * time.Second, true
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0, false
+	}
+	return max(t.Sub(now), 0), true
 }

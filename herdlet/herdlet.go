@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/everdict/herd/herdlet/machine"
+	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/tunnel"
@@ -184,10 +185,14 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	}
 }
 
-// classify turns a VMM error into an outcome: a call that hung or got no answer is unknown, anything else failed.
+// classify turns a VMM error into an outcome: a call that hung or got no answer is unknown, anything else failed; a
+// registry that kept refusing an image (image.ErrUnavailable) fails with CodeUnavailable.
 func classify(err error) link.Outcome {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, vmm.ErrUnreachable) {
 		return link.Outcome{Result: link.ResultUnknown, Reason: err.Error()}
+	}
+	if errors.Is(err, image.ErrUnavailable) {
+		return link.Outcome{Result: link.ResultFailed, Reason: err.Error(), Code: link.CodeUnavailable}
 	}
 	return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
 }

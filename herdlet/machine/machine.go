@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,6 +69,12 @@ type Machines struct {
 	tpl map[string]link.Template
 	// links is what each VMM id's network lease gave it.
 	links map[string]vmLink
+	// images is the image each VMM id runs per reference: what its snapshots pin.
+	images map[string]map[string]image.Rootfs
+	// pins is the digest each template's references resolved to on their first boot here (template uid →
+	// reference → digest); pinMu serializes the first resolve of one.
+	pins  map[string]map[string]string
+	pinMu map[string]*sync.Mutex
 }
 
 // New returns Machines for cfg.
@@ -78,7 +85,8 @@ func New(cfg Config) (*Machines, error) {
 	if err := os.MkdirAll(cfg.ShareDir, 0o700); err != nil {
 		return nil, fmt.Errorf("machine: %w", err)
 	}
-	return &Machines{cfg: cfg, ids: map[string]string{}, tpl: map[string]link.Template{}, links: map[string]vmLink{}}, nil
+	return &Machines{cfg: cfg, ids: map[string]string{}, tpl: map[string]link.Template{}, links: map[string]vmLink{},
+		images: map[string]map[string]image.Rootfs{}, pins: map[string]map[string]string{}, pinMu: map[string]*sync.Mutex{}}, nil
 }
 
 // VMM is the host's hypervisor.
@@ -133,25 +141,94 @@ var errShareTaken = errors.New("the VM id is taken on this host")
 // errLinkTaken is answered by prepare when a MEMORY restore's link is another VM's on this host.
 var errLinkTaken = errors.New("the VM's link is taken on this host")
 
-// prepare builds the template's images, leases the VM its link (Config.Network; want is a MEMORY restore's) and lays
-// out a fresh share for vmID with the plan and empty volumes. fill, if set, runs on the share before the volumes are
-// laid (a restore unpacks its volume tree there). A failure other than errShareTaken and errLinkTaken leaves a lease
-// the caller releases (unlease).
-func (m *Machines) prepare(ctx context.Context, vmID string, t link.Template, fill func(*os.Root) error, want *initd.Network) (vmm.Spec, map[string]string, error) {
-	if len(t.Containers) == 0 {
-		return vmm.Spec{}, nil, fmt.Errorf("machine: template %q has no container", t.UID)
-	}
+// build builds the template's images. A reference pins names a digest for (a snapshot's, Manifest.Pins) is built
+// from that digest; any other is pinned to the digest its first boot of template t on this host resolved it to, so
+// a template's tag is resolved once and every VM of it runs one image, whatever the tag does afterwards.
+func (m *Machines) build(ctx context.Context, t link.Template, pins map[string]string) (map[string]image.Rootfs, error) {
 	roots := map[string]image.Rootfs{}
-	digests := map[string]string{}
 	for _, c := range t.Containers {
 		if _, ok := roots[c.Image]; ok {
 			continue
 		}
-		r, err := m.cfg.Images.Get(ctx, c.Image)
-		if err != nil {
-			return vmm.Spec{}, nil, fmt.Errorf("machine: container %q: %w", c.Name, err)
+		var r image.Rootfs
+		var err error
+		if d, ok := pins[c.Image]; ok {
+			r, err = m.pinned(ctx, c.Image, d)
+		} else {
+			r, err = m.first(ctx, t.UID, c.Image)
 		}
-		roots[c.Image], digests[c.Image] = r, r.Digest
+		if err != nil {
+			return nil, fmt.Errorf("machine: container %q: %w", c.Name, err)
+		}
+		roots[c.Image] = r
+	}
+	return roots, nil
+}
+
+// pinned builds ref's image from digest.
+func (m *Machines) pinned(ctx context.Context, ref, digest string) (image.Rootfs, error) {
+	p, err := image.Pin(ref, digest)
+	if err != nil {
+		return image.Rootfs{}, err
+	}
+	r, err := m.cfg.Images.Get(ctx, p)
+	if err != nil {
+		return image.Rootfs{}, err
+	}
+	if r.Index == "" {
+		r.Index = digest
+	}
+	return r, nil
+}
+
+// first builds ref's image for template uid: from the digest the template's first boot here pinned it to, or,
+// on that first boot, from what the reference resolves to now, which becomes the template's pin.
+func (m *Machines) first(ctx context.Context, uid, ref string) (image.Rootfs, error) {
+	key := uid + "\x00" + ref
+	m.mu.Lock()
+	l, ok := m.pinMu[key]
+	if !ok {
+		l = &sync.Mutex{}
+		m.pinMu[key] = l
+	}
+	m.mu.Unlock()
+	l.Lock()
+	defer l.Unlock()
+	m.mu.Lock()
+	d, ok := m.pins[uid][ref]
+	m.mu.Unlock()
+	if ok {
+		return m.pinned(ctx, ref, d)
+	}
+	r, err := m.cfg.Images.Get(ctx, ref)
+	if err != nil {
+		return image.Rootfs{}, err
+	}
+	if r.Index == "" {
+		r.Index = r.Digest
+	}
+	if image.ValidDigest(r.Index) {
+		m.mu.Lock()
+		if m.pins[uid] == nil {
+			m.pins[uid] = map[string]string{}
+		}
+		m.pins[uid][ref] = r.Index
+		m.mu.Unlock()
+	}
+	return r, nil
+}
+
+// prepare builds the template's images (build: pins are a snapshot's), leases the VM its link (Config.Network; want
+// is a MEMORY restore's) and lays out a fresh share for vmID with the plan and empty volumes. fill, if set, runs on
+// the share before the volumes are laid (a restore unpacks its volume tree there). A failure other than
+// errShareTaken and errLinkTaken leaves a lease the caller releases (unlease).
+func (m *Machines) prepare(ctx context.Context, vmID string, t link.Template, pins map[string]string, fill func(*os.Root) error, want *initd.Network) (vmm.Spec, map[string]image.Rootfs, error) {
+	if len(t.Containers) == 0 {
+		return vmm.Spec{}, nil, fmt.Errorf("machine: template %q has no container", t.UID)
+	}
+	roots, err := m.build(ctx, t, pins)
+	if err != nil {
+		return vmm.Spec{}, nil, err
 	}
 	plan, disks, err := Plan(t, roots)
 	if err != nil {
@@ -198,7 +275,7 @@ func (m *Machines) prepare(ctx context.Context, vmID string, t link.Template, fi
 	if err := writePlan(root, plan); err != nil {
 		return vmm.Spec{}, nil, err
 	}
-	return m.spec(vmID, t, disks), digests, nil
+	return m.spec(vmID, t, disks), roots, nil
 }
 
 func (m *Machines) link(vmID string) (vmLink, bool) {
@@ -235,7 +312,7 @@ func (m *Machines) unlease(ctx context.Context, vmID string) {
 
 // Boot boots a VM of template t under id. A failed boot leaves no share and no link behind.
 func (m *Machines) Boot(ctx context.Context, id string, t link.Template) error {
-	spec, _, err := m.prepare(ctx, id, t, nil, nil)
+	spec, roots, err := m.prepare(ctx, id, t, nil, nil, nil)
 	if err != nil {
 		if !errors.Is(err, errShareTaken) {
 			_ = os.RemoveAll(filepath.Join(m.cfg.ShareDir, id))
@@ -257,7 +334,7 @@ func (m *Machines) Boot(ctx context.Context, id string, t link.Template) error {
 	}
 	m.checkAttached(ctx, id)
 	m.mu.Lock()
-	m.tpl[id] = t
+	m.tpl[id], m.images[id] = t, roots
 	m.mu.Unlock()
 	return nil
 }
@@ -307,11 +384,15 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 		g := l.guest
 		man.Network = &g
 	}
-	for _, c := range t.Containers {
-		if r, err := m.cfg.Images.Get(ctx, c.Image); err == nil {
-			man.Images[c.Image] = r.Digest
+	// The images the VM runs, not what its references resolve to now: a resume, fork or move runs these again.
+	m.mu.Lock()
+	for ref, r := range m.images[vmID] {
+		if man.Pins == nil {
+			man.Pins = map[string]string{}
 		}
+		man.Images[ref], man.Pins[ref] = r.Digest, r.Index
 	}
+	m.mu.Unlock()
 	if c, ok := m.cfg.VMM.(vmm.SnapshotCarrier); ok && snap.Fidelity == vmm.FidelityMemory {
 		// The memory goes into the bundle: what herd-api verifies in the store is then all a restore on another host
 		// of the family needs, and the snapshot outlives this host.
@@ -341,22 +422,16 @@ func (m *Machines) flush(ctx context.Context, vmID string) error {
 	return m.cfg.Flush.Flush(ctx, vmID)
 }
 
-// Restart cold-boots a VM that Snapshot stopped, from its share as it is and on the link it still holds.
+// Restart cold-boots a VM that Snapshot stopped, from its share as it is, on the link it still holds and with the
+// images it ran.
 func (m *Machines) Restart(ctx context.Context, id string) error {
 	vmID := m.resolve(id)
 	m.mu.Lock()
 	t, ok := m.tpl[vmID]
+	roots := m.images[vmID]
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("machine: restart %s: %w", id, vmm.ErrNotFound)
-	}
-	roots := map[string]image.Rootfs{}
-	for _, c := range t.Containers {
-		r, err := m.cfg.Images.Get(ctx, c.Image)
-		if err != nil {
-			return err
-		}
-		roots[c.Image] = r
 	}
 	_, disks, err := Plan(t, roots)
 	if err != nil {
@@ -430,7 +505,8 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		}
 		return extractVolumes(tr, root, man.Template.Volumes)
 	}
-	spec, _, err := m.prepare(ctx, vmID, man.Template, fill, want)
+	pins := m.bundlePins(ctx, id, man)
+	spec, roots, err := m.prepare(ctx, vmID, man.Template, pins, fill, want)
 	if errors.Is(err, errLinkTaken) {
 		// The link this memory keeps (the guest's address and MAC) is another VM's on this host: the snapshot's
 		// source running here, or another fork of one MEMORY tag restored before or at the same time. One address
@@ -439,7 +515,7 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		// the bundle is still unread, since fill runs only after the lease and the share.
 		log.Printf("machine: restore %s: the memory of %s cannot run here (%v): cold boot from its volumes on a link of its own", id, snap.VMID, err)
 		cold = true
-		spec, _, err = m.prepare(ctx, vmID, man.Template, fill, nil)
+		spec, roots, err = m.prepare(ctx, vmID, man.Template, pins, fill, nil)
 	}
 	if err != nil {
 		if !errors.Is(err, errShareTaken) && !errors.Is(err, errLinkTaken) {
@@ -468,7 +544,7 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 	}
 	m.checkAttached(ctx, vmID)
 	m.mu.Lock()
-	m.tpl[vmID] = man.Template
+	m.tpl[vmID], m.images[vmID] = man.Template, roots
 	m.mu.Unlock()
 	m.Adopt(id, vmID)
 	return nil
@@ -503,6 +579,7 @@ func (m *Machines) Delete(ctx context.Context, id string) (vmm.Presence, error) 
 	delete(m.ids, id)
 	delete(m.tpl, vmID)
 	delete(m.links, vmID)
+	delete(m.images, vmID)
 	m.mu.Unlock()
 	return vmm.PresenceGone, nil
 }
@@ -517,3 +594,32 @@ func (m *Machines) DialGuest(ctx context.Context, id string, port uint32) (net.C
 
 // VMID is the VMM's id of the actor's VM (a warm VM it adopted keeps its own).
 func (m *Machines) VMID(id string) string { return m.resolve(id) }
+
+// bundlePins is what a restore builds the bundle's images from: the digests its snapshot's VM ran (Manifest.Pins).
+// A bundle written before herd pinned images carries only platform manifest digests (Manifest.Images), which name
+// the same images on a host of the producer's architecture; on any other host the references are resolved again,
+// and that is logged.
+func (m *Machines) bundlePins(ctx context.Context, id string, man Manifest) map[string]string {
+	if len(man.Pins) > 0 {
+		return man.Pins
+	}
+	if len(man.Images) == 0 {
+		return nil
+	}
+	if caps, err := m.cfg.VMM.Capabilities(ctx); err == nil && caps.Arch == man.Arch {
+		return man.Images
+	}
+	log.Printf("machine: restore %s: the bundle pins no image for this host's architecture (it was written on %s): resolving its references again", id, man.Arch)
+	return nil
+}
+
+// Images is the image the actor's VM runs per reference of its template (nil for a VM this host does not hold).
+func (m *Machines) Images(id string) map[string]image.Rootfs {
+	vmID := m.resolve(id)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.images[vmID] == nil {
+		return nil
+	}
+	return maps.Clone(m.images[vmID])
+}

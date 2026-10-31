@@ -139,6 +139,10 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 		} else if err := s.save(ctx, ar); err != nil {
 			return err
 		}
+		if o.Code == link.CodeUnavailable {
+			// Nothing is wrong with the actor or the host: the same request can succeed later.
+			return status.Errorf(codes.Unavailable, "herdlet %s: %s failed: %s", w.Op, op, o.Reason)
+		}
 		return status.Errorf(codes.FailedPrecondition, "herdlet %s: %s failed: %s", w.Op, op, o.Reason)
 	}
 	ar.owe(op, o.Reason, time.Now())

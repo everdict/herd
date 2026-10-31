@@ -142,7 +142,9 @@ func (r *Registry) Resolve(ctx context.Context, ref image.Ref, p image.Platform)
 	if list, ok := r.indexes[d]; ok {
 		for _, md := range list {
 			if r.manifests[md].platform == p {
-				return r.manifests[md].img, nil
+				img := r.manifests[md].img
+				img.Index = d
+				return img, nil
 			}
 		}
 		return image.Image{}, fmt.Errorf("%s: no manifest for %s: %w", ref, p, image.ErrNotFound)
@@ -154,7 +156,9 @@ func (r *Registry) Resolve(ctx context.Context, ref image.Ref, p image.Platform)
 	if m.platform != p {
 		return image.Image{}, fmt.Errorf("%s is %s, not %s: %w", ref, m.platform, p, image.ErrNotFound)
 	}
-	return m.img, nil
+	img := m.img
+	img.Index = d
+	return img, nil
 }
 
 func (r *Registry) Blob(ctx context.Context, ref image.Ref, d image.Descriptor) (io.ReadCloser, error) {
