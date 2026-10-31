@@ -38,11 +38,17 @@ type fakeHost struct {
 	starts         []string
 	cmdlines       []string // the payload command line of every accepted vm.create
 	nets           []string // the net devices of every accepted vm.create and vm.restore, "<endpoint> tap=<tap>,mac=<mac>"
+	// herdletMemMax is the memory limit of the herdlet's own cgroup, which a process started with no ProcSpec.Cgroup
+	// is in; a MEMORY restore charges the guest memory to its process's cgroup, and past the limit the memcg OOM killer
+	// SIGKILLs it mid-call (PLT-214). Zero: no limit.
+	herdletMemMax int64
+	charged       map[string]int64    // bytes charged per cgroup, "" the herdlet's
+	startCgroups  map[string][]string // the cgroup of every process started, by binary
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
 	h := &fakeHost{t: t, chBin: "/opt/ch/cloud-hypervisor", fsBin: "/usr/libexec/virtiofsd", nextPid: 1000,
-		procs: map[int]*fakeProc{}}
+		procs: map[int]*fakeProc{}, charged: map[string]int64{}, startCgroups: map[string][]string{}}
 	h.clear()
 	t.Cleanup(func() {
 		h.mu.Lock()
@@ -97,6 +103,8 @@ type fakeProc struct {
 	kind   string
 	marker string
 	log    string
+	cgroup string
+	charge int64
 	status string
 	once   sync.Once
 	done   chan struct{}
@@ -134,6 +142,10 @@ func (p *fakeProc) Exited() (bool, error) {
 func (p *fakeProc) exit() {
 	p.once.Do(func() {
 		p.stop()
+		p.h.mu.Lock()
+		p.h.charged[p.cgroup] -= p.charge
+		p.charge = 0
+		p.h.mu.Unlock()
 		close(p.done)
 	})
 }
@@ -141,8 +153,9 @@ func (p *fakeProc) exit() {
 func (h *fakeHost) Start(ps ProcSpec) (Process, error) {
 	h.mu.Lock()
 	h.nextPid++
-	p := &fakeProc{h: h, pid: h.nextPid, marker: ps.Marker, log: ps.Log, done: make(chan struct{})}
+	p := &fakeProc{h: h, pid: h.nextPid, marker: ps.Marker, log: ps.Log, cgroup: ps.Cgroup, done: make(chan struct{})}
 	h.starts = append(h.starts, ps.Path)
+	h.startCgroups[ps.Path] = append(h.startCgroups[ps.Path], ps.Cgroup)
 	h.mu.Unlock()
 	switch ps.Path {
 	case h.chBin:
@@ -359,6 +372,25 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := checkHostPaths(&cfg); err != nil {
 			fail(http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Copy mode reads the guest memory into the VM's shared memory: all of it is charged at once.
+		c.h.mu.Lock()
+		oom := c.proc.cgroup == "" && c.h.herdletMemMax > 0 && c.h.charged[""]+cfg.Memory.Size > c.h.herdletMemMax
+		if !oom {
+			c.h.charged[c.proc.cgroup] += cfg.Memory.Size
+			c.proc.charge += cfg.Memory.Size
+		} else {
+			c.proc.status = "signal: killed"
+		}
+		c.h.mu.Unlock()
+		if oom {
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+			go c.proc.exit()
 			return
 		}
 		c.h.mu.Lock()

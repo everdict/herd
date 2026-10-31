@@ -21,6 +21,8 @@ type ProcSpec struct {
 	// Marker is a string in the command line that identifies this process (its socket path), so that a pid found
 	// again later is not mistaken for an unrelated process that reused it.
 	Marker string
+	// Cgroup, if set, is the cgroup v2 directory the process starts in (Cgroups.Create's), rather than the herdlet's own.
+	Cgroup string
 }
 
 // Process is a started or found host process.
@@ -51,6 +53,19 @@ func (ExecProcesses) Start(p ProcSpec) (Process, error) {
 	cmd.Stdout, cmd.Stderr = log, log
 	// Its own process group: a signal to herdlet's group does not take the VM down with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if p.Cgroup != "" {
+		// Started inside the VM's cgroup (clone3 CLONE_INTO_CGROUP): not one page is charged to the herdlet's.
+		cg, err := os.Open(p.Cgroup)
+		if err != nil {
+			_ = log.Close()
+			return nil, fmt.Errorf("cgroup: %w", err)
+		}
+		defer cg.Close()
+		cmd.SysProcAttr.UseCgroupFD, cmd.SysProcAttr.CgroupFD = true, int(cg.Fd())
+		// Outside the herdlet's cgroup, a Nomad task stop or systemd unit stop no longer ends the VM with the herdlet,
+		// and a restarted herdlet does not adopt the VMs it left (ADR A-19, Limits): the VM ends when the herdlet does.
+		cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	}
 	if err := cmd.Start(); err != nil {
 		_ = log.Close()
 		return nil, err

@@ -15,6 +15,13 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
   `sudo ./herd/herdlet doctor -kernel ./herd/kernel -initrd ./herd/initrd.img -virtiofsd ./herd/virtiofsd`).
   The release archive holds the guest kernel and initramfs and herd's virtiofsd; the job reads them from the task
   directory.
+- cgroup v2 on every Linux client (Ubuntu 24.04's default), which doctor's `vm cgroup` line checks: the herdlet runs each
+  VM's cloud-hypervisor and virtiofsd in a cgroup of the VM's own, `/sys/fs/cgroup/herd/<vm>`, outside its Nomad task's
+  (`/nomad.slice/...<alloc>.herdlet.scope`). The herdlet task's `resources` (1000 MHz, 1024 MB) are the herdlet's
+  own; a VM's memory is charged to its own cgroup (`memory.max` = the guest memory + 512 MiB, `-vm-memory-overhead`),
+  so a MEMORY restore or a bigger guest is never the task's memory limit's to kill. Nomad does not see the VMs'
+  memory: on a client that also runs other jobs, set it aside in the client's `reserved { memory = ... }` block. The
+  VMs end with the herdlet process, as they did inside its task.
 - One client holds the host volume `herd-data` (the bbolt store allows one herd-api).
 - An S3-compatible bucket (e.g. `herd-snapshots`) and an access key for it, on an endpoint every client reaches:
   herd-api keeps snapshots there and each herdlet's join hands it the store, so no client mounts a shared directory
@@ -52,6 +59,13 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    ```sh
    TOKEN=$(./herd/herd-api token -key-file jwt.key -sub everdict -space team-a=write -ttl 720h)
    ./herd/herd-api workers -api <herd-api client address>:7443 -token "$TOKEN"
+   ```
+
+   Once actors run, each client's VMs are in cgroups of their own, not in the herdlet task's: every
+   cloud-hypervisor process is in `/herd/<vm>`.
+
+   ```sh
+   for p in $(pgrep -x cloud-hyperviso); do cat /proc/$p/cgroup; done
    ```
 
 Each herdlet joins once with the token in its variable and keeps its grant in `/var/lib/herdlet`, so the token may

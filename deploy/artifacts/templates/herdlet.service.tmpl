@@ -1,6 +1,8 @@
 # herdlet on a joined host (docs/runbooks/join.md). HERD_API in /etc/herd/herdlet.env is herd-api's host:port; the
 # join token in /etc/herd/join.token is used once, and later starts reuse the grant in the state directory. No
 # -snapshots: the join hands the herdlet herd-api's S3 snapshot store.
+# Each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under /sys/fs/cgroup/herd (-vm-cgroup), not in
+# this unit's, so a MemoryMax here would limit the herdlet alone; the VMs end with the herdlet process.
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herdlet

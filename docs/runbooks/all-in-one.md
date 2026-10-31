@@ -32,11 +32,17 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    `ExecStart`.
 
 3. Check that this host can run herd actors. Every line must say `ok`; a `FAIL` line says what is missing (for
-   example `/dev/kvm`, or a virtiofsd that does not accept the options herd starts it with):
+   example `/dev/kvm`, a virtiofsd that does not accept the options herd starts it with, or a `vm cgroup` herd cannot
+   make):
 
    ```sh
    sudo herdlet doctor
    ```
+
+   herd runs each VM's cloud-hypervisor and virtiofsd in a cgroup of the VM's own, `/sys/fs/cgroup/herd/<vm>`
+   (`-vm-cgroup`), outside the herd unit's, with `memory.max` = the guest memory + `-vm-memory-overhead` (512 MiB);
+   that needs cgroup v2 (Ubuntu's default) and herd running as root. `cat /sys/fs/cgroup/herd/*/memory.current` shows
+   what each VM holds. The VMs end with the herd process.
 
 4. Install and start the unit (`dist/systemd/herd.service`; data in `/var/lib/herd`):
 

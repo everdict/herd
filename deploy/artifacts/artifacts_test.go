@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -275,6 +277,54 @@ func TestLinuxArtifactsUseTheArchivesVirtiofsd(t *testing.T) {
 	for p, w := range want {
 		if got[p] != w {
 			t.Errorf("%s runs -virtiofsd %q, want the release archive's %s", p, got[p], w)
+		}
+	}
+}
+
+// TestHerdletsVMsAreNotTheirTasksMemory (PLT-214): under Nomad raw_exec every process the herdlet starts was in its
+// task's cgroup, and a task that declares no resources gets Nomad's default 300 MB, which one MEMORY restore exceeds.
+// The herdlet task declares resources for the herdlet itself (memory above that default), and no Linux artifact that
+// runs a herdlet (the Nomad task, the herdlet and all-in-one units) keeps its VMs in its own cgroup (-vm-cgroup ""),
+// or limits that cgroup with MemoryMax. The job with no resources block: red.
+func TestHerdletsVMsAreNotTheirTasksMemory(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]artifacts.File{}
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	job := string(byPath["nomad/herdlet.nomad.hcl"].Data)
+	_, task, _ := strings.Cut(job, `task "herdlet" {`)
+	task, _, _ = strings.Cut(task, "\n    task ")
+	_, res, ok := strings.Cut(task, "resources {")
+	if !ok {
+		t.Fatalf("the herdlet task declares no resources, so Nomad limits it (and, before PLT-214, its VMs) to its default 300 MB:\n%s", task)
+	}
+	res, _, _ = strings.Cut(res, "}")
+	mem := regexp.MustCompile(`(?m)^\s*memory\s*=\s*(\d+)\s*$`).FindStringSubmatch(res)
+	if mem == nil {
+		t.Fatalf("the herdlet task's resources declare no memory: %s", res)
+	}
+	if n, _ := strconv.Atoi(mem[1]); n <= 300 {
+		t.Errorf("the herdlet task declares memory = %d MB, no more than Nomad's default 300", n)
+	}
+	for _, p := range []string{"nomad/herdlet.nomad.hcl", "systemd/herdlet.service", "systemd/herd.service"} {
+		f := byPath[p]
+		if strings.Contains(string(f.Data), "MemoryMax=") {
+			t.Errorf("%s sets MemoryMax", p)
+		}
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range invs {
+			for i, a := range inv.Args {
+				if (a == "-vm-cgroup" && i+1 < len(inv.Args) && inv.Args[i+1] == "") || a == "-vm-cgroup=" {
+					t.Errorf("%s keeps its VMs in the herdlet's own cgroup", p)
+				}
+			}
 		}
 	}
 }

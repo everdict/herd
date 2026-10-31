@@ -3,6 +3,8 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"errors"
+	"flag"
 	"io"
 	"log"
 	"os"
@@ -114,5 +116,48 @@ func TestHerdletRefusesAVirtiofsdThatRejectsHerdsArguments(t *testing.T) {
 	thisHost = func() Host { return help("1.13.2") }
 	if err := h.preflight(); err != nil {
 		t.Errorf("herdlet with virtiofsd 1.13.2: preflight = %v", err)
+	}
+}
+
+// TestHerdletRefusesAHostWhereVMsCannotLeaveItsCgroup (PLT-214): the herdlet's flags place each VM in a cgroup of its
+// own under herd's by default, and its preflight (doctor) refuses to join a host where that cgroup cannot be made,
+// rather than starting VMs whose memory its own task or unit limit would OOM-kill.
+func TestHerdletRefusesAHostWhereVMsCannotLeaveItsCgroup(t *testing.T) {
+	h := &Herdlet{}
+	fs := flag.NewFlagSet("herdlet", flag.ContinueOnError)
+	h.HostFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if h.VMCgroup != "herd" || h.VMMemoryOverheadMiB != 512 {
+		t.Fatalf("defaults: -vm-cgroup %q, -vm-memory-overhead %d", h.VMCgroup, h.VMMemoryOverheadMiB)
+	}
+	h.CHBinary, h.Virtiofsd, h.Kernel, h.Initrd = "cloud-hypervisor", "virtiofsd", "k", "i"
+	var asked []string
+	cgroupErr := errors.New("cgroup: /sys/fs/cgroup is not a cgroup v2 hierarchy")
+	old := thisHost
+	t.Cleanup(func() { thisHost = old })
+	thisHost = func() Host {
+		return Host{GOOS: "linux", GOARCH: "amd64",
+			OpenRW:   func(string) error { return nil },
+			LookPath: func(n string) (string, error) { return n, nil },
+			Stat:     func(string) error { return nil },
+			VMCgroup: func(parent string) error { asked = append(asked, parent); return cgroupErr },
+		}
+	}
+	if err := h.preflight(); err == nil || !strings.Contains(err.Error(), "vm cgroup") || !strings.Contains(err.Error(), "cgroup v2") {
+		t.Errorf("preflight on a host without a writable cgroup v2 hierarchy = %v", err)
+	}
+	if strings.Join(asked, ",") != "herd" {
+		t.Errorf("doctor checked parents %q", asked)
+	}
+	cgroupErr = nil
+	if err := h.preflight(); err != nil {
+		t.Errorf("preflight on a host that can place VMs: %v", err)
+	}
+	h.VMCgroup = ""
+	cgroupErr = errors.New("unused")
+	if err := h.preflight(); err != nil {
+		t.Errorf("preflight with -vm-cgroup off: %v", err)
 	}
 }

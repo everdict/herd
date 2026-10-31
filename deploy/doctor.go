@@ -39,6 +39,9 @@ type Host struct {
 	KernelArch func(path string) (string, error)
 	// Help runs an executable with --help and returns what it printed (virtiofsd's options); nil skips the check.
 	Help func(path string) (string, error)
+	// VMCgroup checks VMs can be placed in cgroups of their own under herd's cgroup parent, outside this process's
+	// (cloudhypervisor.CgroupV2.Check); nil skips the check.
+	VMCgroup func(parent string) error
 }
 
 // ThisHost is the machine herdlet runs on.
@@ -79,6 +82,13 @@ func ThisHost() Host {
 			}
 			return string(out), nil
 		},
+		VMCgroup: func(parent string) error {
+			self, err := cloudhypervisor.SelfCgroup()
+			if err != nil {
+				return err
+			}
+			return cloudhypervisor.CgroupV2{Parent: parent}.Check(self)
+		},
 	}
 }
 
@@ -115,6 +125,16 @@ func Doctor(h *Herdlet, host Host) []Check {
 			add(b.name, err, p)
 			if b.name == "virtiofsd" && err == nil && host.Help != nil {
 				add("virtiofsd args", virtiofsdAccepts(host, p, strings.Fields(h.VirtiofsdArgs)), strings.Join(cloudhypervisor.VirtiofsdFlags(strings.Fields(h.VirtiofsdArgs)), " "))
+			}
+		}
+		if host.VMCgroup != nil {
+			// Each VM's memory is charged to a cgroup of its own, not to the herdlet's task or unit limit (PLT-214).
+			if h.VMCgroup == "" {
+				add("vm cgroup", nil, "off (-vm-cgroup is empty): VMs run in herdlet's own cgroup, charged to its memory limit")
+			} else if err := host.VMCgroup(h.VMCgroup); err != nil {
+				add("vm cgroup", fmt.Errorf("%v: herdlet places each VM in %s/%s/<vm> and needs a writable cgroup v2 hierarchy with the memory controller (run it as root; under Nomad, with raw_exec)", err, cloudhypervisor.DefaultCgroupRoot, h.VMCgroup), "")
+			} else {
+				add("vm cgroup", nil, cloudhypervisor.DefaultCgroupRoot+"/"+h.VMCgroup+"/<vm>")
 			}
 		}
 	case "darwin":

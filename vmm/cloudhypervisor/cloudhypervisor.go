@@ -54,6 +54,12 @@ type Config struct {
 	// KernelLog, if set, answers the kernel's recent messages about pid (an OOM kill, a segfault, an audit record),
 	// which a failed start logs with the VM's own logs; nil means KmsgLog, which reads /dev/kmsg.
 	KernelLog func(pid int) []string
+	// Cgroups, if set, gives each VM a cgroup of its own that its cloud-hypervisor and virtiofsd start in, limited to
+	// the guest's memory and MemoryOverheadMiB (PLT-214); nil leaves them in the herdlet's own cgroup.
+	Cgroups Cgroups
+	// MemoryOverheadMiB is what a VM's cgroup may hold beyond its guest memory: the VMM, virtiofsd, page cache; zero
+	// means DefaultMemoryOverheadMiB.
+	MemoryOverheadMiB int
 }
 
 // VMM is the Cloud Hypervisor backend: one cloud-hypervisor process per VM, driven over its REST API, plus one
@@ -85,15 +91,20 @@ func New(cfg Config) *VMM {
 	if cfg.KernelLog == nil {
 		cfg.KernelLog = KmsgLog
 	}
+	if cfg.MemoryOverheadMiB == 0 {
+		cfg.MemoryOverheadMiB = DefaultMemoryOverheadMiB
+	}
 	return &VMM{cfg: cfg, removeAll: os.RemoveAll, vms: map[string]*instance{}}
 }
 
 // instance is one VM's processes and files.
 type instance struct {
 	dir string
-	api *client
-	ch  Process
-	fs  []Process
+	// cgroup is the VM's cgroup directory its processes start in; empty without Config.Cgroups.
+	cgroup string
+	api    *client
+	ch     Process
+	fs     []Process
 }
 
 func (in *instance) procs() []Process {
@@ -180,7 +191,16 @@ func (v *VMM) start(ctx context.Context, spec vmm.Spec, drive func(context.Conte
 		return vmm.VM{}, fmt.Errorf("cloud-hypervisor: %w", err)
 	}
 	in := &instance{dir: dir, api: newClient(apiSocket(dir))}
-	err := v.launch(ctx, spec, in)
+	var err error
+	if v.cfg.Cgroups != nil {
+		in.cgroup, err = v.cfg.Cgroups.Create(spec.ID, int64(spec.MemoryMiB+v.cfg.MemoryOverheadMiB)<<20)
+		if err != nil {
+			err = fmt.Errorf("cloud-hypervisor: %s: %w", spec.ID, err)
+		}
+	}
+	if err == nil {
+		err = v.launch(ctx, spec, in)
+	}
 	if err == nil {
 		err = drive(ctx, in)
 	}
@@ -246,6 +266,7 @@ func (v *VMM) launch(ctx context.Context, spec vmm.Spec, in *instance) error {
 
 // spawn starts a process and records its pid so that a restarted herdlet can find it again.
 func (v *VMM) spawn(in *instance, ps ProcSpec, name string) (Process, error) {
+	ps.Cgroup = in.cgroup
 	p, err := v.cfg.Processes.Start(ps)
 	if err != nil {
 		return nil, fmt.Errorf("cloud-hypervisor: start %s: %w", name, err)
@@ -714,6 +735,13 @@ func (v *VMM) teardown(ctx context.Context, id string, in *instance) (vmm.Presen
 			pids[i] = strconv.Itoa(p.Pid())
 		}
 		return vmm.PresencePresent, fmt.Errorf("cloud-hypervisor: delete %s: pid %s still running after SIGKILL: %w", id, strings.Join(pids, ","), vmm.ErrDeleteNotVerified)
+	}
+	if v.cfg.Cgroups != nil {
+		// Its processes are gone, so is the cgroup they ran in; one left behind holds nothing and is taken again by
+		// the next VM of this id.
+		if err := v.cfg.Cgroups.Remove(id); err != nil {
+			log.Printf("cloud-hypervisor: %s: %v", id, err)
+		}
 	}
 	if err := v.removeAll(in.dir); err != nil {
 		return vmm.PresencePresent, fmt.Errorf("cloud-hypervisor: delete %s: %v: %w", id, err, vmm.ErrDeleteNotVerified)

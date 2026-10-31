@@ -54,7 +54,8 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
 ## On each Ubuntu node
 
 1. Install Cloud Hypervisor and herd (with its virtiofsd) as in all-in-one.md steps 1–2 (no snapshot directory to
-   mount: the join hands the node herd-api's bucket), and check the host:
+   mount: the join hands the node herd-api's bucket), and check the host (the `vm cgroup` line included: each VM runs in
+   `/sys/fs/cgroup/herd/<vm>`, outside the herdlet unit's cgroup, as all-in-one.md step 3 says):
 
    ```sh
    sudo herdlet doctor

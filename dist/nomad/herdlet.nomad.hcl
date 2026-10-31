@@ -1,6 +1,8 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
 # herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
 # keeps snapshots in the S3 store the join hands it, so it takes no -snapshots.
+# The resources are the herdlet's own: each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under
+# /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (-slots), not the task's.
 # Rendered by deploy/artifacts; edit the template, not this file.
 variable "release_url" {
   type    = string
@@ -18,6 +20,12 @@ job "herdlet" {
 
     task "herdlet" {
       driver = "raw_exec"
+
+      # The herdlet process and what it runs itself (image unpacking, mke2fs); its VMs are not in this task's cgroup.
+      resources {
+        cpu    = 1000
+        memory = 1024
+      }
 
       artifact {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"

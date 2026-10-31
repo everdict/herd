@@ -14,10 +14,17 @@ import (
 // newHost is Cloud Hypervisor (ADR R-D8): one cloud-hypervisor process per VM, virtiofsd for the share, hybrid vsock,
 // and each VM's NIC on a TAP of its own whose egress table sends everything to herd-egress (A-18, linuxNet).
 func (h *Herdlet) newHost(ctx context.Context) (Backend, error) {
-	v := cloudhypervisor.New(cloudhypervisor.Config{
+	cfg := cloudhypervisor.Config{
 		Binary: h.CHBinary, Virtiofsd: h.Virtiofsd, VirtiofsdArgs: strings.Fields(h.VirtiofsdArgs),
 		StateDir: filepath.Join(h.StateDir, "vms"), SnapshotDir: filepath.Join(h.StateDir, "vm-snapshots"),
-	})
+		MemoryOverheadMiB: h.VMMemoryOverheadMiB,
+	}
+	// Each VM in a cgroup of its own under herd's (PLT-214): its guest memory is herd's capacity, never the herdlet's
+	// task or unit memory limit.
+	if h.VMCgroup != "" {
+		cfg.Cgroups = cloudhypervisor.CgroupV2{Parent: h.VMCgroup}
+	}
+	v := cloudhypervisor.New(cfg)
 	n, err := h.linuxNet(nft.ExecHost{})
 	if err != nil {
 		return Backend{}, err

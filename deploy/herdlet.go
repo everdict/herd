@@ -32,6 +32,7 @@ import (
 	"github.com/everdict/herd/snapstore/disk"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/vmm"
+	"github.com/everdict/herd/vmm/cloudhypervisor"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -69,7 +70,11 @@ type Herdlet struct {
 	CHBinary      string
 	Virtiofsd     string
 	VirtiofsdArgs string
-	MacHost       string
+	// VMCgroup is herd's cgroup under the cgroup v2 root that each VM's processes run in, one cgroup per VM (-vm-cgroup,
+	// PLT-214); empty leaves them in the herdlet's own. VMMemoryOverheadMiB is a VM cgroup's room beyond its guest memory.
+	VMCgroup            string
+	VMMemoryOverheadMiB int
+	MacHost             string
 	// EgressAllow are the operator's lab allowances (-egress-allow-prefix): the herdlet reports them in its
 	// capabilities, a Mac's in-process herd-egress applies them, and herd all-in-one hands them to its herd-egress.
 	// On a Linux host that runs herd-egress apart, give herd-egress the same flag.
@@ -128,6 +133,8 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.CHBinary, "cloud-hypervisor", "cloud-hypervisor", "Cloud Hypervisor binary (Linux)")
 	fs.StringVar(&h.Virtiofsd, "virtiofsd", DefaultVirtiofsd, "virtiofsd binary, >= 1.11 (Linux; default: the one herd's release archive carries, as the runbooks install it)")
 	fs.StringVar(&h.VirtiofsdArgs, "virtiofsd-args", "", "extra virtiofsd arguments, space-separated (Linux)")
+	fs.StringVar(&h.VMCgroup, "vm-cgroup", cloudhypervisor.DefaultCgroupParent, "cgroup under the cgroup v2 root (/sys/fs/cgroup) each VM's cloud-hypervisor and virtiofsd run in, as <vm-cgroup>/<vm>, outside the herdlet's own (Nomad task, systemd unit); empty: in the herdlet's cgroup, charged to its memory limit (Linux)")
+	fs.IntVar(&h.VMMemoryOverheadMiB, "vm-memory-overhead", cloudhypervisor.DefaultMemoryOverheadMiB, "MiB a VM's cgroup may hold beyond its guest memory (its memory.max is guest + this): the VMM, virtiofsd, page cache (Linux)")
 	fs.StringVar(&h.MacHost, "host", "", "this Mac's label for its MEMORY restore family (macOS; default: the hostname)")
 	fs.StringVar(&h.EgressBindings, "egress-bindings", DefaultEgressBindings, "herd-egress's bindings file (its -bindings): the herdlet binds each VM's address to its actor there (Linux)")
 	fs.StringVar(&h.EgressCA, "egress-ca", "", "herd-egress's CA certificate (its -ca-out) the guests trust (Linux; default <state>/egress-ca.pem)")
