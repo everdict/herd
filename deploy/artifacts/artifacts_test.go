@@ -70,7 +70,7 @@ func TestArtifactsRunCommandLinesTheBinariesAccept(t *testing.T) {
 			t.Errorf("%s runs no command", f.Path)
 		}
 		for _, inv := range invs {
-			r, err := deploy.Parse(inv.Binary, inv.Args, io.Discard)
+			r, err := deploy.Parse(inv.Binary, withVarDefaults(f, inv.Args), io.Discard)
 			if err != nil {
 				t.Errorf("%s: %s %s: %v", f.Path, inv.Binary, strings.Join(inv.Args, " "), err)
 				continue
@@ -87,6 +87,20 @@ func TestArtifactsRunCommandLinesTheBinariesAccept(t *testing.T) {
 			t.Errorf("no %s artifact runs %s", strings.SplitN(k, ":", 2)[0], strings.SplitN(k, ":", 2)[1])
 		}
 	}
+}
+
+// withVarDefaults is args as a Nomad job runs them with its variables' defaults: ${var.<name>} replaced.
+func withVarDefaults(f artifacts.File, args []string) []string {
+	if f.Kind != artifacts.Nomad {
+		return args
+	}
+	out := slices.Clone(args)
+	for _, m := range regexp.MustCompile(`(?s)variable "([a-z_]+)" \{\s*type\s*=\s*string\s*default\s*=\s*"([^"]*)"`).FindAllSubmatch(f.Data, -1) {
+		for i := range out {
+			out[i] = strings.ReplaceAll(out[i], "${var."+string(m[1])+"}", string(m[2]))
+		}
+	}
+	return out
 }
 
 // TestNomadJobPair: herd-api is a service job and herdlet a system job; the herdlet job joins with the token in its
@@ -366,4 +380,37 @@ func TestEveryHerdletPassesRegistryAuth(t *testing.T) {
 			t.Errorf("%s runs no herdlet", p)
 		}
 	}
+}
+
+// TestNomadHerdletsSpeakPlainHTTPToTheManagedStore (criterion insecure-registry): the Nomad herdlet job passes
+// -insecure-registry from its job variable insecure_registries, which defaults to the cluster's managed image store
+// (PLT-42: plain HTTP on the tailnet at 100.69.164.81:5001), so its herdlets pull workspace images from it.
+func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Path != "nomad/herdlet.nomad.hcl" {
+			continue
+		}
+		v := regexp.MustCompile(`(?s)variable "insecure_registries" \{\s*type\s*=\s*string\s*default\s*=\s*"([^"]*)"`).FindSubmatch(f.Data)
+		if v == nil || string(v[1]) != "100.69.164.81:5001" {
+			t.Errorf("%s: variable insecure_registries = %q, want a string defaulting to the managed store 100.69.164.81:5001", f.Path, v)
+		}
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range invs {
+			if inv.Binary != "herdlet" {
+				continue
+			}
+			if i := slices.Index(inv.Args, "-insecure-registry"); i < 0 || i+1 >= len(inv.Args) || inv.Args[i+1] != "${var.insecure_registries}" {
+				t.Errorf("%s: herdlet %q does not pass -insecure-registry ${var.insecure_registries}", f.Path, inv.Args)
+			}
+			return
+		}
+	}
+	t.Error("nomad/herdlet.nomad.hcl runs no herdlet")
 }

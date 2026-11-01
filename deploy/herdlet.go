@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,6 +87,10 @@ type Herdlet struct {
 	// RegistryAuth is the node's registry logins for image pulls (-registry-auth, PLT-222): a docker config file
 	// (`auths`) read at every pull, so a changed file needs no restart. Empty, or no file there: anonymous pulls.
 	RegistryAuth string
+	// InsecureRegistries are the registry hosts image pulls speak plain HTTP to besides localhost and 127.0.0.1
+	// (-insecure-registry host[:port], PLT-224), exactly as named; every other host is https. -registry-auth's logins
+	// apply to them as to any host.
+	InsecureRegistries registryHosts
 
 	// EgressBindings, EgressCA, EgressProxyPort, EgressDNSPort and NetPool are a Linux host's VM networks (ADR A-18,
 	// linuxNet): herd-egress's bindings file and CA, its transparent and DNS ports, and the pool VM links are leased from.
@@ -147,6 +152,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.HostFirewall, "host-firewall", tapnet.FirewallInsert, "when another table's input chain drops by policy (ufw, Tailscale): insert each VM's accepts for exactly its flows to herd-egress there and remove them with the VM, or refuse to start VMs (Linux: insert|refuse)")
 	fs.Var(&h.EgressAllow, "egress-allow-prefix", egressAllowUsage)
 	fs.StringVar(&h.Secrets, "secrets", "", "directory for ate-secret://dir/<name>/<tail> credentials of the in-process herd-egress (macOS; on Linux, herd-egress -secrets)")
+	fs.Var(&h.InsecureRegistries, "insecure-registry", "a registry host[:port] image pulls speak plain HTTP to, exactly as written (repeatable, or comma-separated; empty names none), as the docker daemon's insecure-registries; every other host is https, except localhost and 127.0.0.1")
 	fs.StringVar(&h.RegistryAuth, "registry-auth", "", "registry logins image pulls use, a docker config file (auths, per registry host: auth = base64 user:password, or identitytoken), read at every pull; empty, or no file there: anonymous pulls")
 }
 
@@ -577,11 +583,35 @@ func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
 	return disk.New(dir)
 }
 
-// imageSource is the registry the herdlet pulls template images from, logged in with -registry-auth's credentials.
+// imageSource is the registry the herdlet pulls template images from, logged in with -registry-auth's credentials
+// and speaking plain HTTP to the -insecure-registry hosts.
 func (h *Herdlet) imageSource() *registry.Client {
 	c := &registry.Client{}
+	if len(h.InsecureRegistries) > 0 {
+		c.PlainHTTP = registry.PlainHosts(h.InsecureRegistries)
+	}
 	if h.RegistryAuth != "" {
 		c.Credentials = registry.DockerConfig{Path: h.RegistryAuth}
 	}
 	return c
+}
+
+// registryHosts is -insecure-registry's value: registry host[:port] names, each checked to be one (no scheme, no path).
+type registryHosts []string
+
+func (r *registryHosts) String() string { return strings.Join(*r, ",") }
+
+func (r *registryHosts) Set(v string) error {
+	for _, h := range strings.Split(v, ",") {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		u, err := url.Parse("//" + h)
+		if err != nil || u.Host != h || u.Hostname() == "" || u.User != nil {
+			return fmt.Errorf("%q is not a registry host[:port] (no scheme, no path)", h)
+		}
+		*r = append(*r, h)
+	}
+	return nil
 }

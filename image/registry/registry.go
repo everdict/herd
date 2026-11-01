@@ -33,7 +33,8 @@ const (
 // Client pulls from registries.
 type Client struct {
 	HTTP *http.Client
-	// PlainHTTP says which registry hosts are spoken to without TLS; default: localhost and 127.0.0.1 only.
+	// PlainHTTP says which registry hosts are spoken to without TLS; default: localhost and 127.0.0.1 only
+	// (Loopback). PlainHosts adds the operator's insecure registries to those.
 	PlainHTTP func(host string) bool
 
 	// Retries is how often a request the registry refused with 429 or 503 is sent again before it answers
@@ -90,11 +91,27 @@ func (c *Client) plain(host string) bool {
 	if c.PlainHTTP != nil {
 		return c.PlainHTTP(host)
 	}
+	return Loopback(host)
+}
+
+// Loopback says whether a registry host[:port] is localhost or 127.0.0.1, spoken to without TLS by default.
+func Loopback(host string) bool {
 	name := host
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {
 		name = host[:i]
 	}
 	return name == "localhost" || name == "127.0.0.1"
+}
+
+// PlainHosts is a Client.PlainHTTP that speaks plain HTTP to the loopback hosts and to exactly the named registry
+// hosts, as the docker daemon's insecure-registries does (PLT-224): a name is a host[:port] matched as written (case
+// aside), so "10.0.0.1:5000" makes neither "10.0.0.1" nor "10.0.0.1:5001" plain. Every other host stays https.
+func PlainHosts(hosts []string) func(host string) bool {
+	set := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		set[strings.ToLower(h)] = true
+	}
+	return func(host string) bool { return Loopback(host) || set[strings.ToLower(host)] }
 }
 
 func (c *Client) base(host string) string {

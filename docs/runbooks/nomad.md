@@ -56,6 +56,11 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    nomad var put nomad/jobs/herdlet join_token="$(cat join.token)" registry_auth=@registry-auth.json
    ```
 
+   The herdlets pull over plain HTTP from the hosts in the job variable `insecure_registries` (`-insecure-registry`,
+   comma-separated; PLT-224), by default the cluster's managed image store `100.69.164.81:5001` (PLT-42), and over
+   https from every other host. Another store: `nomad job run -var insecure_registries=<host:port> ...`; none:
+   `-var insecure_registries=`.
+
 3. Run the job pair:
 
    ```sh

@@ -191,6 +191,12 @@ func Doctor(h *Herdlet, host Host) []Check {
 		}
 		add("registry auth", nil, detail)
 	}
+	// The registry hosts image pulls speak plain HTTP to (PLT-224).
+	if len(h.InsecureRegistries) == 0 {
+		add("insecure registries", nil, "none (no -insecure-registry): plain HTTP only to localhost and 127.0.0.1")
+	} else {
+		add("insecure registries", nil, "plain HTTP to "+strings.Join(h.InsecureRegistries, ", ")+", localhost and 127.0.0.1; https to every other host")
+	}
 	return cs
 }
 

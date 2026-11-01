@@ -97,6 +97,13 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    there is no file, and fails a file it cannot read. A `~/.docker/config.json` that `docker login` wrote with a
    `credsStore` or `credHelpers` holds no secret in `auths`: herd does not run credential helpers, so write `auths`.
 
+8. Optional: a plain-HTTP registry (PLT-224). Pulls speak https to every registry except localhost and 127.0.0.1.
+   `-insecure-registry host[:port]` (repeatable, or comma-separated) adds hosts spoken to over plain HTTP, as the
+   docker daemon's `insecure-registries`: exactly as written, so `100.69.164.81:5001` makes neither
+   `100.69.164.81` nor `100.69.164.81:5002` plain. `-registry-auth` logins apply to them as to any host (a token
+   realm on a named host may be plain HTTP too). `herdlet doctor` prints `insecure registries` with the plain-HTTP
+   hosts.
+
 ## macOS (Apple Silicon, macOS 14+)
 
 1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement):

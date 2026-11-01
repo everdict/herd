@@ -2,12 +2,19 @@
 # herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
 # keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
 # docker config file, is the node's registry logins for private template images (-registry-auth, rendered 0600).
+# insecure_registries are the registry hosts it pulls from over plain HTTP (-insecure-registry, comma-separated; ""
+# names none): by default the cluster's managed image store, plain HTTP on the tailnet.
 # The resources are the herdlet's own: each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under
 # /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (-slots), not the task's.
 # Rendered by deploy/artifacts; edit the template, not this file.
 variable "release_url" {
   type    = string
   default = "[[.ReleaseURL]]"
+}
+
+variable "insecure_registries" {
+  type    = string
+  default = "[[.InsecureRegistries]]"
 }
 
 job "herdlet" {
@@ -62,6 +69,7 @@ job "herdlet" {
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
           "-registry-auth", "secrets/registry-auth.json",
+          "-insecure-registry", "${var.insecure_registries}",
         ]
       }
     }
