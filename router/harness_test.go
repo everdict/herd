@@ -228,7 +228,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 		if _, err := s.api.CreateActorTemplate(s.ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 			Metadata:       &ateapi.ResourceMetadata{Atespace: sp, Name: "tpl"},
 			Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
-			SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+			SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, GoldenSnapshotConfig: &ateapi.GoldenSnapshotConfig{Mode: ateapi.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED}},
 		}}); err != nil {
 			t.Fatal(err)
 		}

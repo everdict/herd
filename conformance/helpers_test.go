@@ -36,7 +36,7 @@ func mkTemplate(t *testing.T, e *conformance.Env, name string, f ateapi.Snapshot
 	tpl, err := e.Client.CreateActorTemplate(ctxT(t), &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 		Metadata:       &ateapi.ResourceMetadata{Atespace: e.Space, Name: name},
 		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f, GoldenSnapshotConfig: coldBoot},
 	}})
 	if err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
@@ -144,3 +144,7 @@ func load(t *testing.T, dir string) (stop func()) {
 	t.Cleanup(stop)
 	return stop
 }
+
+// coldBoot is the golden snapshot config of these tests' templates: they pin the cold-boot workflows (slots, owed
+// steps, image resolutions), which a template's golden actor would take part in.
+var coldBoot = &ateapi.GoldenSnapshotConfig{Mode: ateapi.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED}

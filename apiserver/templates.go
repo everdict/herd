@@ -21,7 +21,8 @@ func templateView(r store.Record) (*ateapi.ActorTemplate, error) {
 	return t, nil
 }
 
-// CreateActorTemplate stores a template.
+// CreateActorTemplate stores a template and, unless its golden snapshot mode is DISABLED, starts building its golden
+// snapshot (golden.go); status.golden_snapshot_status reports the build.
 func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 	in := req.GetActorTemplate()
 	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
@@ -35,7 +36,9 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 		return nil, status.Errorf(codes.InvalidArgument, "a template needs at least one container")
 	}
 	t := proto.Clone(in).(*ateapi.ActorTemplate)
-	t.Metadata, t.Status = nil, nil
+	// Status is server-owned and starts empty, as Substrate's does.
+	t.Metadata, t.Status = nil, &ateapi.ActorTemplateStatus{}
+	defaultGolden(t)
 	data, err := proto.Marshal(t)
 	if err != nil {
 		return nil, toStatus(err)
@@ -43,9 +46,12 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 	if err := s.ensureSpace(ctx, space); err != nil {
 		return nil, toStatus(err)
 	}
-	r, err := s.cfg.Store.Create(ctx, store.Record{Key: store.Key{Kind: store.KindActorTemplate, Space: space, Name: name}, Data: data})
+	r, err := s.cfg.Store.Create(ctx, store.Record{Key: templateKey(space, name), Data: data})
 	if err != nil {
 		return nil, toStatus(err)
+	}
+	if goldenEnabled(t) {
+		s.kickGolden(r.Key, 0)
 	}
 	v, err := templateView(r)
 	return v, toStatus(err)
@@ -68,7 +74,7 @@ func (s *Server) GetActorTemplate(ctx context.Context, req *ateapi.GetActorTempl
 	return v, toStatus(err)
 }
 
-// DeleteActorTemplate deletes a template no actor uses.
+// DeleteActorTemplate deletes a template no actor uses, after its golden actor and golden tag, as Substrate does.
 func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 	space, name, err := ref(req.GetActorTemplate())
 	if err != nil {
@@ -77,7 +83,10 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
 		return nil, err
 	}
-	r, err := s.cfg.Store.Get(ctx, store.Key{Kind: store.KindActorTemplate, Space: space, Name: name})
+	// Serializes against the golden pass, which creates the golden actor and tag.
+	unlock := s.lock(templateKey(space, name))
+	defer unlock()
+	r, err := s.cfg.Store.Get(ctx, templateKey(space, name))
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -93,13 +102,16 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 		if err != nil {
 			return nil, toStatus(err)
 		}
-		if ar.st.TemplateUID == r.UID {
+		if ar.st.TemplateUID == r.UID && !(ar.st.Golden && a.Name == r.UID) {
 			return nil, status.Errorf(codes.FailedPrecondition, "template %s/%s is used by actor %s", space, name, a.Name)
 		}
 	}
 	v, err := templateView(r)
 	if err != nil {
 		return nil, toStatus(err)
+	}
+	if err := s.deleteGolden(ctx, space, r.UID); err != nil {
+		return nil, err
 	}
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
 		return nil, toStatus(err)

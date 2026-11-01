@@ -84,7 +84,7 @@ func pinTemplateAt(t *testing.T, e *conformance.Env, reg *pinRegistry, name stri
 			{Name: "sidecar", Image: reg.host + "/everdict/sidecar:1", VolumeMounts: []*ateapi.VolumeMount{{Name: "work", MountPath: "/work"}}},
 		},
 		Volumes:        []*ateapi.Volume{{Name: "work", DurableDir: &ateapi.DurableDirVolumeSource{}}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f, GoldenSnapshotConfig: coldBoot},
 	}})
 	if err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)

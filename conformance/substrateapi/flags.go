@@ -47,6 +47,8 @@ type Options struct {
 	StreamGap       time.Duration
 	Template2       string
 	ContainerHeader string
+	GoldenWait      time.Duration
+	NoGolden        string
 }
 
 // Flags registers the flags on fs.
@@ -84,6 +86,8 @@ func (o *Options) Flags(fs *flag.FlagSet) {
 	fs.DurationVar(&o.StreamFor, "stream-for", 30*time.Minute, "long-stream: how long the streamed exec is held open through the router")
 	fs.DurationVar(&o.StreamGap, "stream-gap", time.Minute, "long-stream: the idle gap between the exec's outputs")
 	fs.StringVar(&o.Template2, "template2", "", "two-containers case: a template in -atespace whose two containers mount one DurableDir volume")
+	fs.DurationVar(&o.GoldenWait, "golden-wait", 2*time.Minute, "golden-template case: how long the template's golden snapshot may take (everdict-herder waits 120 s)")
+	fs.StringVar(&o.NoGolden, "no-golden", "", "golden-template case: skip it, giving why the target does not serve golden snapshots")
 	fs.StringVar(&o.ContainerHeader, "container-header", "", "two-containers: request metadata key the target's guest picks a container by (herd: x-herd-container)")
 }
 
@@ -166,5 +170,6 @@ func (o *Options) Config() (Config, error) {
 	}
 	cfg.LongStream, cfg.StreamFor, cfg.StreamGap = o.LongStream, o.StreamFor, o.StreamGap
 	cfg.Template2, cfg.ContainerHeader = o.Template2, o.ContainerHeader
+	cfg.GoldenWait, cfg.NoGolden = o.GoldenWait, o.NoGolden
 	return cfg, nil
 }

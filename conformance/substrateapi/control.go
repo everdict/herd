@@ -129,6 +129,10 @@ func (c *Control) CreateActorTemplate(ctx context.Context, t *ateapi.ActorTempla
 	return invoke(ctx, c, "CreateActorTemplate", &ateapi.CreateActorTemplateRequest{ActorTemplate: t}, &ateapi.ActorTemplate{})
 }
 
+func (c *Control) DeleteActorTemplate(ctx context.Context, space, name string) (*ateapi.ActorTemplate, error) {
+	return invoke(ctx, c, "DeleteActorTemplate", &ateapi.DeleteActorTemplateRequest{ActorTemplate: ref(space, name)}, &ateapi.ActorTemplate{})
+}
+
 func (c *Control) CreateActor(ctx context.Context, a *ateapi.Actor) (*ateapi.Actor, error) {
 	return invoke(ctx, c, "CreateActor", &ateapi.CreateActorRequest{Actor: a}, &ateapi.Actor{})
 }

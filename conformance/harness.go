@@ -90,6 +90,10 @@ type Env struct {
 // NewStore makes the record store each Env runs on; tests may swap it (Envs are not started in parallel).
 var NewStore = func(t testing.TB) store.Store { return memstore.New() }
 
+// GoldenWarmup is herd-api's apiserver.Config.GoldenWarmup in the harness (tests may set it; Envs are not started in
+// parallel).
+var GoldenWarmup time.Duration
+
 // CallTimeout is how long herd-api waits for a herdlet in the harness.
 const CallTimeout = 400 * time.Millisecond
 
@@ -118,6 +122,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		Store: e.Store, Snapshots: snaps, Hub: e.Hub, Authn: auth.StaticKey{Key: key}, Authz: auth.SpaceRoles{},
 		CallTimeout:          CallTimeout,
 		ReconcileCallTimeout: ReconcileCallTimeout,
+		GoldenWarmup:         GoldenWarmup,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +141,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		for _, h := range e.Herdlets {
 			h.Disconnect()
 		}
+		e.Server.Close()
 		e.Server.Wait()
 		e.Client.Close()
 		cancel()

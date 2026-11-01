@@ -74,10 +74,15 @@ func (s *Server) copySnapshot(ctx context.Context, from *link.SnapshotRef, key s
 // its snapshot is verified durable.
 func (s *Server) CreateTag(ctx context.Context, req *ateapi.CreateTagRequest) (*ateapi.Tag, error) {
 	in := req.GetTag()
-	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	if err := s.authorize(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite); err != nil {
 		return nil, err
 	}
+	return s.createTag(ctx, in, ateapi.TagScope_TAG_SCOPE_ATESPACE)
+}
+
+// createTag is CreateTag once the caller is authorized; scope is the tag's.
+func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.TagScope) (*ateapi.Tag, error) {
+	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
 	if name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "metadata.name is required")
 	}
@@ -135,7 +140,7 @@ func (s *Server) CreateTag(ctx context.Context, req *ateapi.CreateTagRequest) (*
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s/%s is %v", aspace, aname, ar.actor.Status.GetState())
 	}
 	tag := &ateapi.Tag{
-		Scope:       ateapi.TagScope_TAG_SCOPE_ATESPACE,
+		Scope:       scope,
 		SourceActor: &ateapi.ObjectRef{Atespace: aspace, Name: aname},
 		Status: &ateapi.TagStatus{
 			Snapshot:         snapshotProto(snap, ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG, 1, ar.st.TemplateUID),
@@ -183,11 +188,16 @@ func (s *Server) DeleteTag(ctx context.Context, req *ateapi.DeleteTagRequest) (*
 	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
 		return nil, err
 	}
+	return s.deleteTag(ctx, space, name, req.GetOptions().GetUid(), req.GetOptions().GetVersion())
+}
+
+// deleteTag is DeleteTag once the caller is authorized.
+func (s *Server) deleteTag(ctx context.Context, space, name, uid string, version int64) (*ateapi.Tag, error) {
 	tr, err := s.loadTag(ctx, space, name)
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	if err := precondition(tr.rec, req.GetOptions().GetUid(), req.GetOptions().GetVersion(), false); err != nil {
+	if err := precondition(tr.rec, uid, version, false); err != nil {
 		return nil, err
 	}
 	if tr.st.Snapshot != nil {

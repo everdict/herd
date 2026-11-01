@@ -255,13 +255,18 @@ func (s *Server) DeleteActor(ctx context.Context, req *ateapi.DeleteActorRequest
 	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
 		return nil, err
 	}
+	return s.deleteActor(ctx, space, name, req.GetOptions().GetUid(), req.GetOptions().GetVersion())
+}
+
+// deleteActor is DeleteActor once the caller is authorized.
+func (s *Server) deleteActor(ctx context.Context, space, name, uid string, version int64) (*ateapi.Actor, error) {
 	unlock := s.lock(actorKey(space, name))
 	defer unlock()
 	ar, err := s.loadActor(ctx, space, name)
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	if err := precondition(ar.rec, req.GetOptions().GetUid(), req.GetOptions().GetVersion(), false); err != nil {
+	if err := precondition(ar.rec, uid, version, false); err != nil {
 		return nil, err
 	}
 	logBegun(ar, "delete")
@@ -319,8 +324,9 @@ func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	return nil
 }
 
-// Reconcile retries every owed workflow step once and returns how many are still owed. Each herdlet call it makes waits
-// up to ReconcileCallTimeout.
+// Reconcile retries every owed workflow step once, then takes every template's unfinished golden snapshot build one
+// pass further, and returns how many steps and builds are still owed. Each herdlet call it makes waits up to
+// ReconcileCallTimeout.
 func (s *Server) Reconcile(ctx context.Context) (int, error) {
 	ctx = context.WithValue(ctx, reconciling{}, true)
 	recs, err := s.cfg.Store.List(ctx, store.KindActor, "")
@@ -337,6 +343,33 @@ func (s *Server) Reconcile(ctx context.Context) (int, error) {
 			continue
 		}
 		if s.reconcileOne(ctx, r.Key) {
+			left++
+		}
+	}
+	if ctx.Err() != nil {
+		// The pass ran out of time on the actors; golden builds wait for the next one.
+		return left, nil
+	}
+	tpls, err := s.cfg.Store.List(ctx, store.KindActorTemplate, "")
+	if err != nil {
+		return left, err
+	}
+	for _, r := range tpls {
+		t, err := decode(r, &ateapi.ActorTemplate{})
+		if err != nil {
+			return left, err
+		}
+		if !goldenEnabled(t) || goldenDone(t.GetStatus().GetGoldenSnapshotStatus()) {
+			continue
+		}
+		again, pending, err := s.goldenPass(ctx, r.Key)
+		if err != nil {
+			log.Printf("herd-api: template %s/%s: golden snapshot not built yet: %v", r.Space, r.Name, err)
+		}
+		if again > 0 {
+			s.kickGolden(r.Key, again)
+		}
+		if pending {
 			left++
 		}
 	}

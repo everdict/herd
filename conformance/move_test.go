@@ -70,7 +70,7 @@ func twoContainerTemplate(t *testing.T, e *conformance.Env, name string, f ateap
 			{Name: "sidecar", Image: "ghcr.io/everdict/sidecar:1", Args: []string{"--watch", "/work"}, VolumeMounts: []*ateapi.VolumeMount{{Name: "work", MountPath: "/work"}}},
 		},
 		Volumes:        []*ateapi.Volume{{Name: "work", DurableDir: &ateapi.DurableDirVolumeSource{}}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: f, GoldenSnapshotConfig: coldBoot},
 	}})
 	if err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)

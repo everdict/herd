@@ -66,6 +66,10 @@ func writeToken(t *testing.T, key []byte) string {
 	return tok
 }
 
+// coldBoot is the golden snapshot config of these tests' templates: they count placements, which a template's golden
+// actor would take part in.
+var coldBoot = &ateapi.GoldenSnapshotConfig{Mode: ateapi.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED}
+
 func ctxT(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -113,8 +117,9 @@ func pool(t *testing.T, addr, tok string, n int) []string {
 	defer c.Close()
 	ctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
-		Metadata:   &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
-		Containers: []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
+		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
+		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
+		SnapshotConfig: &ateapi.SnapshotConfig{GoldenSnapshotConfig: coldBoot},
 	}}); err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
 	}

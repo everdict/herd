@@ -22,6 +22,7 @@ herder (PLT-107) runs the same command.
 | `suspend-async` | `SuspendActor{options.mode: DURABILITY_MODE_ASYNCHRONOUS}` of a running actor answers SUSPENDING or SUSPENDED; the actor becomes SUSPENDED with no worker and a snapshot of its own at an allowed fidelity. Durability is not asserted: the mode does not promise it at return. |
 | `refuse-unknown-actor` | `GetActor`, `SuspendActor`, `ResumeActor`, `DeleteActor` of an actor that does not exist answer `NotFound` |
 | `list-workers` | `ListWorkers`, paged to the end, names each worker once, with no atespace (Workers are global) and at least one non-empty sandbox class, and lists the worker the `resume` case's actor was assigned (`worker_assignment.worker`). A target that does not serve it answers `Unimplemented` (gRPC's own `unknown method ListWorkers` is the reason a herd before PLT-219 gives) and the case is a declared skip. On herd each worker's class runtime also carries its declared fidelity and restore family (ADR 0001 A-4); the suite does not read them, since Substrate reports other attributes there. |
+| `golden-template` | a copy of the suite's template under a new name, created with `golden_snapshot_config.mode` ENABLED, reports `status.golden_snapshot_status.golden_tag` within `--golden-wait` (default 2 min; everdict-herder waits 120 s), and the tag's snapshot is COMPLETED; a build that reports `error_message` fails the case with it, and so does a target that reports neither in time (herd before PLT-221 never did). An actor created from the template (which starts from its golden snapshot) resumes to RUNNING and runs `echo` through the probe's exec (any other probe: its request is answered). `--no-golden <why>` skips it, printed as `not configured` with the reason, for a target that does not serve golden snapshots. |
 | `move` | with `--move-from` and `--move-to` (worker selectors of two pools): an actor suspended on the first resumes on the second after an `UpdateActor` of its `worker_selector`, answers, and keeps its volume file |
 | `egress-walk` | optional, below: from inside the guest a listed host answers, an unlisted one and host-side targets are refused, and an `UpdateActorEgressPolicy` flips them on the live actor within a bound |
 | `credential-header` | optional, below: a `replace_headers` credential reaches the suite's echo server in place of the guest's placeholder; the guest never holds it |
@@ -33,8 +34,9 @@ The four optional cases each run only when their flags are given, and are otherw
 guest API, so they run against Substrate too wherever it has the feature.
 
 A case is skipped only when the server declared why: it answered the call `Unimplemented` with a reason, which the
-report prints. `Unimplemented` with no reason, or any other refusal, fails the case. The one other skip is `move`
-without `--move-from/--move-to` (a target with one worker pool), printed as `not configured`. The report ends with the
+report prints. `Unimplemented` with no reason, or any other refusal, fails the case. The other skips are `move`
+without `--move-from/--move-to` (a target with one worker pool) and `golden-template` with `--no-golden`, printed as
+`not configured`. The report ends with the
 target's skip list and `N passed, M failed, K skipped`; the command exits 1 unless the run is green. Every name the
 suite creates starts with `--prefix` (default `cf-<random>`) and is deleted at the end.
 
@@ -206,6 +208,10 @@ registry login for its host: `-registry-auth` on the herdlet or all-in-one names
 step 7). Run `herdlet doctor` with the node's flags first: its `registry auth` line lists the hosts the node has logins
 for, or says pulls are anonymous; without a login CreateActor fails `FAILED_PRECONDITION` with the token realm's
 `403 Forbidden`.
+
+`golden-template` runs in both: herd-api builds the template's golden snapshot after `-golden-warmup` (20 s by
+default, Substrate's), on the worker keeping the highest fidelity (ADR 0001 A-30), so on a real host the case takes
+the image pull, the boot, the warmup and the snapshot upload, well inside `--golden-wait`.
 
 The optional cases on a real host (here herd-api and herd-router on the host's LAN address; the template `pair` has two containers mounting one DurableDir volume; the
 secret file sits in herd-egress's `-secrets` directory as `conformance/token`, and `/tmp/cred` holds the same value).

@@ -88,7 +88,7 @@ func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
 		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, GoldenSnapshotConfig: coldBoot},
 	}}); err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestJoinedHerdletIgnoresSnapshotsFlag(t *testing.T) {
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
 		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, GoldenSnapshotConfig: coldBoot},
 	}}); err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestJoinedHostsForkAndMoveAtMemoryThroughS3(t *testing.T) {
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
 		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
-		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, GoldenSnapshotConfig: coldBoot},
 	}}); err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
 	}

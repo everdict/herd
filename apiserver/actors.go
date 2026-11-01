@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"log"
 	"maps"
 	"sort"
 	"strconv"
@@ -82,6 +83,7 @@ func (s *Server) place(ctx context.Context, ar *actorRec, tpl *ateapi.ActorTempl
 	}
 	w, err := sched.Place(ws, sched.Request{
 		Class: SandboxClass, Template: ar.st.TemplateUID, Selector: selectorOf(tpl, ar.actor), Snapshot: schedSnapshot(ar.st.Restore),
+		PreferFidelity: ar.st.Golden,
 	})
 	if err != nil {
 		return err
@@ -171,10 +173,17 @@ func (s *Server) loadTemplate(ctx context.Context, space string, r *ateapi.Objec
 // of a fork), and starts it on a worker the scheduler picked.
 func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest) (*ateapi.Actor, error) {
 	in := req.GetActor()
-	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	if err := s.authorize(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite); err != nil {
 		return nil, err
 	}
+	return s.createActor(ctx, in, false)
+}
+
+// createActor is CreateActor once the caller is authorized. Without source_tag the actor restores from its template's
+// golden tag when the template has one, and boots cold otherwise; golden marks the template's own golden actor,
+// which always boots cold, on the worker keeping the highest fidelity.
+func (s *Server) createActor(ctx context.Context, in *ateapi.Actor, golden bool) (*ateapi.Actor, error) {
+	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
 	if name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "metadata.name is required")
 	}
@@ -188,7 +197,22 @@ func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest
 			ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: tplRec.Name}, WorkerSelector: in.GetWorkerSelector(),
 			SourceTag: in.GetSourceTag(), Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RESUMING},
 		},
-		st: actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID},
+		st: actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID, Golden: golden},
+	}
+	fromGolden := false
+	if gt := tpl.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(); in.GetSourceTag() == nil && gt != nil && !golden {
+		// Substrate's contract: an actor of a template with a golden snapshot starts from it.
+		tag, err := s.loadTag(ctx, space, gt.GetName())
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, status.Errorf(codes.FailedPrecondition, "template %s/%s: golden tag %s not found", space, tplRec.Name, gt.GetName())
+			}
+			return nil, toStatus(err)
+		}
+		if tag.st.Snapshot == nil || tag.tag.GetStatus().GetActorTemplateUid() != tplRec.UID {
+			return nil, status.Errorf(codes.FailedPrecondition, "template %s/%s: golden tag %s holds no snapshot of this template", space, tplRec.Name, gt.GetName())
+		}
+		ar.st.Restore, fromGolden = tag.st.Snapshot, true
 	}
 	if st := in.GetSourceTag(); st != nil {
 		tspace, tname, err := ref(st)
@@ -218,7 +242,16 @@ func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest
 	unlock := s.lock(ar.rec.Key)
 	defer unlock()
 	ar.owe(owedBoot, "placed, not started yet", time.Now())
-	if err := s.place(ctx, ar, tpl, true); err != nil {
+	err = s.place(ctx, ar, tpl, true)
+	var nf *sched.NoFitError
+	if fromGolden && errors.As(err, &nf) {
+		// The golden snapshot is a start-up shortcut, not the actor's state: where no worker can restore it (a MEMORY
+		// snapshot of another restore family), the actor boots cold as it would without one.
+		log.Printf("herd-api: actor %s/%s: golden snapshot not placeable, booting cold: %v", space, name, err)
+		ar.st.Restore = nil
+		err = s.place(ctx, ar, tpl, true)
+	}
+	if err != nil {
 		return nil, toStatus(err)
 	}
 	logBegun(ar, "create")

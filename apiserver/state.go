@@ -47,6 +47,8 @@ type actorState struct {
 	DeleteTime *time.Time `json:"deleteTime,omitempty"`
 	// Keys are the snapshot objects this actor owns; a delete removes them.
 	Keys []string `json:"keys,omitempty"`
+	// Golden marks a template's golden actor: herd-api made it to build the template's golden snapshot.
+	Golden bool `json:"golden,omitempty"`
 }
 
 type actorRec struct {

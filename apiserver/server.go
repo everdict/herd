@@ -53,6 +53,9 @@ type Config struct {
 	// same way on every pass and never converge; the herdlet also runs the retry only after an earlier exchange on
 	// the same VM that it is still finishing, which this bound covers too.
 	ReconcileCallTimeout time.Duration
+	// GoldenWarmup is how long a template's golden actor runs before its snapshot is taken. Substrate waits 20 s
+	// (herd-api's -golden-warmup default); zero takes it as soon as the actor runs.
+	GoldenWarmup time.Duration
 }
 
 // Server is herd-api.
@@ -60,8 +63,12 @@ type Server struct {
 	cfg Config
 	// schedMu serializes placement so two placements never take the same free slot.
 	schedMu sync.Mutex
-	locks   sync.Map // store.Key → *sync.Mutex: one workflow per actor at a time in this process
+	locks   sync.Map // store.Key → *sync.Mutex: one workflow per actor (or template) at a time in this process
 	bg      sync.WaitGroup
+
+	goldenMu     sync.Mutex
+	goldenTimers map[store.Key]*time.Timer // golden passes waiting out a warmup
+	closed       bool
 }
 
 // New returns a server. It registers itself as the hub's registration sink.
@@ -75,7 +82,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ReconcileCallTimeout <= 0 {
 		cfg.ReconcileCallTimeout = 4 * cfg.CallTimeout
 	}
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}}
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
 	return s, nil
@@ -83,6 +90,17 @@ func New(cfg Config) (*Server, error) {
 
 // Wait blocks until asynchronous workflows started by this server have finished.
 func (s *Server) Wait() { s.bg.Wait() }
+
+// Close stops starting background work (golden passes waiting out a warmup); Reconcile still runs what is owed.
+func (s *Server) Close() {
+	s.goldenMu.Lock()
+	defer s.goldenMu.Unlock()
+	s.closed = true
+	for k, t := range s.goldenTimers {
+		t.Stop()
+		delete(s.goldenTimers, k)
+	}
+}
 
 func (s *Server) lock(k store.Key) func() {
 	m, _ := s.locks.LoadOrStore(k, &sync.Mutex{})

@@ -41,6 +41,9 @@ type Request struct {
 	Snapshot *Snapshot
 	// Exclude names workers that must not be chosen.
 	Exclude map[string]bool
+	// PreferFidelity puts the workers that keep the highest suspend fidelity first (a template's golden actor, whose
+	// snapshot every later actor of the template restores).
+	PreferFidelity bool
 }
 
 // NoFitError is a refused placement: why each worker was passed over.
@@ -90,8 +93,8 @@ func Fits(w Worker, r Request) string {
 	return ""
 }
 
-// Place picks a worker for r: one with a warm VM of the template first, then the one with most free slots, then by
-// name. *NoFitError when none fits.
+// Place picks a worker for r: with PreferFidelity the one keeping the highest fidelity first, then one with a warm VM
+// of the template, then the one with most free slots, then by name. *NoFitError when none fits.
 func Place(ws []Worker, r Request) (string, error) {
 	var fit []Worker
 	reasons := map[string]string{}
@@ -107,6 +110,9 @@ func Place(ws []Worker, r Request) (string, error) {
 	}
 	sort.Slice(fit, func(i, j int) bool {
 		a, b := fit[i], fit[j]
+		if r.PreferFidelity && a.SuspendMaxFidelity != b.SuspendMaxFidelity {
+			return a.SuspendMaxFidelity > b.SuspendMaxFidelity
+		}
 		wa, wb := r.Snapshot == nil && a.Warm[r.Template] > 0, r.Snapshot == nil && b.Warm[r.Template] > 0
 		if wa != wb {
 			return wa

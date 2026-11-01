@@ -52,6 +52,8 @@ func TestActorCrashedWhenItsVMExits(t *testing.T) {
 	if _, err := e.Client.CreateActorTemplate(ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
 		Metadata:   &ateapi.ResourceMetadata{Atespace: e.Space, Name: "tpl"},
 		Containers: []*ateapi.Container{{Name: "main", Image: "busybox:1.36"}},
+		// The test counts the herdlet's slots: no golden actor takes one.
+		SnapshotConfig: &ateapi.SnapshotConfig{GoldenSnapshotConfig: &ateapi.GoldenSnapshotConfig{Mode: ateapi.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED}},
 	}}); err != nil {
 		t.Fatalf("CreateActorTemplate: %v", err)
 	}

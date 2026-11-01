@@ -96,6 +96,7 @@ type API struct {
 	Reconcile       time.Duration
 	AdvertiseTunnel string
 	CredentialTTL   time.Duration
+	GoldenWarmup    time.Duration
 
 	// Key, if set, is used instead of KeyFile (all-in-one reads or creates its own).
 	Key []byte
@@ -117,7 +118,13 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.DurationVar(&a.Reconcile, "reconcile", 10*time.Second, "how often to retry owed workflow steps")
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
 	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
+	fs.DurationVar(&a.GoldenWarmup, "golden-warmup", DefaultGoldenWarmup, goldenWarmupUsage)
 }
+
+// DefaultGoldenWarmup is Substrate's wait between starting a template's golden actor and taking its snapshot.
+const DefaultGoldenWarmup = 20 * time.Second
+
+const goldenWarmupUsage = "how long a template's golden actor runs before its golden snapshot is taken (0: at once)"
 
 // Run serves herd-api on ln until ctx ends. It never dials a herdlet.
 func (a *API) Run(ctx context.Context, ln net.Listener) error {
@@ -141,6 +148,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	hub := link.NewHub()
 	srv, err := apiserver.New(apiserver.Config{
 		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, CallTimeout: a.CallTimeout,
+		GoldenWarmup: a.GoldenWarmup,
 	})
 	if err != nil {
 		return err
@@ -186,6 +194,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		g.Stop()
 	}()
 	err = g.Serve(ln)
+	srv.Close()
 	srv.Wait()
 	if ctx.Err() != nil {
 		return nil

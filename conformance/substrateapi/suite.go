@@ -70,6 +70,12 @@ type Config struct {
 	// its output StreamGap apart (default 60 s), then cut by a suspend and re-attached by its id after the resume.
 	LongStream           bool
 	StreamFor, StreamGap time.Duration
+	// GoldenWait bounds the golden-template case's wait for the template's golden snapshot (default Wait). A client
+	// that starts actors from a template's golden snapshot (everdict-herder) waits 120 s.
+	GoldenWait time.Duration
+	// NoGolden, if set, says why the target does not serve golden snapshots: the golden-template case is then a skip
+	// with this reason.
+	NoGolden string
 	// Template2 is a template with two containers mounting one DurableDir volume (the two-containers case);
 	// ContainerHeader is the request metadata key by which the target's guest picks the container a call acts on.
 	Template2, ContainerHeader string
@@ -104,7 +110,7 @@ type Report struct {
 // Cases are the suite's cases, in the order they run.
 var Cases = []string{
 	"create-from-template", "resume", "request", "suspend", "resume-on-request", "fork-via-tag", "delete-verified",
-	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "move",
+	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "golden-template", "move",
 	"egress-walk", "credential-header", "long-stream", "two-containers",
 }
 
@@ -198,6 +204,8 @@ type run struct {
 	tpl  *ateapi.ActorTemplate
 	made []string // actors created, for cleanup
 	tags []string
+	// templates the suite created, for cleanup (after the actors of them)
+	templates []string
 	// ranOn is the worker the resume case's actor was assigned (WorkerAssignment.worker), once it passed.
 	ranOn string
 }
@@ -295,6 +303,7 @@ func Run(ctx context.Context, cfg Config) Report {
 		{"suspend-async", r.suspendAsync},
 		{"refuse-unknown-actor", r.unknownActor},
 		{"list-workers", r.listWorkers},
+		{"golden-template", r.goldenTemplate},
 		{"move", r.move},
 		{"egress-walk", r.egressWalk},
 		{"credential-header", r.credentialHeader},
@@ -887,6 +896,15 @@ func (r *run) cleanup() {
 	}
 	for _, t := range r.tags {
 		_, _ = r.c.DeleteTag(ctx, r.cfg.Atespace, t)
+	}
+	for _, t := range r.templates {
+		// A template goes once its actors are gone, and a delete may still be converging.
+		for i := 0; i < 20; i++ {
+			if _, err := r.c.DeleteActorTemplate(ctx, r.cfg.Atespace, t); err == nil || status.Code(err) == codes.NotFound {
+				break
+			}
+			time.Sleep(r.cfg.Poll)
+		}
 	}
 }
 
