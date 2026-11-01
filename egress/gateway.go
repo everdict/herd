@@ -108,6 +108,9 @@ type Gateway struct {
 
 	allowed, refused, refusedHostSide atomic.Int64
 
+	// syncer, while its Run runs, keeps decisions on the policy herd-api last acknowledged (PLT-229).
+	syncer atomic.Pointer[Syncer]
+
 	h1, h2c, tlsUp *http.Transport
 }
 
@@ -234,12 +237,22 @@ func (g *Gateway) record(a Actor, proto, name string, port int, err error) {
 	}
 }
 
-// decide runs the Guard and then the actor's current policy.
-func (g *Gateway) decide(b *binding, in policy.Input, name string, port int) (policy.Decision, error) {
+// decide runs the Guard and then the actor's current policy. With a Syncer running, that policy was read within
+// PolicyLease, and a refusal is decided again on a read that started after the decision began, so a policy write
+// herd-api has acknowledged decides this flow even if the periodic sync has not reached it yet (PLT-229).
+func (g *Gateway) decide(ctx context.Context, b *binding, in policy.Input, name string, port int) (policy.Decision, error) {
 	if err := g.cfg.Guard.CheckName(name); err != nil {
 		return policy.Decision{}, err
 	}
+	at := time.Now()
+	s := g.syncer.Load()
+	if s != nil {
+		_ = s.fresh(ctx, b.actor, at.Add(-PolicyLease))
+	}
 	d := b.policy.Load().Decide(in, name, port)
+	if !d.Allowed && s != nil && s.fresh(ctx, b.actor, at) == nil {
+		d = b.policy.Load().Decide(in, name, port)
+	}
 	if !d.Allowed {
 		return d, &RefusedError{Reason: d.Reason}
 	}
@@ -287,7 +300,7 @@ func (g *Gateway) serveStream(ctx context.Context, b *binding, conn net.Conn, po
 		g.record(b.actor, "tls", sni, port, &RefusedError{Reason: fmt.Sprintf("SNI %s differs from CONNECT target %s", sni, connectHost)})
 		return
 	}
-	d, err := g.decide(b, policy.InputTLSHello, sni, port)
+	d, err := g.decide(ctx, b, policy.InputTLSHello, sni, port)
 	if err != nil {
 		g.record(b.actor, "tls", sni, port, err)
 		return
@@ -389,7 +402,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, proto, name, port, &RefusedError{Reason: fmt.Sprintf("authority %s differs from CONNECT target %s", name, h.connectHost)})
 		return
 	}
-	d, err := h.g.decide(h.b, in, name, port)
+	d, err := h.g.decide(r.Context(), h.b, in, name, port)
 	if err != nil {
 		h.refuse(w, proto, name, port, err)
 		return

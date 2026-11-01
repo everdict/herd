@@ -3,9 +3,11 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/egress/policy"
 	"github.com/everdict/herd/store"
 	"google.golang.org/grpc/codes"
@@ -109,6 +111,9 @@ func (s *Server) UpdateActorEgressPolicy(ctx context.Context, req *ateapi.Update
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	if err := inForce(ctx); err != nil {
+		return nil, err
+	}
 	v, err := egressView(r)
 	return v, toStatus(err)
 }
@@ -133,6 +138,9 @@ func (s *Server) DeleteActorEgressPolicy(ctx context.Context, req *ateapi.Delete
 	if err := s.cfg.Store.Delete(ctx, k, cur.UID, cur.Version); err != nil {
 		return nil, toStatus(err)
 	}
+	if err := inForce(ctx); err != nil {
+		return nil, err
+	}
 	return v, nil
 }
 
@@ -145,4 +153,19 @@ func (s *Server) deleteEgressOf(ctx context.Context, space, actor string) error 
 		return err
 	}
 	return s.cfg.Store.Delete(ctx, cur.Key, cur.UID, cur.Version)
+}
+
+// inForce waits until a policy write that may narrow what an actor is allowed is in force: herd-egress decides only on
+// a policy it read within egress.PolicyLease, so once that long has passed since the write, every herd-egress serving
+// the actor decides by it (PLT-229). A Create needs no wait: it widens a deny-all, and herd-egress reads again before
+// it refuses.
+func inForce(ctx context.Context) error {
+	t := time.NewTimer(egress.PolicyLease)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	}
 }
