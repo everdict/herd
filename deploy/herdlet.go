@@ -30,6 +30,7 @@ import (
 	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
+	"github.com/everdict/herd/snapstore/bundlecache"
 	"github.com/everdict/herd/snapstore/disk"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/vmm"
@@ -55,6 +56,9 @@ type Herdlet struct {
 	Worker         string
 	StateDir       string
 	Snapshots      string
+	// BundleCacheMiB bounds <state>/bundles, the node's copy of the snapshot objects it wrote to or read from an S3
+	// store (-bundle-cache, PLT-227): a restore of one it holds reads no S3 bytes. 0 keeps none.
+	BundleCacheMiB int
 	Slots          int
 	Labels         string
 	// Router overrides the herd-router tunnel address a join handed out.
@@ -130,6 +134,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.IntVar(&h.Slots, "slots", 4, "actors this host holds")
 	fs.StringVar(&h.StateDir, "state", "/var/lib/herdlet", "state directory: join grant, VMs, shares, image cache")
 	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's, for a herd-api without -s3 (default: <state>/snapshots; ignored when the join handed out an S3 store)")
+	fs.IntVar(&h.BundleCacheMiB, "bundle-cache", DefaultBundleCacheMiB, "MiB of snapshot bundles kept in <state>/bundles when snapshots are in S3, least recently used evicted first: a restore of a bundle this node wrote or read before (a template's golden) reads it from there, not from S3 (0: none)")
 	fs.StringVar(&h.Router, "router", "", "herd-router tunnel address (default: the one herd-api handed out at join)")
 	fs.StringVar(&h.Kernel, "kernel", "/usr/local/share/herd/kernel", "guest kernel from guest/build.sh (bzImage on amd64, Image on arm64)")
 	fs.StringVar(&h.Initrd, "initrd", "/usr/local/share/herd/initrd.img", "guest initramfs with herd-guest as /init")
@@ -440,13 +445,17 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	bundles, err := h.bundles(st.Grant)
+	if err != nil {
+		return err
+	}
 	host, m, why, err := h.build(ctx)
 	if err != nil {
 		return err
 	}
 	log.Printf("herdlet: rootfs images: %s", why)
 	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, VMM: host.VMM,
-		Snapshots: snaps, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow,
+		Snapshots: snaps, Bundles: bundles, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow,
 		Boot: vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}}
 	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console
 	// locked is VOLUMES at once).
@@ -581,6 +590,23 @@ func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
 		dir = filepath.Join(h.StateDir, "snapshots")
 	}
 	return disk.New(dir)
+}
+
+// DefaultBundleCacheMiB is -bundle-cache's default.
+const DefaultBundleCacheMiB = 20 << 10
+
+// bundles is the node's bundle cache: none when snapshots are on a local or shared disk, which a restore reads as
+// fast as a copy, or when -bundle-cache is 0.
+func (h *Herdlet) bundles(g join.Grant) (*bundlecache.Cache, error) {
+	if g.Snapshots == nil || h.BundleCacheMiB <= 0 {
+		return nil, nil
+	}
+	c, err := bundlecache.New(filepath.Join(h.StateDir, "bundles"), int64(h.BundleCacheMiB)<<20)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("herdlet: snapshot bundles kept in %s, up to %d MiB", filepath.Join(h.StateDir, "bundles"), h.BundleCacheMiB)
+	return c, nil
 }
 
 // imageSource is the registry the herdlet pulls template images from, logged in with -registry-auth's credentials

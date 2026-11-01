@@ -3,6 +3,7 @@ package herdlet
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/everdict/herd/link"
@@ -60,10 +61,7 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			a.reopen(w.VM)
 			return link.Outcome{Result: link.ResultDone}
 		}
-		if _, err := a.Snapshots.Verify(ctx, w.Snapshot.Key, w.Snapshot.Digest); err != nil {
-			return classify(err)
-		}
-		rc, err := a.Snapshots.Open(ctx, w.Snapshot.Key)
+		rc, err := a.openSnapshot(ctx, *w.Snapshot)
 		if err != nil {
 			return classify(err)
 		}
@@ -90,7 +88,12 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 // machineSnapshot writes the bundle to a local file first and then puts it in the snapshot store, so a store that
 // fails mid-way leaves no object and the outcome says so.
 func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) link.Outcome {
-	f, err := os.CreateTemp("", "herd-bundle-*")
+	create := func() (*os.File, error) { return os.CreateTemp("", "herd-bundle-*") }
+	if a.Bundles != nil {
+		// Beside the cache, so keeping the bundle there is a rename.
+		create = a.Bundles.CreateTemp
+	}
+	f, err := create()
 	if err != nil {
 		return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
 	}
@@ -106,6 +109,12 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	obj, err := a.Snapshots.Put(ctx, w.SnapshotKey, f)
 	if err != nil {
 		return classify(err)
+	}
+	if a.Bundles != nil {
+		// A snapshot this node took (a template's golden) is restored here from its own copy (PLT-227).
+		if err := a.Bundles.Keep(f.Name(), obj.Digest); err != nil {
+			log.Printf("herdlet: snapshot %s: not kept in the bundle cache: %v", obj.Key, err)
+		}
 	}
 	return link.Outcome{Result: link.ResultDone, Snapshot: &link.SnapshotRef{
 		Key: obj.Key, Digest: obj.Digest, Fidelity: snap.Fidelity, RestoreFamily: snap.RestoreFamily,

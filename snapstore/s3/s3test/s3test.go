@@ -51,6 +51,9 @@ type Server struct {
 	// noChecksum makes HEAD answer without x-amz-checksum-sha256 (an endpoint that keeps no checksums).
 	noChecksum bool
 	puts       int
+	// readRate, if positive, is the bytes per second a GET's body is sent at (a slow link to the endpoint).
+	readRate int64
+	served   int64
 }
 
 // New returns a server that accepts creds in region.
@@ -79,6 +82,56 @@ func (s *Server) SetNoChecksum(on bool) {
 	s.noChecksum = on
 }
 
+// SetReadRate sends every GET's body at bytesPerSecond from now on (0: as fast as the connection goes), as an
+// endpoint across a slow link does.
+func (s *Server) SetReadRate(bytesPerSecond int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readRate = bytesPerSecond
+}
+
+// Served counts the object bytes the server sent in GET bodies.
+func (s *Server) Served() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.served
+}
+
+// send writes data as a GET's body, at the read rate if one is set, and counts what it sent.
+func (s *Server) send(w http.ResponseWriter, r *http.Request, data []byte) {
+	s.mu.Lock()
+	rate := s.readRate
+	s.mu.Unlock()
+	const tick = 20 * time.Millisecond
+	start, sent := time.Now(), int64(0)
+	for len(data) > 0 {
+		n := len(data)
+		if rate > 0 {
+			// What the link carried by now, at least one byte per tick.
+			n = int(min(int64(len(data)), max(1, rate*int64(time.Since(start))/int64(time.Second)-sent)))
+		}
+		m, err := w.Write(data[:n])
+		sent += int64(m)
+		s.mu.Lock()
+		s.served += int64(m)
+		s.mu.Unlock()
+		if err != nil {
+			return
+		}
+		data = data[n:]
+		if rate > 0 && len(data) > 0 {
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-time.After(tick):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
+}
+
 // Puts counts the PUTs the server stored.
 func (s *Server) Puts() int {
 	s.mu.Lock()
@@ -99,6 +152,17 @@ func (s *Server) Tamper(path string) bool {
 	o.data = d
 	s.objects[path] = o
 	return true
+}
+
+// Size is the length of the object at path ("/bucket/key"), or -1.
+func (s *Server) Size(path string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.objects[path]
+	if !ok {
+		return -1
+	}
+	return int64(len(o.data))
 }
 
 // Keys lists the stored paths.
@@ -162,7 +226,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
-			_, _ = w.Write(o.data)
+			s.send(w, r, o.data)
 		}
 	case http.MethodDelete:
 		s.mu.Lock()

@@ -88,15 +88,17 @@ type API struct {
 	// S3 (s3://bucket[/prefix]), if set, keeps snapshots in that bucket at S3Endpoint instead of the Snapshots
 	// directory, and every join hands herdlets the store (join.Grant.Snapshots). S3Credentials default to
 	// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN.
-	S3              string
-	S3Endpoint      string
-	S3Region        string
-	S3Credentials   s3.Credentials
-	CallTimeout     time.Duration
-	Reconcile       time.Duration
-	AdvertiseTunnel string
-	CredentialTTL   time.Duration
-	GoldenWarmup    time.Duration
+	S3            string
+	S3Endpoint    string
+	S3Region      string
+	S3Credentials s3.Credentials
+	CallTimeout   time.Duration
+	// RestoreBandwidthMiB is apiserver.Config.RestoreBandwidth in MiB/s (-restore-bandwidth).
+	RestoreBandwidthMiB float64
+	Reconcile           time.Duration
+	AdvertiseTunnel     string
+	CredentialTTL       time.Duration
+	GoldenWarmup        time.Duration
 
 	// Key, if set, is used instead of KeyFile (all-in-one reads or creates its own).
 	Key []byte
@@ -115,6 +117,7 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
 	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
 	fs.DurationVar(&a.CallTimeout, "call-timeout", 30*time.Second, "how long to wait for a herdlet's answer")
+	fs.Float64Var(&a.RestoreBandwidthMiB, "restore-bandwidth", apiserver.DefaultRestoreBandwidth>>20, "MiB/s a herdlet is expected to read a snapshot object it restores at, at least: a restore's call waits -call-timeout plus the object's size at this rate")
 	fs.DurationVar(&a.Reconcile, "reconcile", 10*time.Second, "how often to retry owed workflow steps")
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
 	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
@@ -148,7 +151,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	hub := link.NewHub()
 	srv, err := apiserver.New(apiserver.Config{
 		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, CallTimeout: a.CallTimeout,
-		GoldenWarmup: a.GoldenWarmup,
+		RestoreBandwidth: int64(a.RestoreBandwidthMiB * (1 << 20)), GoldenWarmup: a.GoldenWarmup,
 	})
 	if err != nil {
 		return err

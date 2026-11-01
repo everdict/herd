@@ -18,6 +18,7 @@ import (
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
+	"github.com/everdict/herd/snapstore/bundlecache"
 	"github.com/everdict/herd/tunnel"
 	"github.com/everdict/herd/vmm"
 	"google.golang.org/grpc"
@@ -32,6 +33,9 @@ type Agent struct {
 	Warm      map[string]int
 	VMM       vmm.VMM
 	Snapshots snapstore.Store
+	// Bundles, if set, is this node's copy of the snapshot objects it wrote or fetched (PLT-227): a restore of one it
+	// holds reads no store, and one it does not hold is read from the store once and kept.
+	Bundles *bundlecache.Cache
 	// HypervisorVersion and Reason are reported with the capabilities.
 	HypervisorVersion string
 	Reason            string
@@ -329,10 +333,7 @@ func (a *Agent) restore(ctx context.Context, w link.Work) link.Outcome {
 	if w.Snapshot == nil {
 		return link.Outcome{Result: link.ResultFailed, Reason: "restore names no snapshot"}
 	}
-	if _, err := a.Snapshots.Verify(ctx, w.Snapshot.Key, w.Snapshot.Digest); err != nil {
-		return classify(err)
-	}
-	rc, err := a.Snapshots.Open(ctx, w.Snapshot.Key)
+	rc, err := a.openSnapshot(ctx, *w.Snapshot)
 	if err != nil {
 		return classify(err)
 	}
@@ -345,6 +346,18 @@ func (a *Agent) restore(ctx context.Context, w link.Work) link.Outcome {
 		return classify(err)
 	}
 	return link.Outcome{Result: link.ResultDone}
+}
+
+// openSnapshot returns the bytes of the snapshot object ref names, verified to be its digest: through the bundle
+// cache when the herdlet has one, else verified in the store and then read from it.
+func (a *Agent) openSnapshot(ctx context.Context, ref link.SnapshotRef) (io.ReadCloser, error) {
+	if a.Bundles != nil {
+		return a.Bundles.Open(ctx, a.Snapshots, ref.Key, ref.Digest)
+	}
+	if _, err := a.Snapshots.Verify(ctx, ref.Key, ref.Digest); err != nil {
+		return nil, err
+	}
+	return a.Snapshots.Open(ctx, ref.Key)
 }
 
 // DefaultRecheck is how often a herdlet re-reads its capabilities when Agent.Recheck is zero.

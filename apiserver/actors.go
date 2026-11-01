@@ -116,6 +116,11 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 		Actor: &link.ActorRef{Space: ar.rec.Key.Space, Name: ar.rec.Key.Name, UID: ar.rec.UID}}
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
+		// The herdlet may have to read the whole object from the store first: its call waits for that too. A Stat
+		// that fails leaves the usual timeout, and the herdlet answers what is wrong with the object.
+		if obj, err := s.cfg.Snapshots.Stat(ctx, ar.st.Restore.Key); err == nil {
+			ctx = context.WithValue(ctx, moving{}, obj.Size)
+		}
 	}
 	o := s.step(ctx, ar, w)
 	switch o.Result {

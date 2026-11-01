@@ -53,6 +53,11 @@ type Config struct {
 	// same way on every pass and never converge; the herdlet also runs the retry only after an earlier exchange on
 	// the same VM that it is still finishing, which this bound covers too.
 	ReconcileCallTimeout time.Duration
+	// RestoreBandwidth is the slowest rate, in bytes per second, at which a herdlet is expected to read a snapshot
+	// object it restores from the snapshot store (default DefaultRestoreBandwidth). A restore's call waits its usual
+	// timeout plus the object's size at this rate, so a node that does not hold the object yet (a golden fetched from
+	// S3 for the first time) is not cut off by a timeout sized for work that moves no bytes (PLT-227).
+	RestoreBandwidth int64
 	// GoldenWarmup is how long a template's golden actor runs before its snapshot is taken. Substrate waits 20 s
 	// (herd-api's -golden-warmup default); zero takes it as soon as the actor runs.
 	GoldenWarmup time.Duration
@@ -82,6 +87,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ReconcileCallTimeout <= 0 {
 		cfg.ReconcileCallTimeout = 4 * cfg.CallTimeout
 	}
+	if cfg.RestoreBandwidth <= 0 {
+		cfg.RestoreBandwidth = DefaultRestoreBandwidth
+	}
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}}
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
@@ -109,13 +117,24 @@ func (s *Server) lock(k store.Key) func() {
 	return mu.Unlock
 }
 
+// DefaultRestoreBandwidth is Config.RestoreBandwidth's default: 8 MiB/s, so a 512 MiB MEMORY bundle adds 64 s to its
+// restore's call.
+const DefaultRestoreBandwidth = 8 << 20
+
 // reconciling marks a context as Reconcile's: its herdlet calls are bounded by ReconcileCallTimeout.
 type reconciling struct{}
+
+// moving carries the size of the snapshot object a herdlet call reads: the call waits for it at RestoreBandwidth on
+// top of its timeout.
+type moving struct{}
 
 func (s *Server) call(ctx context.Context, worker string, w link.Work) link.Outcome {
 	timeout := s.cfg.CallTimeout
 	if ctx.Value(reconciling{}) != nil {
 		timeout = s.cfg.ReconcileCallTimeout
+	}
+	if n, ok := ctx.Value(moving{}).(int64); ok && n > 0 {
+		timeout += time.Duration(float64(n) / float64(s.cfg.RestoreBandwidth) * float64(time.Second))
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
