@@ -10,6 +10,7 @@ import (
 
 	"fmt"
 	"github.com/everdict/herd/guest"
+	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/internal/plist"
 	"github.com/everdict/herd/vmm/cloudhypervisor"
 	"os"
@@ -173,6 +174,22 @@ func Doctor(h *Herdlet, host Host) []Check {
 			err = fmt.Errorf("guest kernel %s is %s, this host is %s: install herd-guest-%s from guest/build.sh all", h.Kernel, arch, host.GOARCH, host.GOARCH)
 		}
 		add("kernel arch", err, arch)
+	}
+	// The node's registry logins for private template images (PLT-222): which hosts they cover, never the secrets.
+	hosts, err := registry.DockerConfig{Path: h.RegistryAuth}.Hosts()
+	switch {
+	case h.RegistryAuth == "":
+		add("registry auth", nil, "none (no -registry-auth): images are pulled anonymously")
+	case err != nil:
+		add("registry auth", err, "")
+	case len(hosts) == 0:
+		add("registry auth", nil, fmt.Sprintf("none: %s is absent or empty, so images are pulled anonymously", h.RegistryAuth))
+	default:
+		detail := fmt.Sprintf("%s: logins for %s", h.RegistryAuth, strings.Join(hosts, ", "))
+		if fi, err := os.Stat(h.RegistryAuth); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			detail += fmt.Sprintf(" (mode %04o: other users can read it; make it 0600)", fi.Mode().Perm())
+		}
+		add("registry auth", nil, detail)
 	}
 	return cs
 }

@@ -1,6 +1,7 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
 # herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
-# keeps snapshots in the S3 store the join hands it, so it takes no -snapshots.
+# keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
+# docker config file, is the node's registry logins for private template images (-registry-auth, rendered 0600).
 # The resources are the herdlet's own: each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under
 # /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (-slots), not the task's.
 # Rendered by deploy/artifacts; edit the template, not this file.
@@ -43,6 +44,14 @@ job "herdlet" {
         perms       = "0600"
       }
 
+      # The node's registry logins for private template images (-registry-auth): the variable's registry_auth, a docker
+      # config file; without it the file is empty and pulls are anonymous.
+      template {
+        data        = "{{ with nomadVar \"nomad/jobs/herdlet\" }}{{ range $k, $v := . }}{{ if eq $k \"registry_auth\" }}{{ $v }}{{ end }}{{ end }}{{ end }}"
+        destination = "secrets/registry-auth.json"
+        perms       = "0600"
+      }
+
       config {
         command = "local/herdlet"
         args = [
@@ -52,6 +61,7 @@ job "herdlet" {
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
+          "-registry-auth", "secrets/registry-auth.json",
         ]
       }
     }

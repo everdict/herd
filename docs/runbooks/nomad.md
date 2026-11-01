@@ -47,6 +47,15 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    nomad var put nomad/jobs/herdlet join_token="$(cat join.token)"
    ```
 
+   For private template images, the herdlet variable also holds the nodes' registry logins, `registry_auth`: a docker
+   config file (`auths`, as all-in-one.md step 7 shows). The job renders it to `secrets/registry-auth.json`, mode
+   0600, and runs the herdlet with `-registry-auth` on it; without the key the file is empty and pulls are anonymous.
+   `nomad var put` replaces the whole variable, so give both keys:
+
+   ```sh
+   nomad var put nomad/jobs/herdlet join_token="$(cat join.token)" registry_auth=@registry-auth.json
+   ```
+
 3. Run the job pair:
 
    ```sh

@@ -83,6 +83,9 @@ type Herdlet struct {
 	// ate-secret://dir/<name>/<tail> credentials from. herd all-in-one hands it its own -secrets. On a Linux host,
 	// whose herd-egress runs apart, give herd-egress the flag.
 	Secrets string
+	// RegistryAuth is the node's registry logins for image pulls (-registry-auth, PLT-222): a docker config file
+	// (`auths`) read at every pull, so a changed file needs no restart. Empty, or no file there: anonymous pulls.
+	RegistryAuth string
 
 	// EgressBindings, EgressCA, EgressProxyPort, EgressDNSPort and NetPool are a Linux host's VM networks (ADR A-18,
 	// linuxNet): herd-egress's bindings file and CA, its transparent and DNS ports, and the pool VM links are leased from.
@@ -144,6 +147,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.HostFirewall, "host-firewall", tapnet.FirewallInsert, "when another table's input chain drops by policy (ufw, Tailscale): insert each VM's accepts for exactly its flows to herd-egress there and remove them with the VM, or refuse to start VMs (Linux: insert|refuse)")
 	fs.Var(&h.EgressAllow, "egress-allow-prefix", egressAllowUsage)
 	fs.StringVar(&h.Secrets, "secrets", "", "directory for ate-secret://dir/<name>/<tail> credentials of the in-process herd-egress (macOS; on Linux, herd-egress -secrets)")
+	fs.StringVar(&h.RegistryAuth, "registry-auth", "", "registry logins image pulls use, a docker config file (auths, per registry host: auth = base64 user:password, or identitytoken), read at every pull; empty, or no file there: anonymous pulls")
 }
 
 // RunFlags registers `herdlet run`'s flags: the host flags, and a herdlet credential to dial with instead of a join.
@@ -375,7 +379,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 	m, err := machine.New(machine.Config{
 		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), ShareDir: shares,
 		Network: host.Network,
-		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: &registry.Client{}, Builder: builder,
+		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: h.imageSource(), Builder: builder,
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}},
 		Base: base,
 	})
@@ -571,4 +575,13 @@ func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
 		dir = filepath.Join(h.StateDir, "snapshots")
 	}
 	return disk.New(dir)
+}
+
+// imageSource is the registry the herdlet pulls template images from, logged in with -registry-auth's credentials.
+func (h *Herdlet) imageSource() *registry.Client {
+	c := &registry.Client{}
+	if h.RegistryAuth != "" {
+		c.Credentials = registry.DockerConfig{Path: h.RegistryAuth}
+	}
+	return c
 }

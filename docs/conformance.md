@@ -201,6 +201,12 @@ herd conformance --target herd-all-in-one --endpoint 127.0.0.1:7443 --token-file
 herd conformance --target herd-join --endpoint herd-api.internal:7443 --token-file /tmp/herd.token --atespace conformance --template agent --router herd-api.internal:8443 --probe env-exec --volume-path /work/conformance.txt --expect-fidelity VOLUMES --move-from pool=mac --move-to pool=ubuntu
 ```
 
+A template whose image is private (every Everdict session image on ghcr.io is) boots only on a node that holds a
+registry login for its host: `-registry-auth` on the herdlet or all-in-one names a docker config file (runbooks/all-in-one.md
+step 7). Run `herdlet doctor` with the node's flags first: its `registry auth` line lists the hosts the node has logins
+for, or says pulls are anonymous; without a login CreateActor fails `FAILED_PRECONDITION` with the token realm's
+`403 Forbidden`.
+
 The optional cases on a real host (here herd-api and herd-router on the host's LAN address; the template `pair` has two containers mounting one DurableDir volume; the
 secret file sits in herd-egress's `-secrets` directory as `conformance/token`, and `/tmp/cred` holds the same value).
 The all-in-one takes that directory as its own `-secrets` and hands it to its herd-egress, so it runs as:

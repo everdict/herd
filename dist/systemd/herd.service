@@ -1,4 +1,6 @@
 # herd all-in-one: herd-api (bbolt), herd-router, herd-egress and a herdlet in one process (docs/runbooks/all-in-one.md).
+# /etc/herd/registry-auth.json (0600), a docker config file, is the node's registry logins for private template images
+# (-registry-auth); without the file pulls are anonymous.
 # Each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under /sys/fs/cgroup/herd (-vm-cgroup), not in
 # this unit's, so a MemoryMax here would limit the herdlet alone; the VMs end with the herdlet process.
 # Rendered by deploy/artifacts; edit the template, not this file.
@@ -11,7 +13,7 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/herd -data /var/lib/herd \
     -listen 0.0.0.0:7443 -router-listen 0.0.0.0:8443 -tunnel-listen 127.0.0.1:7444 \
     -kernel /usr/local/share/herd/kernel -initrd /usr/local/share/herd/initrd.img \
-    -virtiofsd /usr/local/libexec/herd/virtiofsd
+    -virtiofsd /usr/local/libexec/herd/virtiofsd -registry-auth /etc/herd/registry-auth.json
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

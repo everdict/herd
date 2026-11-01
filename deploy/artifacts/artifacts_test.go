@@ -220,10 +220,12 @@ func TestMacPlistsPassSecrets(t *testing.T) {
 	want := map[string][]string{
 		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@", "-token-file", "/usr/local/etc/herd/join.token",
 			"-state", "/usr/local/var/herdlet", "-kernel", "/usr/local/share/herd/kernel",
-			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets"},
+			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets",
+			"-registry-auth", "/usr/local/etc/herd/registry-auth.json"},
 		"launchd/com.everdict.herd.plist": {"-data", "/usr/local/var/herd", "-listen", "0.0.0.0:7443",
 			"-router-listen", "0.0.0.0:8443", "-kernel", "/usr/local/share/herd/kernel",
-			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets"},
+			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets",
+			"-registry-auth", "/usr/local/etc/herd/registry-auth.json"},
 	}
 	for _, f := range files {
 		args, ok := want[f.Path]
@@ -325,6 +327,43 @@ func TestHerdletsVMsAreNotTheirTasksMemory(t *testing.T) {
 					t.Errorf("%s keeps its VMs in the herdlet's own cgroup", p)
 				}
 			}
+		}
+	}
+}
+
+// TestEveryHerdletPassesRegistryAuth (criterion private-pull): every artifact that runs a herdlet (herdlet join, herd
+// all-in-one; systemd, launchd, Nomad) passes -registry-auth, so a node's private template images pull with its
+// registry logins once the file is there; the Nomad job renders the file from its variable's registry_auth, 0600.
+func TestEveryHerdletPassesRegistryAuth(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f.Path, err)
+		}
+		for _, inv := range invs {
+			if inv.Binary != "herd" && inv.Binary != "herdlet" {
+				continue
+			}
+			seen[f.Path] = true
+			if i := slices.Index(inv.Args, "-registry-auth"); i < 0 || i+1 >= len(inv.Args) || inv.Args[i+1] == "" {
+				t.Errorf("%s runs %s without -registry-auth: %q", f.Path, inv.Binary, inv.Args)
+			}
+		}
+		if f.Path == "nomad/herdlet.nomad.hcl" {
+			tmpl := regexp.MustCompile(`(?s)template \{\s*data\s*=\s*"[^\n]*registry_auth[^\n]*"\s*destination\s*=\s*"secrets/registry-auth.json"\s*perms\s*=\s*"0600"`)
+			if !tmpl.Match(f.Data) {
+				t.Errorf("%s does not render secrets/registry-auth.json 0600 from the variable's registry_auth", f.Path)
+			}
+		}
+	}
+	for _, p := range []string{"systemd/herd.service", "systemd/herdlet.service", "launchd/com.everdict.herd.plist", "launchd/com.everdict.herdlet.plist", "nomad/herdlet.nomad.hcl"} {
+		if !seen[p] {
+			t.Errorf("%s runs no herdlet", p)
 		}
 	}
 }

@@ -86,6 +86,11 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    sudo herdlet join <control-host>:7443 --token "<join token>"
    ```
 
+4. Optional: private images. The unit passes `-registry-auth /etc/herd/registry-auth.json`: write the node's registry
+   logins there, a docker config file, mode 0600, as all-in-one.md step 7 shows; `sudo herdlet doctor -registry-auth
+   /etc/herd/registry-auth.json` lists the hosts it holds logins for. Every node that may run a private image needs
+   the file; it is read at every pull, so no restart.
+
 ## On each Mac node (Apple Silicon)
 
 ```sh
@@ -105,7 +110,9 @@ On a Mac the herdlet runs herd-egress itself, in-process (each VM's network devi
 userspace stack, ADR A-21), with the egress credential the join granted. It resolves an egress policy's
 `ate-secret://dir/<name>/<tail>` from its `-secrets` directory, which the launchd daemon sets to
 `/usr/local/etc/herd/secrets` (put the file `<name>/<tail>` there, mode 0600); without `-secrets` it refuses every
-request whose credential it must inject. `herdlet doctor` fails a herdlet that is not
+request whose credential it must inject. The daemon also passes `-registry-auth
+/usr/local/etc/herd/registry-auth.json`, the node's registry logins for private images (a docker config file, mode
+0600, as all-in-one.md step 7 shows; without it pulls are anonymous). `herdlet doctor` fails a herdlet that is not
 signed with `com.apple.security.virtualization` (the release's is; `scripts/release.sh` signs it on a Mac) and a
 kernel of the other architecture. The Mac declares MEMORY only while its save/restore probe passed and a user is at
 the console with the screen unlocked, VOLUMES otherwise; a lock, an unlock or a wake reaches herd-api's worker record

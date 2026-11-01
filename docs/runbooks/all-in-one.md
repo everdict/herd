@@ -77,6 +77,26 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
    Without `-secrets` herd-egress has no credential provider and refuses a request whose credential it must inject.
 
+7. Optional: private images. Substrate's API carries no pull secret, so, as a Kubernetes node's container runtime
+   does, the node holds its registry logins (PLT-222): `-registry-auth` names a docker config file (`auths`, per
+   registry host: `auth`, base64 of `user:password`, or `username` and `password`, and optionally `identitytoken`).
+   A pull answers the registry's challenge with the host's login: Basic credentials to a Bearer challenge's token realm
+   (an identity token as an OAuth2 refresh token), or to a Basic-only registry itself; a login is never sent to a
+   plain-HTTP realm. The file is read at every pull, so writing or changing it needs no restart; without it pulls are
+   anonymous, as before, and a private image's pull fails with the realm's 403. The shipped units pass
+   `-registry-auth /etc/herd/registry-auth.json`. For a private image on ghcr.io (a token with `read:packages`):
+
+   ```sh
+   AUTH=$(printf '%s:%s' <github user> <token> | base64 | tr -d '\n')
+   sudo install -d /etc/herd && sudo install -m 0600 /dev/null /etc/herd/registry-auth.json
+   printf '{"auths": {"ghcr.io": {"auth": "%s"}}}\n' "$AUTH" | sudo tee /etc/herd/registry-auth.json >/dev/null
+   sudo herdlet doctor -registry-auth /etc/herd/registry-auth.json
+   ```
+
+   `herdlet doctor` prints `registry auth` with the hosts the file holds logins for (never the secrets), `none` when
+   there is no file, and fails a file it cannot read. A `~/.docker/config.json` that `docker login` wrote with a
+   `credsStore` or `credHelpers` holds no secret in `auths`: herd does not run credential helpers, so write `auths`.
+
 ## macOS (Apple Silicon, macOS 14+)
 
 1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement):
@@ -113,3 +133,6 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    TOKEN=$(sudo herd-api token -key-file /usr/local/var/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
    herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
    ```
+
+5. Optional: private images. The launchd job passes `-registry-auth /usr/local/etc/herd/registry-auth.json`; write
+   the docker config file there, mode 0600, as Ubuntu step 7 says (a Mac's herdlet pulls exactly as Linux's does).
