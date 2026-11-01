@@ -55,11 +55,14 @@ type Volume struct {
 type Container struct {
 	Name string `json:"name"`
 	// Image is the container's read-only root image (erofs or ext4) as a block device; a writable layer goes on top.
-	Image        Image         `json:"image"`
-	Command      []string      `json:"command"`
-	Args         []string      `json:"args,omitempty"`
-	Env          []EnvVar      `json:"env,omitempty"`
-	Workdir      string        `json:"workdir,omitempty"`
+	Image   Image    `json:"image"`
+	Command []string `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	Env     []EnvVar `json:"env,omitempty"`
+	Workdir string   `json:"workdir,omitempty"`
+	// User is the image's USER (name or uid, optionally :group or :gid), resolved in the container's rootfs as Docker
+	// does (oci.ResolveUser); empty is root.
+	User         string        `json:"user,omitempty"`
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 }
 

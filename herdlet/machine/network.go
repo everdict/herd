@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -86,4 +87,28 @@ func (m *Machines) withGuestBootError(vmID string, err error) error {
 		return fmt.Errorf("%w (%v)", gerr, err)
 	}
 	return err
+}
+
+// ErrContainerExited is answered when herd-guest recorded that a container's main process ended while its VM runs
+// (initd.ExitPath); the guest's account (status and last output) follows it.
+var ErrContainerExited = errors.New("machine: a container's main process ended")
+
+// ContainerExit answers the container exits herd-guest recorded in the share of the actor's VM, wrapping
+// ErrContainerExited, or nil when there is none. Like GuestBootError it reads through os.Root, at most maxBootError.
+func (m *Machines) ContainerExit(id string) error {
+	root, err := os.OpenRoot(m.ShareDir(id))
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	f, err := root.Open(initd.ExitPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, maxBootError))
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrContainerExited, strings.ToValidUTF8(strings.TrimSpace(string(b)), ""))
 }

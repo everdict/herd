@@ -8,7 +8,7 @@
 //
 //	herd-guest [serve] [-listen vsock://:8080] [-share-tag herd]     PID 1 of the microVM
 //	herd-guest serve -local <dir> [-listen unix:///path]              no VM: one local "container" rooted at dir
-//	herd-guest cinit -- <argv...>                                      a container's init
+//	herd-guest cinit [-report] -- <argv...>                            a container's init
 //	herd-guest shim <record dir>                                       runs one detached exec record
 //	herd-guest signal <pgid> <signal number>                           kill(-pgid, sig) inside a container
 package main
@@ -48,10 +48,14 @@ func main() {
 	case "signal":
 		err = signalGroup(args)
 	case "cinit":
+		report := len(args) > 0 && args[0] == oci.ReportFlag
+		if report {
+			args = args[1:]
+		}
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}
-		os.Exit(containerInit(args))
+		os.Exit(containerInit(args, report))
 	default:
 		err = serve(args)
 	}
@@ -114,6 +118,11 @@ func serve(args []string) error {
 		log.Printf("herd-guest: %d container(s) started", len(booted))
 		for _, b := range booted {
 			targets = append(targets, b.Target(rt))
+			go func() {
+				if err := initd.ReportExit(ctx, initd.DefaultLayout, b); err != nil && ctx.Err() == nil {
+					log.Printf("herd-guest: recording the exit of container %s in the share: %v", b.Name, err)
+				}
+			}()
 		}
 	}
 	g, err := agent.New(targets...)

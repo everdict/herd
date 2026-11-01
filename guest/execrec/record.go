@@ -115,6 +115,21 @@ func (s *Store) Create(m Meta) error {
 	return s.writeAtomic(path.Join(dir, FileCmd), []byte(Script(m)), 0o700)
 }
 
+// Chown hands a created record to uid:gid, the identity its shim runs as in the container: the shim reads the record
+// and writes its output, pgid and exit there.
+func (s *Store) Chown(id string, uid, gid int) error {
+	if !ValidID(id) {
+		return fmt.Errorf("execrec: invalid id %q", id)
+	}
+	dir := RelDir(id)
+	for _, name := range []string{dir, path.Join(dir, FileMeta), path.Join(dir, FileCmd)} {
+		if err := s.root.Lchown(name, uid, gid); err != nil {
+			return fmt.Errorf("execrec: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) writeAtomic(name string, data []byte, mode fs.FileMode) error {
 	tmp := name + ".tmp"
 	f, err := s.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)

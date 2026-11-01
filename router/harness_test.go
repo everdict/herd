@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,6 +64,8 @@ type stack struct {
 	rt         *router.Router
 	tunnels    *tunnel.Server
 	vms        *fakeguest.VMM
+	// exited holds the VMs whose hypervisor the herdlet is told exited (VM id → true).
+	exited     sync.Map
 	tun        *herdlet.Tunnel
 	dials      atomic.Int64 // tunnel dials the router made
 	resumes    atomic.Int64 // ResumeActor calls the router made
@@ -76,6 +79,17 @@ type stack struct {
 
 type stackOpts struct {
 	budget time.Duration
+}
+
+// exitingVMs is the fake hypervisor with an exit observer: a VM in exited has exited.
+type exitingVMs struct {
+	*fakeguest.VMM
+	exited *sync.Map
+}
+
+func (v exitingVMs) Exited(_ context.Context, id string) (bool, string, error) {
+	_, ok := v.exited.Load(id)
+	return ok, "powered off", nil
 }
 
 func (c countingTunnels) Connected(worker string) bool { return c.t.Connected(worker) }
@@ -191,7 +205,8 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	s.vms = fakeguest.New(fake.New(vmm.Capabilities{Platform: vmm.PlatformCloudHypervisor, Arch: "amd64",
 		SuspendMaxFidelity: vmm.FidelityMemory, RestoreFamily: "microvm-ch-amd64-test"}, nil), shortTempDir(t), []string{self, "shim"})
 	s.tun = &herdlet.Tunnel{Worker: "h1", Guests: countingGuests{s}}
-	agent := &herdlet.Agent{Worker: "h1", Class: apiserver.SandboxClass, Slots: 8, VMM: s.vms, Snapshots: snaps, Tunnel: s.tun}
+	agent := &herdlet.Agent{Worker: "h1", Class: apiserver.SandboxClass, Slots: 8, VMM: exitingVMs{s.vms, &s.exited}, Snapshots: snaps, Tunnel: s.tun,
+		Watch: 10 * time.Millisecond}
 	herdletCred := grpc.WithPerRPCCredentials(auth.Bearer(s.token(nil, true, "h1")))
 	linkCC, err := grpc.NewClient("passthrough:///"+s.apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), herdletCred)
 	if err != nil {

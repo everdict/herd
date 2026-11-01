@@ -208,6 +208,10 @@ type ExitReason string
 // nothing herd-api asked for stopped it.
 const ExitHypervisorExited ExitReason = "hypervisor-exited"
 
+// ExitContainerExited: a container's main process ended while its VM runs (herd-guest recorded its status and last
+// output); the actor serves nothing more, and a delete ends the VM.
+const ExitContainerExited ExitReason = "container-exited"
+
 // Exited reports a VM that stopped running on its own. The herdlet observed it; a herdlet that could not observe its
 // VM reports nothing, since unknown is not crashed.
 type Exited struct {

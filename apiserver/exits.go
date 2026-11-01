@@ -68,6 +68,9 @@ func (s *Server) crashActor(ctx context.Context, k store.Key, worker string, e l
 	}
 	now := time.Now()
 	msg := fmt.Sprintf("%s: VM %s on worker %s exited while the actor was running", e.Reason, e.VM, worker)
+	if e.Reason == link.ExitContainerExited {
+		msg = fmt.Sprintf("%s: a container of VM %s on worker %s ended while the actor was running", e.Reason, e.VM, worker)
+	}
 	if e.Detail != "" {
 		msg += ": " + e.Detail
 	}

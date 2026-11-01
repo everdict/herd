@@ -89,3 +89,17 @@ func (l *Local) Signal(_ context.Context, pgid int, sig syscall.Signal) error {
 	}
 	return syscall.Kill(-pgid, sig)
 }
+
+// ExitTarget is a Target whose main process can end (a container): once it has, the container runs nothing more and
+// a process cannot start in it.
+type ExitTarget interface {
+	Target
+	// Exited answers how the main process ended (its status and last output), or nil while it runs.
+	Exited() error
+}
+
+// OwnedTarget is a Target whose processes run as a user other than the guest's: exec records are handed to it.
+type OwnedTarget interface {
+	Target
+	Owner() (uid, gid int)
+}

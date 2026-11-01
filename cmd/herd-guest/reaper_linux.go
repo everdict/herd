@@ -22,7 +22,7 @@ var (
 	owned = map[int]bool{}
 )
 
-func reapedRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+func reapedRunner(ctx context.Context, extra []*os.File, name string, args ...string) ([]byte, error) {
 	// Output goes to a file, not a pipe: `crun run --detach` exits while the container keeps the stdio it inherited,
 	// and with a pipe Wait would block until the container exits (herd-guest never served on a real VM).
 	f, err := os.CreateTemp("", "herd-crun-out-")
@@ -33,6 +33,7 @@ func reapedRunner(ctx context.Context, name string, args ...string) ([]byte, err
 	defer f.Close()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout, cmd.Stderr = f, f
+	cmd.ExtraFiles = extra
 	mu.Lock()
 	err = cmd.Start()
 	if err == nil {

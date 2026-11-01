@@ -65,7 +65,7 @@ func TestSpecRefusesVolumeOutsideTheShare(t *testing.T) {
 
 func TestCrunCommands(t *testing.T) {
 	var calls []string
-	rt := &oci.Crun{Runner: func(_ context.Context, name string, args ...string) ([]byte, error) {
+	rt := &oci.Crun{Runner: func(_ context.Context, _ []*os.File, name string, args ...string) ([]byte, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}}
@@ -76,7 +76,7 @@ func TestCrunCommands(t *testing.T) {
 	tg.Signal(ctx, 42, syscall.SIGINT)
 	rt.Kill(ctx, "main", syscall.SIGTERM)
 	want := []string{
-		"/sbin/crun --root /run/crun run --detach --bundle /run/herd/containers/main main",
+		"/sbin/crun --root /run/crun run --detach --preserve-fds 2 --bundle /run/herd/containers/main main",
 		"/sbin/crun --root /run/crun exec --detach main /.herd/herd-guest shim /everdict/exec/abc",
 		"/sbin/crun --root /run/crun exec main /.herd/herd-guest signal 42 2",
 		"/sbin/crun --root /run/crun kill main 15",

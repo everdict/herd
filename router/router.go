@@ -56,6 +56,8 @@ const (
 	ReasonPermissionDenied Reason = "permission-denied"
 	ReasonActorNotFound    Reason = "actor-not-found"
 	ReasonActorDeleting    Reason = "actor-deleting"
+	// ReasonActorCrashed: the actor is CRASHED (its VM or a container of it ended); the detail is its crash message.
+	ReasonActorCrashed Reason = "actor-crashed"
 	// ReasonParkingBudget: the actor did not become reachable within the parking budget.
 	ReasonParkingBudget Reason = "parking-budget-exceeded"
 	// ReasonSuspended: the stream was cut because the actor is being suspended; re-attach after resume.
@@ -304,6 +306,10 @@ func (rt *Router) resolve(ctx context.Context, token, space, name string) (worke
 		rt.resume(token, space, name)
 	case ateapi.ActorState_ACTOR_STATE_DELETING:
 		return "", "", "", &routeError{http.StatusNotFound, codes.NotFound, ReasonActorDeleting, fmt.Sprintf("actor %s/%s is being deleted", space, name)}
+	case ateapi.ActorState_ACTOR_STATE_CRASHED:
+		// Terminal until a delete: waiting out the parking budget would only hide why.
+		return "", "", "", &routeError{http.StatusBadRequest, codes.FailedPrecondition, ReasonActorCrashed,
+			fmt.Sprintf("actor %s/%s is CRASHED: %s", space, name, a.GetStatus().GetCrash().GetMessage())}
 	}
 	return "", "", "actor is " + st.String(), nil
 }

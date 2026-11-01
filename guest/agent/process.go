@@ -189,6 +189,9 @@ func (g *Guest) StartProcess(ctx context.Context, md func(string) string, req *a
 	if err != nil {
 		return nil, err
 	}
+	if err := exited(c.t, 0); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
 	for k := range req.GetEnv() {
 		if !validEnvName(k) {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid environment variable name %q", k)
@@ -216,7 +219,20 @@ func (g *Guest) StartProcess(ctx context.Context, md func(string) string, req *a
 	if err := c.store.Create(m); err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
+	// herd-guest writes records as root; a container that runs as another user gets its records, or its shim could not
+	// write them.
+	if ot, ok := c.t.(OwnedTarget); ok {
+		if uid, gid := ot.Owner(); uid != 0 || gid != 0 {
+			if err := c.store.Chown(id, uid, gid); err != nil {
+				return nil, status.Errorf(codes.Internal, "%v", err)
+			}
+		}
+	}
 	if err := c.t.StartShim(ctx, execrec.Dir+"/"+id); err != nil {
+		// crun cannot exec into a container whose init is gone; say why it is gone.
+		if xerr := exited(c.t, ExitWait); xerr != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", xerr)
+		}
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	g.armTimeout(c, m)
@@ -460,4 +476,26 @@ func (g *Guest) SignalProcess(ctx context.Context, req *ateenv.SignalProcessRequ
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	return toProto(st), nil
+}
+
+// ExitWait bounds how long a failed start waits to learn that its container's main process has ended: crun refuses
+// an exec as soon as the init is gone, a moment before herd-guest reads the init's report.
+const ExitWait = time.Second
+
+// exited answers t's exit (ExitTarget), waiting up to wait for it to be known; nil if t runs or cannot end.
+func exited(t Target, wait time.Duration) error {
+	et, ok := t.(ExitTarget)
+	if !ok {
+		return nil
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if err := et.Exited(); err != nil {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(PollInterval / 4)
+	}
 }

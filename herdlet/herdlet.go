@@ -67,8 +67,8 @@ type Agent struct {
 	// reports its counts to herd-api as capacity.
 	Pool *machine.Pool
 	// Watch is how often the herdlet checks that the VMs it runs for actors still run, and tells herd-api of one whose
-	// hypervisor exited on its own; zero means DefaultWatch, negative never. Only a VMM that is a vmm.ExitObserver is
-	// watched.
+	// hypervisor exited on its own, or (with Machines) in whose share herd-guest recorded that a container ended; zero
+	// means DefaultWatch, negative never. Only a VMM that is a vmm.ExitObserver is watched for hypervisor exits.
 	Watch time.Duration
 
 	vms sync.Map // VM id → vmLock
@@ -134,7 +134,7 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		defer wg.Done()
 		a.watchCapabilities(wctx, reg.Capabilities, send)
 	}()
-	if _, ok := a.observer(); ok && a.Watch >= 0 {
+	if _, ok := a.observer(); (ok || a.Machines != nil) && a.Watch >= 0 {
 		// The watch stops with the link (before wg.Wait, which waits for it).
 		xctx, stopExits := context.WithCancel(ctx)
 		defer stopExits()

@@ -82,8 +82,10 @@ func Plan(t link.Template, roots map[string]image.Rootfs) (*initd.Plan, []string
 			devs[r.Path] = dev
 			disks = append(disks, r.Path)
 		}
-		ic := initd.Container{Name: c.Name, Image: initd.Image{Device: dev, FSType: r.FSType}, Command: argv(c, r.Config), Env: env(c, r.Config)}
-		if wd := r.Config.WorkingDir; wd != "" && wd != "/" && path.Clean(wd) == wd && strings.HasPrefix(wd, "/") {
+		ic := initd.Container{Name: c.Name, Image: initd.Image{Device: dev, FSType: r.FSType}, Command: argv(c, r.Config), Env: env(c, r.Config),
+			User: r.Config.User}
+		// Docker runs in the image's WORKDIR, cleaned (a trailing slash is still the directory).
+		if wd := path.Clean(r.Config.WorkingDir); r.Config.WorkingDir != "" && wd != "/" && strings.HasPrefix(wd, "/") {
 			ic.Workdir = wd
 		}
 		for _, m := range c.VolumeMounts {

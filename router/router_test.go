@@ -437,3 +437,35 @@ func parseSources(fset *token.FileSet, path string) (map[string]*ast.Package, er
 	}
 	return parser.ParseDir(fset, path, func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 }
+
+// TestCrashedActorIsFailedPrecondition (PLT-230): a request to a CRASHED actor is refused at once with
+// FAILED_PRECONDITION and the actor's crash message (what ended: the VM, or a container with its status and last
+// output), not parked until the budget ends in UNAVAILABLE "actor is CRASHED".
+func TestCrashedActorIsFailedPrecondition(t *testing.T) {
+	const budget = 3 * time.Second
+	s := startStack(t, stackOpts{budget: budget})
+	ctx := ctxT(t, 30*time.Second)
+	a := s.createActor(space1, "a1")
+	c := s.client(space1+"/a1", s.clientToken())
+	if _, err := listDir(ctx, c); err != nil {
+		t.Fatalf("while it runs: %v", err)
+	}
+	s.exited.Store(a.GetMetadata().GetUid(), true)
+	deadline := time.Now().Add(10 * time.Second)
+	for s.state(space1, "a1") != ateapi.ActorState_ACTOR_STATE_CRASHED {
+		if time.Now().After(deadline) {
+			t.Fatalf("actor is %v, want CRASHED", s.state(space1, "a1"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	reason, err := listDir(ctx, c)
+	wantCode(t, "a request to a CRASHED actor", err, codes.FailedPrecondition)
+	if msg := status.Convert(err).Message(); reason != string(router.ReasonActorCrashed) || !strings.Contains(msg, "CRASHED") ||
+		!strings.Contains(msg, "powered off") {
+		t.Errorf("herd-reason %q, message %q: want %s with the crash message", reason, msg, router.ReasonActorCrashed)
+	}
+	if took := time.Since(start); took > budget/2 {
+		t.Errorf("answered after %v: a CRASHED actor was parked", took)
+	}
+}

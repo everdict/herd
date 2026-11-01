@@ -49,11 +49,11 @@ func (a *Agent) watched() []string {
 }
 
 // watchExits checks every Watch that the VMs the herdlet runs for actors still run, and tells herd-api of each one
-// whose hypervisor exited without being asked to. A VM that could not be observed is checked again at the next tick:
-// unknown is not an exit.
+// whose hypervisor exited without being asked to, or (with Machines) in which herd-guest recorded that a container
+// ended. A VM that could not be observed is checked again at the next tick: unknown is not an exit.
 func (a *Agent) watchExits(ctx context.Context, send func(link.Up) error) {
 	o, ok := a.observer()
-	if !ok {
+	if !ok && a.Machines == nil {
 		return
 	}
 	every := a.Watch
@@ -95,24 +95,44 @@ func (a *Agent) checkExit(ctx context.Context, o vmm.ExitObserver, vm string, bo
 	if a.Machines != nil {
 		id = a.Machines.VMID(vm)
 	}
-	cctx, cancel := context.WithTimeout(ctx, bound)
-	exited, why, err := o.Exited(cctx, id)
-	cancel()
-	if err != nil || !exited {
-		return
+	var (
+		exited bool
+		why    string
+		err    error
+	)
+	if o != nil {
+		cctx, cancel := context.WithTimeout(ctx, bound)
+		exited, why, err = o.Exited(cctx, id)
+		cancel()
 	}
-	if a.Machines != nil {
+	reason := link.ExitHypervisorExited
+	switch {
+	case err == nil && exited:
+	case a.Machines == nil:
+		return
+	default:
+		// The VM runs (or could not be observed), but a container in it may have ended: herd-guest recorded it.
+		cerr := a.Machines.ContainerExit(vm)
+		if cerr == nil {
+			return
+		}
+		reason, why = link.ExitContainerExited, cerr.Error()
+	}
+	if reason == link.ExitHypervisorExited && a.Machines != nil {
 		// herd-guest left why its boot failed (a Cloud Hypervisor boot answers before the guest runs).
 		if gerr := a.Machines.GuestBootError(vm); gerr != nil {
 			why = gerr.Error() + "; " + why
+		}
+		if cerr := a.Machines.ContainerExit(vm); cerr != nil {
+			why = cerr.Error() + "; " + why
 		}
 	}
 	name := vm
 	if id != vm {
 		name += " (hypervisor id " + id + ")"
 	}
-	log.Printf("herdlet %s: VM %s exited on its own: %s", a.Worker, name, why)
-	if err := send(link.Up{Exited: &link.Exited{VM: vm, Reason: link.ExitHypervisorExited, Detail: why}}); err != nil {
+	log.Printf("herdlet %s: VM %s: %s: %s", a.Worker, name, reason, why)
+	if err := send(link.Up{Exited: &link.Exited{VM: vm, Reason: reason, Detail: why}}); err != nil {
 		log.Printf("herdlet %s: reporting the exit of VM %s: %v (tried again)", a.Worker, vm, err)
 		return
 	}

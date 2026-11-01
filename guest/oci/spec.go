@@ -2,7 +2,9 @@
 // initramfs. Spec writes the OCI runtime spec (config.json) of one container: its rootfs, the guest's pseudo
 // filesystems, its DurableDir volumes as bind mounts of subdirectories of the virtio-fs share, the guest files it is
 // given (resolv.conf, trust bundles with herd-egress's CA) as read-only binds, and herd-guest itself
-// at /.herd/herd-guest (read-only) so the container's init, the exec shim and the signal helper run inside it.
+// at /.herd/herd-guest (read-only) so the container's init, the exec shim and the signal helper run inside it. The
+// process runs as the image's USER (ResolveUser) with Docker's default capability set (DefaultCapabilities): the VM is
+// the isolation boundary, and images whose entrypoints chown or switch user (redis, nginx) need what Docker grants.
 package oci
 
 import (
@@ -26,16 +28,27 @@ type (
 		Linux    Linux   `json:"linux"`
 	}
 	Process struct {
-		Terminal        bool     `json:"terminal"`
-		User            User     `json:"user"`
-		Args            []string `json:"args"`
-		Env             []string `json:"env"`
-		Cwd             string   `json:"cwd"`
-		NoNewPrivileges bool     `json:"noNewPrivileges"`
+		Terminal bool     `json:"terminal"`
+		User     User     `json:"user"`
+		Args     []string `json:"args"`
+		Env      []string `json:"env"`
+		Cwd      string   `json:"cwd"`
+		// Capabilities must be set: crun grants a process without them no capability at all, so root in the
+		// container could neither chown nor switch user.
+		Capabilities    *Capabilities `json:"capabilities,omitempty"`
+		NoNewPrivileges bool          `json:"noNewPrivileges"`
 	}
 	User struct {
-		UID uint32 `json:"uid"`
-		GID uint32 `json:"gid"`
+		UID            uint32   `json:"uid"`
+		GID            uint32   `json:"gid"`
+		AdditionalGids []uint32 `json:"additionalGids,omitempty"`
+	}
+	Capabilities struct {
+		Bounding    []string `json:"bounding,omitempty"`
+		Effective   []string `json:"effective,omitempty"`
+		Inheritable []string `json:"inheritable,omitempty"`
+		Permitted   []string `json:"permitted,omitempty"`
+		Ambient     []string `json:"ambient,omitempty"`
 	}
 	Root struct {
 		Path     string `json:"path"`
@@ -57,6 +70,14 @@ type (
 	}
 )
 
+// DefaultCapabilities is Docker's default capability set (moby's oci/caps.DefaultCapabilities), in its order. A
+// container's process gets it as its bounding, effective and permitted sets; inheritable and ambient stay empty, as
+// in Docker, so a non-root USER keeps none of them across execve.
+var DefaultCapabilities = []string{
+	"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID",
+	"CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
+}
+
 // VolumeMount is one DurableDir volume bound into a container. Source must already be a directory inside the
 // share; the caller (initd) guarantees it, and Build refuses a source outside ShareDir.
 type VolumeMount struct {
@@ -74,11 +95,13 @@ type FileMount struct {
 
 // Config is what Build needs for one container.
 type Config struct {
-	Name     string
-	Rootfs   string
-	Args     []string
-	Env      []string
-	Cwd      string
+	Name   string
+	Rootfs string
+	Args   []string
+	Env    []string
+	Cwd    string
+	// User is the process's identity: ResolveUser's answer for the image's USER (zero: root).
+	User     User
 	ShareDir string
 	Volumes  []VolumeMount
 	// Files are guest files bound read-only into the container (its resolv.conf and trust bundles).
@@ -96,7 +119,8 @@ func within(p, dir string) bool {
 }
 
 // Build returns the container's runtime spec. The container's process is herd-guest's container init, which runs
-// Args and reaps the shims that exec leaves behind.
+// Args, reaps the shims that exec leaves behind, and reports Args's output and exit on the descriptors Crun.Run
+// preserves for it (Watch).
 func Build(c Config) (*Spec, error) {
 	if len(c.Args) == 0 {
 		return nil, fmt.Errorf("oci: container %q has no command", c.Name)
@@ -112,12 +136,17 @@ func Build(c Config) (*Spec, error) {
 	if !hasEnv(env, "PATH") {
 		env = append([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}, env...)
 	}
+	caps := func() []string { return append([]string(nil), DefaultCapabilities...) }
+	user := c.User
+	user.AdditionalGids = append([]uint32(nil), c.User.AdditionalGids...)
 	s := &Spec{
 		Version: "1.2.0",
 		Process: Process{
-			Args:            append([]string{GuestBinary, "cinit", "--"}, c.Args...),
+			User:            user,
+			Args:            append([]string{GuestBinary, "cinit", ReportFlag, "--"}, c.Args...),
 			Env:             env,
 			Cwd:             cwd,
+			Capabilities:    &Capabilities{Bounding: caps(), Effective: caps(), Permitted: caps()},
 			NoNewPrivileges: true,
 		},
 		Root:     Root{Path: c.Rootfs},

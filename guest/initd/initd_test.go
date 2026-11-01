@@ -34,7 +34,7 @@ type fakeRuntime struct {
 	specs  map[string]*oci.Spec
 }
 
-func (f *fakeRuntime) Run(_ context.Context, id, bundle string) error {
+func (f *fakeRuntime) Run(_ context.Context, id, bundle string) (*oci.Watch, error) {
 	b, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 	if err != nil {
 		f.t.Fatalf("Run(%s): no config.json: %v", id, err)
@@ -71,7 +71,7 @@ func (f *fakeRuntime) Run(_ context.Context, id, bundle string) error {
 	}
 	f.specs[id] = &s
 	f.events = append(f.events, "run "+id)
-	return nil
+	return nil, nil
 }
 
 func (f *fakeRuntime) Exec(context.Context, string, []string, bool) error { return nil }

@@ -22,7 +22,7 @@ func TestReapedRunnerReturnsWhenADetachedChildKeepsStdio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	start := time.Now()
-	out, err := reapedRunner(ctx, script)
+	out, err := reapedRunner(ctx, nil, script)
 	if err != nil {
 		t.Fatalf("reapedRunner: %v", err)
 	}

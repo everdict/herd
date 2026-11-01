@@ -445,6 +445,7 @@ func (m *Machines) Restart(ctx context.Context, id string) error {
 	}
 	// The share is kept: a report of an earlier boot is not this one's.
 	_ = os.Remove(filepath.Join(m.cfg.ShareDir, vmID, initd.BootErrorPath))
+	_ = os.Remove(filepath.Join(m.cfg.ShareDir, vmID, initd.ExitPath))
 	if _, err := m.cfg.VMM.Boot(ctx, m.spec(vmID, t, disks)); err != nil && !errors.Is(err, vmm.ErrExists) {
 		return m.withGuestBootError(vmID, err)
 	}

@@ -24,9 +24,9 @@ func (noMounts) Mount(source, target, fstype string, flags uintptr, data string)
 
 type runs struct{ bundles []string }
 
-func (r *runs) Run(ctx context.Context, id, bundle string) error {
+func (r *runs) Run(ctx context.Context, id, bundle string) (*oci.Watch, error) {
 	r.bundles = append(r.bundles, bundle)
-	return nil
+	return nil, nil
 }
 func (r *runs) Exec(context.Context, string, []string, bool) error { return nil }
 func (r *runs) Kill(context.Context, string, syscall.Signal) error { return nil }

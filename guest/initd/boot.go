@@ -45,6 +45,10 @@ type Booted struct {
 	Bundle  string
 	// Volumes maps each volume's mount path in the container to its directory in the share.
 	Volumes map[string]string
+	// User is the identity the container's process runs as (the image's USER, resolved in its rootfs).
+	User oci.User
+	// Watch follows the container's main process (nil if the runtime gave none).
+	Watch *oci.Watch
 }
 
 // Pseudo mounts the guest's own pseudo filesystems.
@@ -136,9 +140,11 @@ func Containers(ctx context.Context, m Mounter, rt oci.Runtime, l Layout, p *Pla
 		if err != nil {
 			return booted, err
 		}
-		if err := rt.Run(ctx, c.Name, b.Bundle); err != nil {
+		w, err := rt.Run(ctx, c.Name, b.Bundle)
+		if err != nil {
 			return booted, fmt.Errorf("initd: starting container %q: %w", c.Name, err)
 		}
+		b.Watch = w
 		booted = append(booted, b)
 	}
 	return booted, nil
@@ -162,9 +168,13 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	if err := m.Mount("overlay", rootfs, "overlay", 0, fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)); err != nil {
 		return Booted{}, fmt.Errorf("initd: container %q: overlay: %w", c.Name, err)
 	}
+	user, err := oci.ResolveUser(rootfs, c.User)
+	if err != nil {
+		return Booted{}, fmt.Errorf("initd: container %q: %w", c.Name, err)
+	}
 	cfg := oci.Config{
 		Name: c.Name, Rootfs: rootfs, Args: append(append([]string(nil), c.Command...), c.Args...),
-		Cwd: c.Workdir, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary,
+		Cwd: c.Workdir, User: user, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary,
 	}
 	for _, e := range c.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
@@ -189,7 +199,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600); err != nil {
 		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
-	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted}, nil
+	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user}, nil
 }
 
 // Mounts maps each of c's volume mount paths to the volume's directory in vols (from Volumes): every container that
@@ -207,6 +217,11 @@ func (c Container) Mounts(vols map[string]string) map[string]string {
 func Boot(ctx context.Context, m Mounter, nl Netlinker, rt oci.Runtime, l Layout, shareTag string) (*Plan, []Booted, error) {
 	if err := MountShare(m, l, shareTag); err != nil {
 		return nil, nil, err
+	}
+	// A share kept from an earlier boot may hold its exits; they are not this boot's.
+	if root, err := os.OpenRoot(l.ShareDir); err == nil {
+		_ = root.Remove(ExitPath)
+		root.Close()
 	}
 	p, err := ReadPlan(l)
 	if err != nil {
@@ -242,7 +257,7 @@ func Boot(ctx context.Context, m Mounter, nl Netlinker, rt oci.Runtime, l Layout
 
 // Target is the started container as herd-guest's API serves it, with its volumes where the container sees them.
 func (b Booted) Target(rt oci.Runtime) *oci.Target {
-	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes}
+	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes, User: b.User, Watch: b.Watch}
 }
 
 // BootErrorPath is where herd-guest leaves, relative to the share, why its boot failed, before it ends the VM: the
@@ -272,4 +287,52 @@ func WriteBootError(l Layout, err error) error {
 		rerr = cerr
 	}
 	return rerr
+}
+
+// ExitPath is where herd-guest records, relative to the share, each container whose main process ended while the VM
+// runs (oci.ContainerExit: its status and last output). The host reads it (machine.Machines.ContainerExit) and reports
+// the actor CRASHED with it; the VM itself keeps running until the actor is deleted.
+const ExitPath = ".herd/container-exit"
+
+// ReportExit waits until b's main process has ended, then logs it to the console and records it at ExitPath. It
+// returns at once for a container with no Watch, and when ctx ends.
+func ReportExit(ctx context.Context, l Layout, b Booted) error {
+	if b.Watch == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.Watch.Done():
+	}
+	e := b.Watch.Exited()
+	if e == nil {
+		return nil
+	}
+	log.Printf("herd-guest: %v", e)
+	return appendShareFile(l, ExitPath, e.Error()+"\n")
+}
+
+// appendShareFile appends s to name in the share, synced, through os.Root.
+func appendShareFile(l Layout, name, s string) error {
+	root, err := os.OpenRoot(l.ShareDir)
+	if err != nil {
+		return fmt.Errorf("initd: %w", err)
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return fmt.Errorf("initd: %w", err)
+	}
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("initd: %w", err)
+	}
+	_, err = f.WriteString(s)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

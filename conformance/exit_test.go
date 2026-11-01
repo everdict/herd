@@ -3,6 +3,8 @@ package conformance_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,7 +12,9 @@ import (
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/conformance"
+	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/herdlet"
+	"github.com/everdict/herd/herdlet/machine"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
 )
@@ -87,5 +91,51 @@ func TestExitUnobservedIsNotCrashed(t *testing.T) {
 	}
 	if p, _ := v.Inspect(ctx, a1.GetMetadata().GetUid()); p != vmm.PresenceGone {
 		t.Errorf("the crashed actor's VM is %v after its delete, want gone", p)
+	}
+}
+
+// TestContainerExitIsReportedCrashed (PLT-230): herd-guest records in the VM's share a container whose main process
+// ended (initd.ExitPath: its status and last output); the herdlet reports it although the VM still runs — on a host
+// whose hypervisor cannot tell exits too — and the actor is CRASHED with the container's status and output in its
+// crash message. An actor whose share records nothing stays RUNNING, and the crashed one deletes.
+func TestContainerExitIsReportedCrashed(t *testing.T) {
+	reg := images()
+	var m *machine.Machines
+	e := conformance.Start(t, conformance.HerdletSpec{Name: "w1", Slots: 3, Caps: chCaps(famA),
+		Configure: func(a *herdlet.Agent) { machines(t, reg, &m)(a); a.Watch = 10 * time.Millisecond }})
+	ctx := ctxT(t)
+	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	a1 := mkActor(t, e, "a1", "tpl", nil)
+	mkActor(t, e, "a2", "tpl", nil)
+
+	exit := "container main exited with status 1; its last output:\n1:C 01 Nov 2026 04:40:00.000 # oO0OoO0OoO0Oo Redis is starting\nsu-exec: setgroups: Operation not permitted\n"
+	p := filepath.Join(m.ShareDir(a1.GetMetadata().GetUid()), initd.ExitPath)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(exit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a, _ := getActor(t, e, "a1")
+		if a.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_CRASHED {
+			m := a.GetStatus().GetCrash().GetMessage()
+			if !strings.HasPrefix(m, "container-exited:") || !strings.Contains(m, "container main exited with status 1") ||
+				!strings.Contains(m, "su-exec: setgroups: Operation not permitted") {
+				t.Errorf("crash message %q, want the typed reason, the container's status and its last output", m)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("an actor whose container exited is %v, want CRASHED", a.GetStatus().GetState())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if a, _ := getActor(t, e, "a2"); a.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_RUNNING {
+		t.Errorf("an actor whose containers run is %v, want RUNNING", a.GetStatus().GetState())
+	}
+	if _, err := e.Client.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: oref(e, "a1")}); err != nil {
+		t.Fatalf("DeleteActor of the crashed actor: %v", err)
 	}
 }
