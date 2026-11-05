@@ -57,6 +57,11 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    nomad var put nomad/jobs/herdlet join_token="$(cat join.token)" registry_auth=@registry-auth.json
    ```
 
+   Prefer a per-template credential to `registry_auth` (PLT-330): whoever creates the template passes
+   `image_pull_auth` with CreateActorTemplate, and the golden build's pull uses it (all-in-one.md step 7). Keep
+   `registry_auth` as the fallback for pulls outside a golden build (ADR A-34, "Not here"): a node other than the
+   golden builder that restores or cold-boots a private template without the image in its cache logs in with it.
+
    The herdlets pull over plain HTTP from the hosts in the job variable `insecure_registries` (`-insecure-registry`,
    comma-separated; PLT-224), by default the cluster's managed image store `100.69.164.81:5001` (PLT-42), and over
    https from every other host. Another store: `nomad job run -var insecure_registries=<host:port> ...`; none:

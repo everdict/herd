@@ -235,9 +235,7 @@ func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		c.mu.Lock()
-		tok := c.tokens[key]
-		c.mu.Unlock()
+		tok := c.cachedToken(ctx, key)
 		if tok != "" {
 			req.Header.Set("Authorization", tok)
 		}
@@ -275,12 +273,7 @@ func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*
 			if err != nil {
 				return nil, err
 			}
-			c.mu.Lock()
-			if c.tokens == nil {
-				c.tokens = map[string]string{}
-			}
-			c.tokens[key] = tok
-			c.mu.Unlock()
+			c.keepToken(ctx, key, tok)
 			continue
 		case resp.StatusCode == http.StatusUnauthorized:
 			resp.Body.Close()
@@ -294,14 +287,50 @@ func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*
 	}
 }
 
+// cachedToken is the Authorization value a pull of key earned before: in ctx's logins (WithLogins) when it carries
+// some, in the Client otherwise.
+func (c *Client) cachedToken(ctx context.Context, key string) string {
+	mu, tokens := &c.mu, &c.tokens
+	if p := loginsOf(ctx); p != nil {
+		mu, tokens = &p.mu, &p.tokens
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return (*tokens)[key]
+}
+
+func (c *Client) keepToken(ctx context.Context, key, tok string) {
+	mu, tokens := &c.mu, &c.tokens
+	if p := loginsOf(ctx); p != nil {
+		mu, tokens = &p.mu, &p.tokens
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if *tokens == nil {
+		*tokens = map[string]string{}
+	}
+	(*tokens)[key] = tok
+}
+
 // authorize answers a 401's challenge with the Authorization header value to send again: a Bearer token from the
-// challenge's realm, or Basic credentials for a Basic-only registry. Either uses the node's login to the registry
-// (Credentials) if it holds one; a Bearer token is fetched anonymously without.
+// challenge's realm, or Basic credentials for a Basic-only registry. Either uses the pull's own login to the registry
+// (WithLogins) if it carries one, else the node's (Credentials) if it holds one; a Bearer token is fetched
+// anonymously without.
 func (c *Client) authorize(ctx context.Context, challenge string, ref image.Ref) (string, error) {
 	scheme, params, _ := strings.Cut(strings.TrimSpace(challenge), " ")
 	var login Credential
 	has := false
-	if c.Credentials != nil {
+	whose := "this node's login"
+	if p := loginsOf(ctx); p != nil && p.creds != nil {
+		var err error
+		if login, has, err = p.creds.Lookup(ref.Registry); err != nil {
+			return "", fmt.Errorf("registry: %s: %w", ref, err)
+		}
+		if has {
+			whose = p.what
+		}
+	}
+	if !has && c.Credentials != nil {
 		var err error
 		if login, has, err = c.Credentials.Lookup(ref.Registry); err != nil {
 			return "", fmt.Errorf("registry: %s: %w", ref, err)
@@ -309,7 +338,7 @@ func (c *Client) authorize(ctx context.Context, challenge string, ref image.Ref)
 	}
 	switch {
 	case strings.EqualFold(scheme, "Bearer"):
-		tok, err := c.token(ctx, params, ref, login, has)
+		tok, err := c.token(ctx, params, ref, login, has, whose)
 		if err != nil {
 			return "", err
 		}
@@ -327,7 +356,7 @@ func (c *Client) authorize(ctx context.Context, challenge string, ref image.Ref)
 // token answers a Bearer challenge's params with a pull token: anonymous without a login; with one, the realm is
 // sent the user and password as Basic credentials (a GET), or the identity token as an OAuth2 refresh token (a POST,
 // distribution's token spec). A login is sent only to an https realm, or a plain one PlainHTTP allows.
-func (c *Client) token(ctx context.Context, params string, ref image.Ref, login Credential, has bool) (string, error) {
+func (c *Client) token(ctx context.Context, params string, ref image.Ref, login Credential, has bool, whose string) (string, error) {
 	p := map[string]string{}
 	for _, kv := range splitParams(params) {
 		k, v, _ := strings.Cut(kv, "=")
@@ -385,7 +414,7 @@ func (c *Client) token(ctx context.Context, params string, ref image.Ref, login 
 		if !has {
 			return "", fmt.Errorf("registry: token for %s: %s (anonymous: this node has no login for %s, herdlet -registry-auth)", ref, resp.Status, ref.Registry)
 		}
-		return "", fmt.Errorf("registry: token for %s: %s (with this node's login for %s)", ref, resp.Status, ref.Registry)
+		return "", fmt.Errorf("registry: token for %s: %s (with %s for %s)", ref, resp.Status, whose, ref.Registry)
 	}
 	var t struct {
 		Token       string `json:"token"`

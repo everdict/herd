@@ -2,6 +2,7 @@ package registry
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/everdict/herd/image"
 )
@@ -66,12 +68,17 @@ func (d DockerConfig) read() (map[string]Credential, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
 		return nil, nil
 	}
+	return parseAuths(b, d.Path)
+}
+
+// parseAuths parses a docker config file's JSON; name says what it is in errors, which never quote it.
+func parseAuths(b []byte, name string) (map[string]Credential, error) {
 	var f struct {
 		Auths map[string]dockerAuth `json:"auths"`
 	}
 	// A JSON error is not wrapped: its text could quote the file.
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("registry credentials %s: not a docker config file (want {\"auths\": {...}})", d.Path)
+		return nil, fmt.Errorf("registry credentials %s: not a docker config file (want {\"auths\": {...}})", name)
 	}
 	out := map[string]Credential{}
 	for key, a := range f.Auths {
@@ -80,16 +87,16 @@ func (d DockerConfig) read() (map[string]Credential, error) {
 		if a.Auth != "" {
 			raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(a.Auth))
 			if err != nil {
-				return nil, fmt.Errorf("registry credentials %s: auths[%q].auth is not base64", d.Path, key)
+				return nil, fmt.Errorf("registry credentials %s: auths[%q].auth is not base64", name, key)
 			}
 			user, pass, ok := strings.Cut(string(raw), ":")
 			if !ok {
-				return nil, fmt.Errorf("registry credentials %s: auths[%q].auth is not base64 of user:password", d.Path, key)
+				return nil, fmt.Errorf("registry credentials %s: auths[%q].auth is not base64 of user:password", name, key)
 			}
 			c.Username, c.Password = user, pass
 		}
 		if c.IdentityToken == "" && (c.Username == "" || c.Password == "") {
-			return nil, fmt.Errorf("registry credentials %s: auths[%q] has no auth, username and password, or identitytoken", d.Path, key)
+			return nil, fmt.Errorf("registry credentials %s: auths[%q] has no auth, username and password, or identitytoken", name, key)
 		}
 		out[host] = c
 	}
@@ -131,4 +138,68 @@ func normalHost(s string) string {
 		return image.DefaultRegistry
 	}
 	return s
+}
+
+// Logins are registry logins held in memory, per normalized host: a docker config's auths given with a request
+// rather than read from the node (ParseLogins). They print redacted.
+type Logins map[string]Credential
+
+// ParseLogins parses a docker config file's JSON (its auths, as DockerConfig reads them); name says what it is in
+// errors, which never quote the JSON. It must hold a login for at least one host.
+func ParseLogins(b []byte, name string) (Logins, error) {
+	m, err := parseAuths(b, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(m) == 0 {
+		return nil, fmt.Errorf("registry credentials %s: no auths", name)
+	}
+	return Logins(m), nil
+}
+
+// Lookup returns host's login.
+func (l Logins) Lookup(host string) (Credential, bool, error) {
+	c, ok := l[normalHost(host)]
+	return c, ok, nil
+}
+
+// Hosts lists the registry hosts l holds logins for.
+func (l Logins) Hosts() []string {
+	hosts := make([]string, 0, len(l))
+	for h := range l {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func (l Logins) String() string {
+	return "registry logins for " + strings.Join(l.Hosts(), ", ") + " (redacted)"
+}
+
+// GoString keeps %#v redacted too.
+func (l Logins) GoString() string { return l.String() }
+
+// pullLogins are the logins one pull carries (WithLogins) and the tokens they earned: a token one pull's login got
+// is not reused by a pull without it.
+type pullLogins struct {
+	creds Credentials
+	what  string
+
+	mu     sync.Mutex
+	tokens map[string]string
+}
+
+type pullLoginsKey struct{}
+
+// WithLogins makes the pulls made with ctx log in with creds, ahead of the Client's own Credentials (the node's
+// logins) for the hosts creds holds a login for; what names them in errors (e.g. "the template's image_pull_auth").
+// Tokens they earn are kept with ctx, not in the Client.
+func WithLogins(ctx context.Context, creds Credentials, what string) context.Context {
+	return context.WithValue(ctx, pullLoginsKey{}, &pullLogins{creds: creds, what: what})
+}
+
+func loginsOf(ctx context.Context) *pullLogins {
+	p, _ := ctx.Value(pullLoginsKey{}).(*pullLogins)
+	return p
 }

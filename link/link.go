@@ -9,6 +9,8 @@
 package link
 
 import (
+	"strconv"
+
 	"github.com/everdict/herd/vmm"
 )
 
@@ -111,6 +113,10 @@ type Work struct {
 	Cause Cause `json:"cause,omitempty"`
 	// DeadlineUnixMilli bounds the work; past it the herdlet answers unknown.
 	DeadlineUnixMilli int64 `json:"deadlineUnixMilli,omitempty"`
+	// PullAuth is a boot's one-shot registry logins for the template's images (CreateActorTemplateRequest's
+	// image_pull_auth, a docker config's auths as JSON), sent only for the boot of a template's golden actor. The
+	// herdlet's pulls for that boot log in with it ahead of the node's -registry-auth; it is never written down.
+	PullAuth Secret `json:"pullAuth,omitempty"`
 }
 
 // ActorRef names an actor.
@@ -221,3 +227,17 @@ type Exited struct {
 	// Detail is what the herdlet knows of why (the process's exit status, the end of the hypervisor's log).
 	Detail string `json:"detail,omitempty"`
 }
+
+// Secret is a credential carried on the link: it marshals as itself, and prints redacted, so a %v of the Work that
+// holds it logs no secret.
+type Secret string
+
+func (s Secret) String() string {
+	if s == "" {
+		return ""
+	}
+	return "(redacted)"
+}
+
+// GoString keeps %#v redacted too.
+func (s Secret) GoString() string { return strconv.Quote(s.String()) }

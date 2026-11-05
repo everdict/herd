@@ -1,8 +1,9 @@
 // Command protosubset cuts a pinned subset out of Substrate's ateapi.proto: the named methods of service Control,
-// every message and enum they reach, and the annotation extensions. Nothing else is rewritten except go_package.
+// every message and enum they reach, and the annotation extensions. Nothing else is rewritten except go_package and,
+// with -additions, the fields herd adds to upstream messages (ADR 0001, PLT-330).
 //
-//	protosubset -upstream testdata/upstream-ateapi.proto -methods subset.txt -source <url@commit> \
-//	    -go-package 'github.com/everdict/herd/api/ateapi/v1;ateapi' -out ateapi.proto
+//	protosubset -upstream testdata/upstream-ateapi.proto -methods subset.txt -additions herd-additions.txt \
+//	    -source <url@commit> -go-package 'github.com/everdict/herd/api/ateapi/v1;ateapi' -out ateapi.proto
 package main
 
 import (
@@ -20,17 +21,18 @@ import (
 func main() {
 	upstream := flag.String("upstream", "", "upstream ateapi.proto")
 	methods := flag.String("methods", "", "file listing the Control methods to keep, one per line")
+	additions := flag.String("additions", "", "file of message blocks whose fields are added to the subset's messages of the same name")
 	source := flag.String("source", "", "where the upstream file came from (repository, path and commit)")
 	goPackage := flag.String("go-package", "", "go_package option of the subset")
 	out := flag.String("out", "", "output file")
 	flag.Parse()
-	if err := run(*upstream, *methods, *source, *goPackage, *out); err != nil {
+	if err := run(*upstream, *methods, *additions, *source, *goPackage, *out); err != nil {
 		fmt.Fprintln(os.Stderr, "protosubset:", err)
 		os.Exit(1)
 	}
 }
 
-func run(upstreamPath, methodsPath, source, goPackage, out string) error {
+func run(upstreamPath, methodsPath, additionsPath, source, goPackage, out string) error {
 	src, err := os.ReadFile(upstreamPath)
 	if err != nil {
 		return err
@@ -39,7 +41,13 @@ func run(upstreamPath, methodsPath, source, goPackage, out string) error {
 	if err != nil {
 		return err
 	}
-	b, err := Subset(src, ParseMethods(list), source, goPackage)
+	var add []byte
+	if additionsPath != "" {
+		if add, err = os.ReadFile(additionsPath); err != nil {
+			return err
+		}
+	}
+	b, err := Subset(src, ParseMethods(list), add, source, goPackage)
 	if err != nil {
 		return err
 	}
@@ -188,8 +196,9 @@ func filterService(b block, keep map[string]bool) (block, error) {
 	return out, nil
 }
 
-// Subset returns the subset proto.
-func Subset(src []byte, methods []string, source, goPackage string) ([]byte, error) {
+// Subset returns the subset proto. additions, if not empty, holds message blocks (comments outside them are skipped):
+// the lines inside each are appended to the subset's message of the same name, which the subset must reach.
+func Subset(src []byte, methods []string, additions []byte, source, goPackage string) ([]byte, error) {
 	if len(methods) == 0 {
 		return nil, errors.New("no methods to keep")
 	}
@@ -241,6 +250,12 @@ func Subset(src []byte, methods []string, source, goPackage string) ([]byte, err
 			}
 		}
 	}
+	herd := len(bytes.TrimSpace(additions)) > 0
+	if herd {
+		if err := addFields(blocks, byName, reached, additions); err != nil {
+			return nil, err
+		}
+	}
 
 	var out bytes.Buffer
 	notice := []string{
@@ -249,6 +264,10 @@ func Subset(src []byte, methods []string, source, goPackage string) ([]byte, err
 		"// Modified by herd: cut down by internal/cmd/protosubset to the Control methods in subset.txt and the",
 		"// messages and enums they reach; go_package rewritten. Nothing else is changed. Do not edit; run",
 		"// `go generate ./api/...`.",
+	}
+	if herd {
+		notice[3] = "// messages and enums they reach; go_package rewritten; the fields of herd-additions.txt appended to their"
+		notice[4] = "// messages (each says \"herd addition\"). Nothing else is changed. Do not edit; run `go generate ./api/...`."
 	}
 	licenseDone := false
 	for _, l := range preamble {
@@ -270,4 +289,30 @@ func Subset(src []byte, methods []string, source, goPackage string) ([]byte, err
 		}
 	}
 	return append(bytes.TrimRight(out.Bytes(), "\n"), '\n'), nil
+}
+
+// addFields appends the lines inside each message block of additions to the reached message of the same name.
+func addFields(blocks []block, byName map[string]int, reached map[int]bool, additions []byte) error {
+	_, extra, err := parse(additions)
+	if err != nil {
+		return fmt.Errorf("additions: %w", err)
+	}
+	for _, e := range extra {
+		i, ok := byName[e.name]
+		if e.kind != "message" || !ok || blocks[i].kind != "message" || !reached[i] {
+			return fmt.Errorf("additions: %s %s is not a message of the subset", e.kind, e.name)
+		}
+		body := e.lines
+		for len(body) > 0 && !declRE.MatchString(body[0]) {
+			body = body[1:]
+		}
+		if len(body) < 3 {
+			return fmt.Errorf("additions: message %s adds nothing", e.name)
+		}
+		b := blocks[i].lines
+		lines := append(append([]string{}, b[:len(b)-1]...), "")
+		lines = append(lines, body[1:len(body)-1]...)
+		blocks[i].lines = append(lines, b[len(b)-1])
+	}
+	return nil
 }

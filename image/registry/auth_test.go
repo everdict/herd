@@ -213,3 +213,65 @@ func fmtV(c Credential) string {
 	}
 	return b.String()
 }
+
+// TestPullLoginsTakePrecedence (PLT-330): a pull carrying its own logins (WithLogins, a template's image_pull_auth)
+// logs in with them ahead of the node's for that host, and the token it earns is not reused by a pull without them;
+// a host they do not name falls back to the node's login. A refused pull login is named in the error by what it is,
+// never by its secret.
+func TestPullLoginsTakePrecedence(t *testing.T) {
+	p, ref := private(t, false)
+	amd := image.Platform{OS: "linux", Architecture: "amd64"}
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfig(t, path, authConfig(ref.Registry, user, "the node's stale password"))
+	c := &Client{Credentials: DockerConfig{Path: path}}
+
+	if _, err := c.Resolve(context.Background(), ref, amd); err == nil || !strings.Contains(err.Error(), "with this node's login") {
+		t.Fatalf("pull with the node's stale login: %v, want its refusal", err)
+	}
+	logins, err := ParseLogins([]byte(authConfig(ref.Registry, user, password)), "image_pull_auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noSecret(t, "%v of the logins", fmt.Sprintf("%v %#v", logins, logins))
+	granted := WithLogins(context.Background(), logins, "the template's image_pull_auth")
+	if _, err := c.Resolve(granted, ref, amd); err != nil {
+		t.Fatalf("pull with its own login: %v", err)
+	}
+	if _, err := c.Resolve(context.Background(), ref, amd); err == nil {
+		t.Errorf("a pull without the login reused the token the login earned")
+	}
+
+	// A host the pull's logins do not name: the node's login.
+	writeConfig(t, path, authConfig(ref.Registry, user, password))
+	other, err := ParseLogins([]byte(authConfig("ghcr.io", user, "x")), "image_pull_auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Resolve(WithLogins(context.Background(), other, "the template's image_pull_auth"), ref, amd); err != nil {
+		t.Errorf("pull whose logins name another host, with the node's login: %v", err)
+	}
+
+	// The pull's login refused: named as the template's, never quoted.
+	writeConfig(t, path, "")
+	bad, err := ParseLogins([]byte(authConfig(ref.Registry, user, "wrong-"+password)), "image_pull_auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Resolve(WithLogins(context.Background(), bad, "the template's image_pull_auth"), ref, amd)
+	if err == nil || !strings.Contains(err.Error(), "the template's image_pull_auth for "+ref.Registry) {
+		t.Fatalf("pull with a refused login: %v, want the refusal naming the template's image_pull_auth and %s", err, ref.Registry)
+	}
+	noSecret(t, "the refusal", err.Error())
+	if p.Requests().BadLogins == 0 {
+		t.Errorf("the registry saw no bad login")
+	}
+
+	for _, in := range []string{"", "{", `{"auths": {}}`, `{"auths": {"h": {"auth": "` + password + `"}}}`} {
+		_, err := ParseLogins([]byte(in), "image_pull_auth")
+		if err == nil {
+			t.Errorf("ParseLogins(%q) accepted it", in)
+			continue
+		}
+		noSecret(t, "ParseLogins's error", err.Error())
+	}
+}

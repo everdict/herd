@@ -24,7 +24,7 @@ func TestVendoredSubsetIsRegenerable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Subset(upstream(t), ParseMethods(list), source, "github.com/everdict/herd/api/ateapi/v1;ateapi")
+	got, err := Subset(upstream(t), ParseMethods(list), additions(t), source, "github.com/everdict/herd/api/ateapi/v1;ateapi")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestVendoredSubsetIsRegenerable(t *testing.T) {
 }
 
 func TestSubsetDropsWhatIsNotReached(t *testing.T) {
-	got, err := Subset(upstream(t), []string{"GetTag"}, source, "x;x")
+	got, err := Subset(upstream(t), []string{"GetTag"}, nil, source, "x;x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,38 @@ func TestSubsetDropsWhatIsNotReached(t *testing.T) {
 }
 
 func TestSubsetRefusesUnknownMethod(t *testing.T) {
-	if _, err := Subset(upstream(t), []string{"GetTag", "LaunchRocket"}, source, "x;x"); err == nil || !strings.Contains(err.Error(), "LaunchRocket") {
+	if _, err := Subset(upstream(t), []string{"GetTag", "LaunchRocket"}, nil, source, "x;x"); err == nil || !strings.Contains(err.Error(), "LaunchRocket") {
 		t.Errorf("Subset with a method upstream lacks = %v, want an error naming it", err)
+	}
+}
+
+func additions(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("../../../api/ateapi/v1/herd-additions.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// herd's own fields land inside the upstream message they extend, and nowhere else; one for a message the subset
+// does not reach is refused.
+func TestSubsetAppendsHerdFields(t *testing.T) {
+	add := []byte("// outside any block\nmessage GetTagRequest {\n  // herd addition: x.\n  string x = 1000;\n}\n")
+	got, err := Subset(upstream(t), []string{"GetTag"}, add, source, "x;x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	i := strings.Index(s, "message GetTagRequest {")
+	if i < 0 {
+		t.Fatal("no GetTagRequest")
+	}
+	msg := s[i : i+strings.Index(s[i:], "\n}\n")]
+	if !strings.Contains(msg, "\n  string x = 1000;") || strings.Contains(s, "outside any block") || !strings.Contains(s, "herd-additions.txt") {
+		t.Errorf("the addition is not inside GetTagRequest, or the notice does not say so:\n%s", s)
+	}
+	if _, err := Subset(upstream(t), []string{"GetTag"}, []byte("message WorkerStatus {\n  string x = 1000;\n}\n"), source, "x;x"); err == nil || !strings.Contains(err.Error(), "WorkerStatus") {
+		t.Errorf("an addition to a message outside the subset = %v, want an error naming it", err)
 	}
 }

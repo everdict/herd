@@ -101,6 +101,16 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    there is no file, and fails a file it cannot read. A `~/.docker/config.json` that `docker login` wrote with a
    `credsStore` or `credHelpers` holds no secret in `auths`: herd does not run credential helpers, so write `auths`.
 
+   **Prefer a per-template credential** (PLT-330, ADR A-34). A template's image is pulled once, when herd-api builds
+   its golden snapshot, so the caller that creates it can pass a one-shot credential for that pull instead of the node
+   holding a long-lived login: `CreateActorTemplateRequest.image_pull_auth`, the same docker config JSON as the file
+   above (`{"auths": {"ghcr.io": {"auth": "<base64 user:token>"}}}`). herd-api keeps it in memory until the golden
+   build ends and hands it to the herdlet that builds it; it is never stored, logged or returned. For the hosts it
+   names it takes precedence over `-registry-auth`; a refused one fails the golden build naming the registry. The
+   node's `-registry-auth` is the fallback, and is still needed where a node pulls without that build: a template
+   whose golden mode is DISABLED, and a node other than the golden builder that restores or cold-boots the template
+   without the image in its cache.
+
 8. Optional: a plain-HTTP registry (PLT-224). Pulls speak https to every registry except localhost and 127.0.0.1.
    `-insecure-registry host[:port]` (repeatable, or comma-separated) adds hosts spoken to over plain HTTP, as the
    docker daemon's `insecure-registries`: exactly as written, so `100.69.164.81:5001` makes neither
@@ -148,3 +158,4 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
 5. Optional: private images. The launchd job passes `-registry-auth /usr/local/etc/herd/registry-auth.json`; write
    the docker config file there, mode 0600, as Ubuntu step 7 says (a Mac's herdlet pulls exactly as Linux's does).
+   A template's `image_pull_auth` takes precedence for its golden build (Ubuntu step 7); the file is the fallback.

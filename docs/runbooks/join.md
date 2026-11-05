@@ -90,7 +90,8 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
 4. Optional: private images. The unit passes `-registry-auth /etc/herd/registry-auth.json`: write the node's registry
    logins there, a docker config file, mode 0600, as all-in-one.md step 7 shows; `sudo herdlet doctor -registry-auth
    /etc/herd/registry-auth.json` lists the hosts it holds logins for. Every node that may run a private image needs
-   the file; it is read at every pull, so no restart.
+   the file; it is read at every pull, so no restart. Prefer a per-template `image_pull_auth` (all-in-one.md step 7,
+   PLT-330): the golden build pulls with it, and the node file is the fallback.
 
 ## On each Mac node (Apple Silicon)
 
@@ -113,7 +114,8 @@ userspace stack, ADR A-21), with the egress credential the join granted. It reso
 `/usr/local/etc/herd/secrets` (put the file `<name>/<tail>` there, mode 0600); without `-secrets` it refuses every
 request whose credential it must inject. The daemon also passes `-registry-auth
 /usr/local/etc/herd/registry-auth.json`, the node's registry logins for private images (a docker config file, mode
-0600, as all-in-one.md step 7 shows; without it pulls are anonymous). `herdlet doctor` fails a herdlet that is not
+0600, as all-in-one.md step 7 shows; without it pulls are anonymous; a template's `image_pull_auth` takes precedence
+for its golden build). `herdlet doctor` fails a herdlet that is not
 signed with `com.apple.security.virtualization` (the release's is; `scripts/release.sh` signs it on a Mac) and a
 kernel of the other architecture. The Mac declares MEMORY only while its save/restore probe passed and a user is at
 the console with the screen unlocked, VOLUMES otherwise; a lock, an unlock or a wake reaches herd-api's worker record

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/vmm"
 )
@@ -33,6 +34,14 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 				a.reopen(w.VM)
 				return link.Outcome{Result: link.ResultDone}
 			}
+		}
+		if w.PullAuth != "" {
+			// The golden build's one-shot logins (image_pull_auth): this boot's pulls only, ahead of -registry-auth.
+			logins, err := registry.ParseLogins([]byte(w.PullAuth), "image_pull_auth")
+			if err != nil {
+				return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
+			}
+			ctx = registry.WithLogins(ctx, logins, "the template's image_pull_auth")
 		}
 		if err := m.Boot(ctx, w.VM, *w.Spec); err != nil {
 			return classify(err)

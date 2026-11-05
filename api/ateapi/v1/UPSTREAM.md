@@ -19,3 +19,8 @@ v1.36.12, the version Substrate's own go.mod pins at this commit.
 
 To move the pin: replace `testdata/upstream-ateapi.proto` with the new upstream file, update this table, run
 `go generate ./api/...`, and let `go test ./api/... ./internal/...` say what changed.
+
+herd's own fields on upstream messages (PLT-330, ADR 0001 A-34) are listed in `herd-additions.txt` and appended by
+the same cut (`-additions`), each marked "herd addition" and numbered from 1000: today only
+`CreateActorTemplateRequest.image_pull_auth`. Generated with the same protoc and protoc-gen-go as above (fetched
+from GitHub as build tools); they reproduce the previous `ateapi.pb.go` byte for byte.

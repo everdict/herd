@@ -114,6 +114,10 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 	}
 	w := link.Work{Op: link.OpBoot, VM: vmID(ar), Template: ar.st.TemplateUID, Spec: templateSpec(ar.st.TemplateUID, tpl),
 		Actor: &link.ActorRef{Space: ar.rec.Key.Space, Name: ar.rec.Key.Name, UID: ar.rec.UID}}
+	if ar.st.Golden {
+		// The golden build is the template's one pull (PLT-330): its image_pull_auth, if it came with one.
+		w.PullAuth = s.pullAuth(ar.st.TemplateUID)
+	}
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
 		// The herdlet may have to read the whole object from the store first: its call waits for that too. A Stat

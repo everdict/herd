@@ -15,8 +15,8 @@
 // herd: vendored subset of Substrate's Control API (spec herd.md R-D2).
 // Source: github.com/agent-substrate/substrate api/ateapi/v1/ateapi.proto at commit 6d7b3f49f6154d52a1de46c94a1481868a5ed042 (Apache License, Version 2.0).
 // Modified by herd: cut down by internal/cmd/protosubset to the Control methods in subset.txt and the
-// messages and enums they reach; go_package rewritten. Nothing else is changed. Do not edit; run
-// `go generate ./api/...`.
+// messages and enums they reach; go_package rewritten; the fields of herd-additions.txt appended to their
+// messages (each says "herd addition"). Nothing else is changed. Do not edit; run `go generate ./api/...`.
 
 syntax = "proto3";
 
@@ -1527,6 +1527,20 @@ message CreateActorTemplateRequest {
   // +k8s:required
   // +k8s:customValidation # volume_mounts must reference declared volumes; golden policy requires golden snapshots
   ActorTemplate actor_template = 1;
+
+  // herd addition (PLT-330): a one-shot registry credential for the
+  // template's images, used only for the pull that builds the template's
+  // golden snapshot and taking precedence over the node's own registry login
+  // (herdlet -registry-auth) for the hosts it names. A docker config file's
+  // `auths` as JSON, the herdlet -registry-auth format:
+  //   {"auths": {"ghcr.io": {"auth": "<base64 of user:password>"}}}
+  // or {"username", "password"}, or {"identitytoken"} per host. It is held in
+  // herd-api's memory until the golden build ends, passed to the herdlet that
+  // builds it, never stored, never logged, and never returned: no
+  // ActorTemplate field carries it, so GetActorTemplate cannot.
+  //
+  // +k8s:optional
+  string image_pull_auth = 1000;
 }
 
 message GetActorTemplateRequest {

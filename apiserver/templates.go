@@ -2,9 +2,12 @@ package apiserver
 
 import (
 	"context"
+	"strings"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/image"
+	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/store"
 	"google.golang.org/grpc/codes"
@@ -39,6 +42,10 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 	// Status is server-owned and starts empty, as Substrate's does.
 	t.Metadata, t.Status = nil, &ateapi.ActorTemplateStatus{}
 	defaultGolden(t)
+	pullAuth, err := checkPullAuth(req.GetImagePullAuth(), t)
+	if err != nil {
+		return nil, err
+	}
 	data, err := proto.Marshal(t)
 	if err != nil {
 		return nil, toStatus(err)
@@ -51,6 +58,9 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 		return nil, toStatus(err)
 	}
 	if goldenEnabled(t) {
+		if pullAuth != "" {
+			s.keepPullAuth(r.UID, pullAuth)
+		}
 		s.kickGolden(r.Key, 0)
 	}
 	v, err := templateView(r)
@@ -116,7 +126,37 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
 		return nil, toStatus(err)
 	}
+	s.dropPullAuth(r.UID)
 	return v, nil
+}
+
+// checkPullAuth checks a CreateActorTemplateRequest's image_pull_auth (PLT-330): a docker config's auths holding a
+// login for the registry of at least one of the template's images, for a template that builds a golden snapshot
+// (the one pull it is for). An error never quotes it.
+func checkPullAuth(a string, t *ateapi.ActorTemplate) (link.Secret, error) {
+	if a == "" {
+		return "", nil
+	}
+	if !goldenEnabled(t) {
+		return "", status.Errorf(codes.InvalidArgument, "image_pull_auth is for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
+	}
+	logins, err := registry.ParseLogins([]byte(a), "image_pull_auth")
+	if err != nil {
+		return "", status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	var hosts []string
+	for _, c := range t.GetContainers() {
+		r, err := image.ParseRef(c.GetImage())
+		if err != nil {
+			continue
+		}
+		if _, ok, _ := logins.Lookup(r.Registry); ok {
+			return link.Secret(a), nil
+		}
+		hosts = append(hosts, r.Registry)
+	}
+	return "", status.Errorf(codes.InvalidArgument, "image_pull_auth holds logins for %s, and the template's images are on %s",
+		strings.Join(logins.Hosts(), ", "), strings.Join(hosts, ", "))
 }
 
 // templateSpec is the template as a herdlet needs it to boot a VM (link.Template). Only DurableDir volumes are

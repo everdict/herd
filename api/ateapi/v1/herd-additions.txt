@@ -1,0 +1,20 @@
+# Fields herd adds to the upstream messages of the subset (internal/cmd/protosubset -additions; ADR 0001, PLT-330).
+# Each block's lines are appended to the subset's message of the same name. herd's field numbers start at 1000, far
+# from upstream's, so a field upstream adds later never takes one. A real Substrate ignores these fields (proto3
+# unknown fields).
+
+message CreateActorTemplateRequest {
+  // herd addition (PLT-330): a one-shot registry credential for the
+  // template's images, used only for the pull that builds the template's
+  // golden snapshot and taking precedence over the node's own registry login
+  // (herdlet -registry-auth) for the hosts it names. A docker config file's
+  // `auths` as JSON, the herdlet -registry-auth format:
+  //   {"auths": {"ghcr.io": {"auth": "<base64 of user:password>"}}}
+  // or {"username", "password"}, or {"identitytoken"} per host. It is held in
+  // herd-api's memory until the golden build ends, passed to the herdlet that
+  // builds it, never stored, never logged, and never returned: no
+  // ActorTemplate field carries it, so GetActorTemplate cannot.
+  //
+  // +k8s:optional
+  string image_pull_auth = 1000;
+}

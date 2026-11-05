@@ -136,3 +136,38 @@ func TestVendoredSubsetAttribution(t *testing.T) {
 		t.Errorf("UPSTREAM.md does not pin the upstream file (commit %s, sha256 %x)", upstreamCommit, sum)
 	}
 }
+
+// herd's one addition to the Control subset (PLT-330, herd-additions.txt): CreateActorTemplateRequest.image_pull_auth,
+// a string numbered away from upstream's fields, registered as the generated code describes it. No message a read
+// returns (ActorTemplate) carries it.
+func TestHerdAdditionImagePullAuth(t *testing.T) {
+	d, err := protoregistry.GlobalFiles.FindDescriptorByName("substrate.ateapi.v1.CreateActorTemplateRequest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := d.(protoreflect.MessageDescriptor).Fields().ByName("image_pull_auth")
+	if f == nil || f.Number() != 1000 || f.Kind() != protoreflect.StringKind || f.Cardinality() != protoreflect.Optional || f.JSONName() != "imagePullAuth" {
+		t.Fatalf("CreateActorTemplateRequest.image_pull_auth = %v, want string image_pull_auth = 1000", f)
+	}
+	var walk func(m protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool)
+	walk = func(m protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) {
+		if seen[m.FullName()] {
+			return
+		}
+		seen[m.FullName()] = true
+		for i := 0; i < m.Fields().Len(); i++ {
+			fd := m.Fields().Get(i)
+			if fd.Number() >= 1000 {
+				t.Errorf("%s.%s: a herd addition in what a read returns", m.FullName(), fd.Name())
+			}
+			if fd.Message() != nil {
+				walk(fd.Message(), seen)
+			}
+		}
+	}
+	tpl, err := protoregistry.GlobalFiles.FindDescriptorByName("substrate.ateapi.v1.ActorTemplate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	walk(tpl.(protoreflect.MessageDescriptor), map[protoreflect.FullName]bool{})
+}

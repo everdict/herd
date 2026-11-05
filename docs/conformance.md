@@ -207,7 +207,8 @@ A template whose image is private (every Everdict session image on ghcr.io is) b
 registry login for its host: `-registry-auth` on the herdlet or all-in-one names a docker config file (runbooks/all-in-one.md
 step 7). Run `herdlet doctor` with the node's flags first: its `registry auth` line lists the hosts the node has logins
 for, or says pulls are anonymous; without a login CreateActor fails `FAILED_PRECONDITION` with the token realm's
-`403 Forbidden`.
+`403 Forbidden`. Preferred over the node login (PLT-330): the template carries a one-shot `image_pull_auth` that its
+golden build pulls with (ADR A-34); without either, the golden build fails `GoldenActorInvalid` with the same 403.
 
 `golden-template` runs in both: herd-api builds the template's golden snapshot after `-golden-warmup` (20 s by
 default, Substrate's), on the worker keeping the highest fidelity (ADR 0001 A-30), so on a real host the case takes
