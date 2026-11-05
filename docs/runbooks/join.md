@@ -13,11 +13,12 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
 
 ## On the control host
 
-1. Install herd from its release archive (see all-in-one.md step 2; only `herd-api` and `herd-router` are needed here):
+1. Install herd from its release archive (see all-in-one.md step 2: everdict/herd is private, so the download needs a
+   `gh` login that can read it; only `herd-api` and `herd-router` are needed here):
 
    ```sh
    ARCH=$(dpkg --print-architecture)
-   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_linux_$ARCH.tar.gz
+   gh release download --repo everdict/herd --pattern herd_linux_$ARCH.tar.gz
    mkdir herd && tar -C herd -xzf herd_linux_$ARCH.tar.gz
    sudo install -m 0755 herd/herd-api herd/herd-router /usr/local/bin/
    sudo install -d /etc/herd /var/lib/herd/snapshots
@@ -94,7 +95,7 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
 ## On each Mac node (Apple Silicon)
 
 ```sh
-curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_darwin_arm64.tar.gz
+gh release download --repo everdict/herd --pattern herd_darwin_arm64.tar.gz
 mkdir herd && tar -C herd -xzf herd_darwin_arm64.tar.gz
 sudo install -m 0755 herd/herdlet herd/herd-egress /usr/local/bin/
 sudo install -d /usr/local/share/herd /usr/local/etc/herd /usr/local/var/herdlet

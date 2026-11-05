@@ -29,10 +29,11 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
 
 ## Steps
 
-1. Get the release archive and create the signing key and join token on an operator machine:
+1. Get the release archive (with a `gh` login that can read the private everdict/herd, as in all-in-one.md step 2)
+   and create the signing key and join token on an operator machine:
 
    ```sh
-   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_linux_amd64.tar.gz
+   gh release download --repo everdict/herd --pattern herd_linux_amd64.tar.gz
    mkdir herd && tar -C herd -xzf herd_linux_amd64.tar.gz
    ./herd/herd-api keygen -out jwt.key
    ./herd/herd-api join-token -key-file jwt.key -ttl 24h > join.token
@@ -61,11 +62,15 @@ commands below are checked by `docs/runbooks/runbooks_test.go`.
    https from every other host. Another store: `nomad job run -var insecure_registries=<host:port> ...`; none:
    `-var insecure_registries=`.
 
-3. Run the job pair:
+3. Serve the archive to the clients and run the job pair. A Nomad artifact cannot sign in to GitHub, and a private
+   repository's release URL answers 404 without it, so the jobs fetch `herd_linux_<arch>.tar.gz` from a mirror every
+   client reaches: any HTTP(S) URL or bucket that serves the archive you downloaded in step 1 (for example a bucket
+   readable without credentials on the S3 endpoint of the snapshots). `release_url` is that mirror's base URL, with
+   no default:
 
    ```sh
-   nomad job run herd/dist/nomad/herd-api.nomad.hcl
-   nomad job run herd/dist/nomad/herdlet.nomad.hcl
+   nomad job run -var release_url=<mirror base URL> herd/dist/nomad/herd-api.nomad.hcl
+   nomad job run -var release_url=<mirror base URL> herd/dist/nomad/herdlet.nomad.hcl
    ```
 
 4. Check the pool: every Linux client is a worker.

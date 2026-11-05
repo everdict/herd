@@ -2,9 +2,11 @@
 # places the actors. The bbolt store allows one herd-api, so count = 1 on the node that holds the herd-data host
 # volume. Snapshots go to the S3 bucket named in the job's Nomad variable, which joins hand to every herdlet.
 # Rendered by deploy/artifacts; edit the template, not this file.
+# The base URL every client fetches herd_linux_<arch>.tar.gz from: a mirror of the release (docs/runbooks/nomad.md
+# step 3). No default: everdict/herd is private, and its GitHub release URL answers 404 to an artifact, which
+# cannot authenticate.
 variable "release_url" {
-  type    = string
-  default = "https://github.com/everdict/herd/releases/latest/download"
+  type = string
 }
 
 job "herd-api" {

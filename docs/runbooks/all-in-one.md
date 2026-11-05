@@ -17,10 +17,14 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
 2. Install herd from its release archive (binaries, a static virtiofsd, guest kernel and initramfs, and `dist/`).
    herd needs virtiofsd >= 1.11 and Ubuntu 24.04's `virtiofsd` package is 1.10, so the archive carries virtiofsd
-   1.13.2 (`scripts/virtiofsd/source.env`) and herdlet uses it from `/usr/local/libexec/herd/virtiofsd` by default:
+   1.13.2 (`scripts/virtiofsd/source.env`) and herdlet uses it from `/usr/local/libexec/herd/virtiofsd` by default.
+   everdict/herd is a private repository, so its release assets answer 404 to an unauthenticated download. Download
+   the archive with the GitHub CLI signed in as an account that can read the repository (`gh auth login`, or
+   `GH_TOKEN` set to a token with read access to everdict/herd's contents); with no tag, `gh release download` takes
+   the latest release, and a tag (`gh release download <tag> …`) pins one:
 
    ```sh
-   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_linux_$ARCH.tar.gz
+   gh release download --repo everdict/herd --pattern herd_linux_$ARCH.tar.gz
    mkdir herd && tar -C herd -xzf herd_linux_$ARCH.tar.gz
    sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
    sudo install -d /usr/local/share/herd /usr/local/libexec/herd
@@ -106,10 +110,11 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
 
 ## macOS (Apple Silicon, macOS 14+)
 
-1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement):
+1. Install herd from the darwin release archive (`herd` and `herdlet` are signed with the virtualization entitlement),
+   downloaded with a `gh` login that can read everdict/herd, as in the Ubuntu step 2:
 
    ```sh
-   curl -fsSLO https://github.com/everdict/herd/releases/latest/download/herd_darwin_arm64.tar.gz
+   gh release download --repo everdict/herd --pattern herd_darwin_arm64.tar.gz
    mkdir herd && tar -C herd -xzf herd_darwin_arm64.tar.gz
    sudo install -m 0755 herd/herd herd/herd-api herd/herdlet herd/herd-router herd/herd-egress /usr/local/bin/
    sudo install -d /usr/local/share/herd /usr/local/var/herd

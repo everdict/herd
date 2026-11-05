@@ -554,3 +554,59 @@ func doctorOn(t *testing.T, goos string, files map[string]bool, args []string) m
 	}
 	return fails
 }
+
+// everdict/herd is a private repository (owner, 2026-11-05: keep it private where possible), so its release assets
+// answer 404 to an unauthenticated download: a runbook step `curl …/releases/latest/download/…`, or a Nomad job whose
+// artifact defaults to that URL, cannot be followed by anyone. Every runbook that unpacks a release archive downloads
+// it with an authenticated `gh release download --repo everdict/herd`, and neither a runbook nor a dist/ artifact
+// names the unauthenticated release URL (PLT-117).
+func TestReleaseArchiveDownloadsWorkForAPrivateRepository(t *testing.T) {
+	public := "github.com/everdict/herd/releases"
+	unpacks := regexp.MustCompile(`tar -C herd -xzf (herd_\S+\.tar\.gz)`)
+	n := 0
+	for _, rb := range runbooks {
+		b, err := os.ReadFile(rb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(b)
+		if strings.Contains(text, public) {
+			t.Errorf("%s names %s: a private repository's release cannot be downloaded without authentication", rb, public)
+		}
+		lines := shellBlocks(text)
+		for i, line := range lines {
+			m := unpacks.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			n++
+			got := false
+			for _, prev := range lines[:i] {
+				if strings.Contains(prev, "gh release download") && strings.Contains(prev, "--repo everdict/herd") &&
+					strings.Contains(prev, m[1]) {
+					got = true
+				}
+			}
+			if !got {
+				t.Errorf("%s: `%s` unpacks %s, but no earlier line downloads it with `gh release download --repo everdict/herd --pattern %s`", rb, line, m[1], m[1])
+			}
+		}
+	}
+	if n < 5 {
+		t.Errorf("found %d archive unpack lines in the runbooks, want every one (at least 5): the check looked at nothing", n)
+	}
+	dist, err := filepath.Glob("../../dist/*/*")
+	if err != nil || len(dist) == 0 {
+		t.Fatalf("no dist/ artifacts found (%v): the check would look at nothing", err)
+	}
+	for _, f := range dist {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), public) {
+			t.Errorf("%s names %s: a Nomad artifact cannot authenticate to a private repository's release; it must take the archive URL of a mirror the cluster reaches", f, public)
+		}
+	}
+	t.Logf("%d unpack lines and %d dist artifacts checked", n, len(dist))
+}
