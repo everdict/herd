@@ -27,6 +27,8 @@ type world struct {
 	mu      sync.Mutex
 	answers map[string][][]netip.Addr // name -> successive answers (the last one repeats)
 	lookups map[string]int
+	// asked counts every lookup of a name, answered or not.
+	asked map[string]int
 
 	dialed []string // ip:port the gateway dialed
 
@@ -64,7 +66,7 @@ func (u *upstream) handler() http.Handler {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	w := &world{answers: map[string][][]netip.Addr{}, lookups: map[string]int{}}
+	w := &world{answers: map[string][][]netip.Addr{}, lookups: map[string]int{}, asked: map[string]int{}}
 	w.httpUp = &upstream{}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -138,6 +140,7 @@ func (w *world) resolve(name string, answers ...[]string) {
 func (w *world) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.asked[host]++
 	as, ok := w.answers[host]
 	if !ok || len(as) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}

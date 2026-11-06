@@ -24,7 +24,7 @@ const (
 func (w *world) lookupsOf(name string) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.lookups[name]
+	return w.asked[name]
 }
 
 func loadServices(t *testing.T, g *gw, file string) []error {
