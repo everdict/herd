@@ -1,6 +1,7 @@
 // Package storetest is the snapstore.Store contract every implementation runs (disk, s3): Put answers only for bytes
-// that are durable and match its digest, a fresh handle onto the same store reads them at once, Verify re-reads, and
-// a failed or unknown write never answers success nor leaves an object Stat reports.
+// that are durable and match its digest, a fresh handle onto the same store reads them at once, Verify re-reads, Copy
+// answers only for a copy that holds the source's bytes, and a failed or unknown write never answers success nor
+// leaves an object Stat reports.
 package storetest
 
 import (
@@ -265,6 +266,87 @@ func Run(t *testing.T, h Harness) {
 		h.Tamper(t, "t/1")
 		if got, err := h.Open(t).Verify(ctx, "t/1", o.Digest); !errors.Is(err, snapstore.ErrDigestMismatch) {
 			t.Errorf("Verify of changed bytes = %+v, %v; want ErrDigestMismatch", got, err)
+		}
+	})
+
+	t.Run("CopyHoldsTheBytes", func(t *testing.T) {
+		ctx := ctxT(t)
+		s := h.Open(t)
+		data := []byte(strings.Repeat("snapshot bytes ", 7))
+		o, err := s.Put(ctx, "c/from", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := snapstore.Object{Key: "c/to", Digest: o.Digest, Size: o.Size}
+		if got, err := s.Copy(ctx, "c/from", "c/to", o.Digest); err != nil || got != want {
+			t.Fatalf("Copy = %+v, %v; want %+v", got, err, want)
+		}
+		other := h.Open(t)
+		if got, err := other.Stat(ctx, "c/to"); err != nil || got != want {
+			t.Errorf("Stat of the copy from another handle = %+v, %v; want %+v", got, err, want)
+		}
+		if got := readAll(t, other, "c/to"); !bytes.Equal(got, data) {
+			t.Errorf("the copy reads %q, want %q", got, data)
+		}
+		if got := readAll(t, other, "c/from"); !bytes.Equal(got, data) {
+			t.Errorf("the source reads %q after the copy, want %q", got, data)
+		}
+	})
+
+	t.Run("CopyRefusesWhatIsNotTheDigest", func(t *testing.T) {
+		ctx := ctxT(t)
+		s := h.Open(t)
+		o, err := s.Put(ctx, "c/src", strings.NewReader("snapshot"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Copy(ctx, "c/src", "c/wrong", digestOf([]byte("other"))); !errors.Is(err, snapstore.ErrDigestMismatch) {
+			t.Errorf("Copy under another digest = %+v, %v; want ErrDigestMismatch", got, err)
+		}
+		wantNotFound(t, h.Open(t), "c/wrong", "a Copy under another digest")
+		if got, err := s.Copy(ctx, "c/none", "c/missing", o.Digest); !errors.Is(err, snapstore.ErrNotFound) {
+			t.Errorf("Copy of a missing object = %+v, %v; want ErrNotFound", got, err)
+		}
+		wantNotFound(t, h.Open(t), "c/missing", "a Copy of a missing object")
+		if _, err := s.Copy(ctx, "c/src", "../x", o.Digest); !errors.Is(err, snapstore.ErrBadKey) {
+			t.Errorf("Copy to a bad key: %v; want ErrBadKey", err)
+		}
+		if h.Tamper == nil {
+			return
+		}
+		h.Tamper(t, "c/src")
+		if got, err := s.Copy(ctx, "c/src", "c/tampered", o.Digest); !errors.Is(err, snapstore.ErrDigestMismatch) {
+			t.Errorf("Copy of changed bytes = %+v, %v; want ErrDigestMismatch", got, err)
+		}
+		wantNotFound(t, h.Open(t), "c/tampered", "a Copy of changed bytes")
+	})
+
+	t.Run("FailedOrUnknownCopyNeverAnswersSuccess", func(t *testing.T) {
+		if h.Fault == nil {
+			t.Skip("the harness cannot fail writes")
+		}
+		for _, c := range []struct {
+			name  string
+			fault WriteFault
+		}{{"refused", RefuseWrites}, {"answer lost", LoseAnswers}, {"stored other bytes", CorruptWrites}} {
+			t.Run(c.name, func(t *testing.T) {
+				s := h.Open(t)
+				key := "cw/" + strings.ReplaceAll(c.name, " ", "-")
+				o, err := s.Put(ctxT(t), key+"-src", strings.NewReader("snapshot bytes"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.Put(ctxT(t), key, strings.NewReader("old")); err != nil {
+					t.Fatal(err)
+				}
+				h.Fault(t, c.fault)
+				got, err := s.Copy(ctxT(t), key+"-src", key, o.Digest)
+				h.Fault(t, Honest)
+				if err == nil {
+					t.Errorf("Copy = %+v, nil; a write that %s answered success", got, c.name)
+				}
+				wantNotFound(t, h.Open(t), key, "a copy that "+c.name)
+			})
 		}
 	})
 

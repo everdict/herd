@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"time"
 )
 
 // Object is one stored snapshot object.
@@ -35,6 +36,10 @@ type Store interface {
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
 	// Delete removes the object and verifies it is gone; deleting a missing object is not an error.
 	Delete(ctx context.Context, key string) error
+	// Copy stores under to the bytes of the object at from, which must be digest's, and returns only once the copy
+	// is durable and holds exactly them: ErrNotFound, ErrDigestMismatch. A Copy that fails leaves no object under to
+	// that Stat would report.
+	Copy(ctx context.Context, from, to, digest string) (Object, error)
 }
 
 var (
@@ -53,4 +58,31 @@ func ValidateKey(key string) error {
 		return fmt.Errorf("%w: %q", ErrBadKey, key)
 	}
 	return nil
+}
+
+// StreamCopy is Copy through the client: it reads the object at from and Puts its bytes under to, and answers only
+// if what Put stored is digest's bytes; otherwise it deletes to. Put's own promises (durable, matching its digest,
+// nothing under to after a failure) make that the whole check: the source's bytes are read once.
+func StreamCopy(ctx context.Context, s Store, from, to, digest string) (Object, error) {
+	if err := ValidateKey(to); err != nil {
+		return Object{}, err
+	}
+	rc, err := s.Open(ctx, from)
+	if err != nil {
+		return Object{}, err
+	}
+	defer rc.Close()
+	obj, err := s.Put(ctx, to, rc)
+	if err != nil {
+		return Object{}, err
+	}
+	if obj.Digest != digest {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if derr := s.Delete(dctx, to); derr != nil {
+			return Object{}, fmt.Errorf("%w: copy of %s holds %s, want %s (and removing it: %v)", ErrDigestMismatch, from, obj.Digest, digest, derr)
+		}
+		return Object{}, fmt.Errorf("%w: copy of %s holds %s, want %s", ErrDigestMismatch, from, obj.Digest, digest)
+	}
+	return obj, nil
 }

@@ -206,3 +206,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+// Copy streams the object: a local copy is a read and a write of the same disk.
+func (s *Store) Copy(ctx context.Context, from, to, digest string) (snapstore.Object, error) {
+	return snapstore.StreamCopy(ctx, s, from, to, digest)
+}

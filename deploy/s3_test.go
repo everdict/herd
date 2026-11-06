@@ -295,3 +295,59 @@ func TestJoinedHostsForkAndMoveAtMemoryThroughS3(t *testing.T) {
 		}
 	})
 }
+
+// TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI (DEFAUL-1610): with snapshots in S3, herd-api proves a suspend's
+// object by the endpoint's checksum (a HEAD) rather than reading it, and a tag of the suspended actor is a copy inside
+// the bucket proved the same way: neither moves a byte of the snapshot through herd-api. Its counterexample is
+// herd-api before DEFAUL-1610, which read the whole object to verify a suspend (2m43s live) and, for the tag, read it
+// again, streamed it out and back and read the copy (13 minutes on a built box).
+func TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI(t *testing.T) {
+	srv, _, addr, key, tok := s3HerdAPI(t)
+	h := herdletOn(t, "node-1", nil)
+	h.API, h.Token, h.Labels = addr, tok, "host=node-1"
+	runHerdlet(t, h)
+	ctl := writeToken(t, key)
+	waitWorkers(t, addr, ctl, 1)
+
+	c := conformance.NewClient(addr, ctl)
+	defer c.Close()
+	cctx := ctxT(t)
+	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
+		Metadata:       &ateapi.ResourceMetadata{Atespace: space, Name: "agent"},
+		Containers:     []*ateapi.Container{{Name: "main", Image: "ghcr.io/everdict/agent:1"}},
+		SnapshotConfig: &ateapi.SnapshotConfig{PreferredFidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, GoldenSnapshotConfig: coldBoot},
+	}}); err != nil {
+		t.Fatalf("CreateActorTemplate: %v", err)
+	}
+	ref := &ateapi.ObjectRef{Atespace: space, Name: "a1"}
+	if _, err := c.CreateActor(cctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "a1"}, ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: "agent"},
+	}}); err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+	served := srv.Served()
+	sr, err := c.SuspendActor(cctx, &ateapi.SuspendActorRequest{Actor: ref, Options: &ateapi.SuspendOptions{Mode: ateapi.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS}})
+	if err != nil {
+		t.Fatalf("SuspendActor: %v", err)
+	}
+	if s := sr.GetActor().GetStatus().GetState(); s != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Fatalf("state %v after suspend", s)
+	}
+	if n := srv.Served() - served; n != 0 {
+		t.Errorf("the suspend read %d bytes of its snapshot back from the bucket; the endpoint's checksum proves it", n)
+	}
+	served, received := srv.Served(), srv.Received()
+	tag, err := c.CreateTag(cctx, &ateapi.CreateTagRequest{Tag: &ateapi.Tag{Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "t1"}, SourceActor: ref}})
+	if err != nil {
+		t.Fatalf("CreateTag of the suspended actor: %v", err)
+	}
+	if s, r := srv.Served()-served, srv.Received()-received; s != 0 || r != 0 {
+		t.Errorf("the tag moved %d snapshot bytes out of the bucket and %d into it through herd-api; want a copy inside the bucket", s, r)
+	}
+	if copies, _ := srv.Copies(); copies != 1 {
+		t.Errorf("%d CopyObject calls, want 1", copies)
+	}
+	if tag.GetStatus().GetSnapshot() == nil || len(srv.Keys()) != 2 {
+		t.Errorf("the tag records snapshot %v and the bucket holds %v; want the actor's object and its copy", tag.GetStatus().GetSnapshot(), srv.Keys())
+	}
+}

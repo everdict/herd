@@ -1,7 +1,8 @@
-// Package s3test is an in-process S3 endpoint for tests: path-style PUT, GET, HEAD and DELETE of objects and the
-// multipart upload calls (create, upload part, complete, abort), SigV4 checked against one set of credentials, the
-// signed payload hash and x-amz-checksum-sha256 checked against the body as S3 does, S3's composite checksum of a
-// multipart object, and switches for the faults a real endpoint or the network between can produce.
+// Package s3test is an in-process S3 endpoint for tests: path-style PUT, GET, HEAD and DELETE of objects, the
+// multipart upload calls (create, upload part, complete, abort), the server-side copies (CopyObject, UploadPartCopy)
+// and HEAD of one part (?partNumber), SigV4 checked against one set of credentials, the signed payload hash and
+// x-amz-checksum-sha256 checked against the body as S3 does, S3's composite checksum of a multipart object, and
+// switches for the faults a real endpoint or the network between can produce.
 package s3test
 
 import (
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +25,7 @@ import (
 )
 
 // Fault is what the endpoint does to the next PUTs; for a multipart upload, Refuse applies to its parts and
-// DropAnswer and Corrupt to its completion.
+// DropAnswer and Corrupt to its completion; a CopyObject is a PUT, and an UploadPartCopy a part.
 type Fault int
 
 const (
@@ -47,6 +49,8 @@ type object struct {
 	// composite is S3's checksum of an object a multipart upload made: "<base64 SHA-256 of the parts' SHA-256s>-<n>",
 	// of the parts as the endpoint stored them. Empty for one PUT, whose checksum is its bytes' SHA-256.
 	composite string
+	// parts are the sizes of the parts of an object a multipart upload made, nil for one PUT.
+	parts []int64
 }
 
 // checksum is what HEAD reports as the object's x-amz-checksum-sha256.
@@ -85,12 +89,17 @@ type Server struct {
 	// writeRate, if positive, is the bytes per second a PUT's body is taken at.
 	writeRate int64
 	served    int64
+	received  int64
 	// maxPut, if positive, is the largest body one PUT takes (S3's is 5 GiB).
 	maxPut  int64
 	minPart int64
 	uploads map[string]*upload
 	nextID  int
 	parts   int
+	// noCopy makes CopyObject and UploadPartCopy answer 501 NotImplemented (an endpoint that copies nothing).
+	noCopy     bool
+	copies     int
+	partCopies int
 }
 
 // New returns a server that accepts creds in region.
@@ -183,6 +192,28 @@ func (s *slowReader) Read(p []byte) (int, error) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// SetNoCopy makes the server refuse every server-side copy with 501 NotImplemented, as an endpoint that does not
+// implement CopyObject and UploadPartCopy answers.
+func (s *Server) SetNoCopy(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noCopy = on
+}
+
+// Copies counts the CopyObject calls the server stored; partCopies the UploadPartCopy calls it took.
+func (s *Server) Copies() (copies, partCopies int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.copies, s.partCopies
+}
+
+// Received counts the bytes the server took in PUT bodies (objects and parts).
+func (s *Server) Received() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.received
 }
 
 // Served counts the object bytes the server sent in GET bodies.
@@ -306,8 +337,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && q.Has("uploads"):
 		s.createUpload(w, r, path)
 		return
+	case r.Method == http.MethodPut && q.Has("uploadId") && r.Header.Get("X-Amz-Copy-Source") != "":
+		s.uploadPartCopy(w, r, path, q.Get("uploadId"), q.Get("partNumber"))
+		return
 	case r.Method == http.MethodPut && q.Has("uploadId"):
 		s.uploadPart(w, r, path, q.Get("uploadId"), q.Get("partNumber"))
+		return
+	case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+		s.copyObject(w, r, path)
 		return
 	case r.Method == http.MethodPost && q.Has("uploadId"):
 		s.completeUpload(w, r, path, q.Get("uploadId"))
@@ -338,7 +375,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s3Error(w, http.StatusNotFound, "NoSuchKey")
 			return
 		}
-		w.Header().Set("Content-Length", strconv.Itoa(len(o.data)))
+		size := int64(len(o.data))
+		if pn := q.Get("partNumber"); pn != "" && r.Method == http.MethodHead {
+			// One part of a multipart object; an object one PUT made is its own part 1.
+			n, err := strconv.Atoi(pn)
+			if err != nil || n < 1 || (o.parts == nil && n != 1) || (o.parts != nil && n > len(o.parts)) {
+				s3Error(w, http.StatusRequestedRangeNotSatisfiable, "InvalidPartNumber")
+				return
+			}
+			if o.parts != nil {
+				size = o.parts[n-1]
+				w.Header().Set("X-Amz-Mp-Parts-Count", strconv.Itoa(len(o.parts)))
+			}
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set(s3.DigestHeader, o.digest)
 		if !noChecksum && r.Header.Get("X-Amz-Checksum-Mode") == "ENABLED" {
 			w.Header().Set(s3.ChecksumHeader, o.checksum())
@@ -379,6 +429,9 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) ([]byte, [32]byte,
 		s3Error(w, http.StatusBadRequest, "IncompleteBody")
 		return nil, [32]byte{}, false
 	}
+	s.mu.Lock()
+	s.received += int64(len(data))
+	s.mu.Unlock()
 	sum := sha256.Sum256(data)
 	if r.Header.Get("X-Amz-Content-Sha256") != hex.EncodeToString(sum[:]) {
 		s3Error(w, http.StatusBadRequest, "XAmzContentSHA256Mismatch")
@@ -507,6 +560,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, path, id
 		return
 	}
 	var data, sums []byte
+	var sizes []int64
 	for i, p := range req.Parts {
 		got, ok := u.parts[p.PartNumber]
 		if i > 0 && p.PartNumber <= req.Parts[i-1].PartNumber {
@@ -533,11 +587,12 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, path, id
 		}
 		data = append(data, d...)
 		sums = append(sums, sum[:]...)
+		sizes = append(sizes, int64(len(d)))
 	}
 	fault := s.fault
 	composite := sha256.Sum256(sums)
 	s.objects[path] = object{data: data, digest: u.digest,
-		composite: base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(req.Parts))}
+		composite: base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(req.Parts)), parts: sizes}
 	delete(s.uploads, id)
 	s.puts++
 	s.mu.Unlock()
@@ -547,4 +602,132 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, path, id
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CompleteMultipartUploadResult><Key>%s</Key></CompleteMultipartUploadResult>", path)
+}
+
+// copySource reads a copy's x-amz-copy-source ("/bucket/key" or "bucket/key", URL-encoded) and the object it names.
+func (s *Server) copySource(w http.ResponseWriter, r *http.Request) (object, bool) {
+	src, err := url.PathUnescape(r.Header.Get("X-Amz-Copy-Source"))
+	if err != nil {
+		s3Error(w, http.StatusBadRequest, "InvalidArgument")
+		return object{}, false
+	}
+	if !strings.HasPrefix(src, "/") {
+		src = "/" + src
+	}
+	s.mu.Lock()
+	o, ok := s.objects[src]
+	s.mu.Unlock()
+	if !ok {
+		s3Error(w, http.StatusNotFound, "NoSuchKey")
+		return object{}, false
+	}
+	return o, true
+}
+
+// copyRequest checks what S3 checks of a copy, which has no body: its signed payload hash; and refuses it from an
+// endpoint that copies nothing.
+func (s *Server) copyRequest(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Amz-Content-Sha256") != s3.EmptySHA256 {
+		s3Error(w, http.StatusBadRequest, "XAmzContentSHA256Mismatch")
+		return false
+	}
+	s.mu.Lock()
+	noCopy := s.noCopy
+	s.mu.Unlock()
+	if noCopy {
+		s3Error(w, http.StatusNotImplemented, "NotImplemented")
+		return false
+	}
+	return true
+}
+
+// copyObject is CopyObject: the source's bytes become the object at path, with the source's metadata or, with
+// x-amz-metadata-directive: REPLACE, the request's. Its checksum is the SHA-256 of the bytes it stored, as S3 computes
+// a full-object checksum for a copy made in one call. Past the largest PUT it answers InvalidRequest, as S3 does past
+// 5 GiB.
+func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, path string) {
+	if !s.copyRequest(w, r) {
+		return
+	}
+	o, ok := s.copySource(w, r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxPut > 0 && int64(len(o.data)) > s.maxPut {
+		s3Error(w, http.StatusBadRequest, "InvalidRequest")
+		return
+	}
+	if s.fault == Refuse {
+		s3Error(w, http.StatusServiceUnavailable, "ServiceUnavailable")
+		return
+	}
+	digest := o.digest
+	if r.Header.Get("X-Amz-Metadata-Directive") == "REPLACE" {
+		digest = r.Header.Get(s3.DigestHeader)
+	}
+	data := o.data
+	if s.fault == Corrupt && len(data) > 0 {
+		data = bytes.Clone(data)
+		data[len(data)-1] ^= 0x01
+	}
+	c := object{data: data, digest: digest}
+	s.objects[path] = c
+	s.copies++
+	if s.fault == DropAnswer {
+		dropAnswer(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyObjectResult><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></CopyObjectResult>",
+		etag(sha256.Sum256(data)), c.checksum())
+}
+
+// uploadPartCopy is UploadPartCopy: the bytes x-amz-copy-source-range names of the source become a part of the
+// upload, answered with its ETag and SHA-256 checksum. Past the largest PUT it answers InvalidRequest.
+func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, path, id, number string) {
+	n, err := strconv.Atoi(number)
+	if err != nil || n < 1 || n > 10000 {
+		s3Error(w, http.StatusBadRequest, "InvalidArgument")
+		return
+	}
+	if !s.copyRequest(w, r) {
+		return
+	}
+	o, ok := s.copySource(w, r)
+	if !ok {
+		return
+	}
+	data := o.data
+	if rg := r.Header.Get("X-Amz-Copy-Source-Range"); rg != "" {
+		var first, last int64
+		if _, err := fmt.Sscanf(rg, "bytes=%d-%d", &first, &last); err != nil || first < 0 || last < first || last >= int64(len(data)) {
+			s3Error(w, http.StatusBadRequest, "InvalidArgument")
+			return
+		}
+		data = data[first : last+1]
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxPut > 0 && int64(len(data)) > s.maxPut {
+		s3Error(w, http.StatusBadRequest, "InvalidRequest")
+		return
+	}
+	u, ok := s.uploads[id]
+	if !ok || u.path != path {
+		s3Error(w, http.StatusNotFound, "NoSuchUpload")
+		return
+	}
+	if s.fault == Refuse {
+		s3Error(w, http.StatusServiceUnavailable, "ServiceUnavailable")
+		return
+	}
+	sum := sha256.Sum256(data)
+	u.parts[n] = part{data: data, sum: sum}
+	s.parts++
+	s.partCopies++
+	w.Header().Set("Content-Type", "application/xml")
+	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyPartResult><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></CopyPartResult>",
+		etag(sum), base64.StdEncoding.EncodeToString(sum[:]))
 }

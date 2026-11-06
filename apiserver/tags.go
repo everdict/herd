@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
@@ -50,17 +49,10 @@ func (tr *tagRec) view() *ateapi.Tag {
 	return t
 }
 
-// copySnapshot copies a durable snapshot object to a new key and verifies the copy.
+// copySnapshot copies a durable snapshot object to a new key, within the store (snapstore.Store.Copy: server-side
+// where the store can), and answers only for a copy that holds the snapshot's bytes.
 func (s *Server) copySnapshot(ctx context.Context, from *link.SnapshotRef, key string) (*link.SnapshotRef, error) {
-	if _, err := s.cfg.Snapshots.Verify(ctx, from.Key, from.Digest); err != nil {
-		return nil, err
-	}
-	rc, err := s.cfg.Snapshots.Open(ctx, from.Key)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	obj, err := s.cfg.Snapshots.Put(ctx, key, io.Reader(rc))
+	obj, err := s.cfg.Snapshots.Copy(ctx, from.Key, key, from.Digest)
 	if err != nil {
 		return nil, err
 	}

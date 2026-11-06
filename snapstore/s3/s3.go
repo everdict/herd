@@ -95,6 +95,9 @@ type Store struct {
 	// PartSize is the size of the parts Put uploads an object larger than it in (zero: DefaultPartSize). Put raises
 	// it for an object that would need more than MaxParts parts. S3 takes no part but the last smaller than 5 MiB.
 	PartSize int64
+	// MaxCopySize is the largest object Copy copies in one CopyObject (zero: MaxPutSize, S3's 5 GiB); a larger one is
+	// copied part by part (UploadPartCopy).
+	MaxCopySize int64
 }
 
 // New returns a store for cfg. client nil means http.DefaultClient.
@@ -601,4 +604,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("%w: %s still there (%v)", snapstore.ErrNotDeleted, key, err)
 	}
 	return nil
+}
+
+func (s *Store) Copy(ctx context.Context, from, to, digest string) (snapstore.Object, error) {
+	return snapstore.StreamCopy(ctx, s, from, to, digest)
 }
