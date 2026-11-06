@@ -156,10 +156,14 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	dir := filepath.Join(l.RunDir, "containers", c.Name)
 	lower, upper, work := filepath.Join(dir, "image"), filepath.Join(dir, "upper"), filepath.Join(dir, "work")
 	rootfs := filepath.Join(dir, "rootfs")
-	for _, d := range []string{lower, upper, work, rootfs} {
+	tmp := filepath.Join(dir, "tmp")
+	for _, d := range []string{lower, upper, work, rootfs, tmp} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return Booted{}, fmt.Errorf("initd: %w", err)
 		}
+	}
+	if err := os.Chmod(tmp, 0o777|os.ModeSticky); err != nil {
+		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
 	const msRdonly = 0x1
 	if err := m.Mount(c.Image.Device, lower, c.Image.FSType, msRdonly, ""); err != nil {
@@ -174,7 +178,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	}
 	cfg := oci.Config{
 		Name: c.Name, Rootfs: rootfs, Args: append(append([]string(nil), c.Command...), c.Args...),
-		Cwd: c.Workdir, User: user, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary,
+		Cwd: c.Workdir, User: user, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary, TmpDir: tmp,
 	}
 	for _, e := range c.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
@@ -198,6 +202,10 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	}
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600); err != nil {
 		return Booted{}, fmt.Errorf("initd: %w", err)
+	}
+	// The file API maps /tmp as it maps a volume: the bind is in the container's mount namespace only.
+	if _, ok := mounted["/tmp"]; !ok {
+		mounted["/tmp"] = tmp
 	}
 	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user}, nil
 }

@@ -44,6 +44,13 @@ func (f *fakeRuntime) Run(_ context.Context, id, bundle string) (*oci.Watch, err
 		f.t.Fatal(err)
 	}
 	for _, m := range s.Mounts {
+		if m.Destination == "/tmp" {
+			fi, err := os.Stat(m.Source)
+			if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSticky == 0 || fi.Mode().Perm() != 0o777 {
+				f.t.Errorf("container %s binds %s at /tmp, which is not a sticky world-writable directory: %v", id, m.Source, err)
+			}
+			continue
+		}
 		if m.Type == "bind" && strings.HasPrefix(m.Source, f.run+"/") {
 			if fi, err := os.Stat(m.Source); err != nil || !fi.Mode().IsRegular() {
 				f.t.Errorf("container %s binds guest file %s, which is not a file: %v", id, m.Source, err)

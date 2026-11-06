@@ -66,6 +66,29 @@ func (c *container) openVolumes() error {
 	return nil
 }
 
+// missingParents answers the directories of dir, outermost first, that do not exist yet.
+func missingParents(root *os.Root, dir string) []string {
+	var out []string
+	for d := dir; d != "." && d != "/" && d != ""; d = path.Dir(d) {
+		if _, err := root.Lstat(d); !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		out = append([]string{d}, out...)
+	}
+	return out
+}
+
+// ownAll gives each path to the container's user: the guest writes as root, and a process must be able to edit what the
+// API created for it, and remove it from the sticky /tmp.
+func ownAll(names []string, chown func(string) error) error {
+	for _, n := range names {
+		if err := chown(n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func fileError(err error, verb, p string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -158,8 +181,12 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 			if req.GetSeekOffset() < 0 {
 				return nil, status.Errorf(codes.InvalidArgument, "seek_offset cannot be negative")
 			}
+			created := missingParents(root, path.Dir(name))
 			if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
 				return nil, fileError(err, "creating parents of", reqP)
+			}
+			if _, err := root.Lstat(name); errors.Is(err, fs.ErrNotExist) {
+				created = append(created, name)
 			}
 			mode := fs.FileMode(0o644)
 			if req.GetMode() != 0 {
@@ -171,6 +198,13 @@ func (g *Guest) WriteFile(md func(string) string, recv func() (*ateenv.WriteFile
 			}
 			if f, err = root.OpenFile(name, flags, mode); err != nil {
 				return nil, fileError(err, "opening", reqP)
+			}
+			if ot, ok := c.t.(OwnedTarget); ok {
+				if uid, gid := ot.Owner(); uid != 0 || gid != 0 {
+					if err := ownAll(created, func(n string) error { return root.Chown(n, uid, gid) }); err != nil {
+						return nil, fileError(err, "owning", reqP)
+					}
+				}
 			}
 			if req.GetSeekOffset() > 0 {
 				if _, err := f.Seek(req.GetSeekOffset(), io.SeekStart); err != nil {

@@ -114,3 +114,23 @@ func TestSpecFileMounts(t *testing.T) {
 		}
 	}
 }
+
+// A tmpfs at /tmp exists only in the container's mount namespace, so the guest's file API wrote beneath it and a process
+// never saw the file. /tmp is a bind of a guest directory the file API can map, as a volume is.
+func TestTmpIsABindOfTheGivenDirectory(t *testing.T) {
+	c := mainConfig()
+	c.TmpDir = "/run/herd/containers/box/tmp"
+	s, err := oci.Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range s.Mounts {
+		if m.Destination == "/tmp" {
+			if m.Type != "bind" || m.Source != c.TmpDir {
+				t.Fatalf("/tmp mount = %+v, want a bind of %s", m, c.TmpDir)
+			}
+			return
+		}
+	}
+	t.Fatal("no mount at /tmp")
+}

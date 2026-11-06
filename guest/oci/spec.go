@@ -104,6 +104,9 @@ type Config struct {
 	User     User
 	ShareDir string
 	Volumes  []VolumeMount
+	// TmpDir is the guest directory bound at /tmp. A tmpfs there would exist only in the container's mount namespace, so
+	// the guest's file API would write beneath it and a process would never see the file. Empty: a tmpfs.
+	TmpDir string
 	// Files are guest files bound read-only into the container (its resolv.conf and trust bundles).
 	Files []FileMount
 	// GuestBinary is herd-guest's path in the guest, bound at GuestBinary in the container.
@@ -168,6 +171,13 @@ func Build(c Config) (*Spec, error) {
 				"/proc/timer_stats", "/proc/sched_debug", "/proc/scsi", "/sys/firmware"},
 			ReadonlyPaths: []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"},
 		},
+	}
+	if c.TmpDir != "" {
+		for i := range s.Mounts {
+			if s.Mounts[i].Destination == "/tmp" {
+				s.Mounts[i] = Mount{Destination: "/tmp", Type: "bind", Source: c.TmpDir, Options: []string{"rbind", "nosuid", "nodev"}}
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for _, v := range c.Volumes {
