@@ -21,6 +21,11 @@ To move the pin: replace `testdata/upstream-ateapi.proto` with the new upstream 
 `go generate ./api/...`, and let `go test ./api/... ./internal/...` say what changed.
 
 herd's own fields on upstream messages (PLT-330, ADR 0001 A-34) are listed in `herd-additions.txt` and appended by
-the same cut (`-additions`), each marked "herd addition" and numbered from 1000: today only
-`CreateActorTemplateRequest.image_pull_auth`. Generated with the same protoc and protoc-gen-go as above (fetched
-from GitHub as build tools); they reproduce the previous `ateapi.pb.go` byte for byte.
+the same cut (`-additions`), each marked "herd addition" and numbered from 1000: today
+`CreateActorTemplateRequest.image_pull_auth` and `image_plain_http_hosts` (DEFAUL-1600). Generated with the same
+protoc and protoc-gen-go as above (fetched from GitHub as build tools); they reproduce the previous `ateapi.pb.go`
+byte for byte. `image_plain_http_hosts` was written into `ateapi.pb.go` where no protoc was: its raw descriptor is
+the previous one with the field added (descriptorpb, proto.Marshal deterministic, quoted as protoc-gen-go quotes
+it; the unchanged descriptor round-trips byte for byte), its struct field and getter in protoc-gen-go's shape.
+`TestHerdAdditionsInTheDescriptor` holds the descriptor to `herd-additions.txt` and `ateapi.proto`; `go generate`
+with protoc replaces the file.

@@ -4391,8 +4391,18 @@ type CreateActorTemplateRequest struct {
 	//
 	// +k8s:optional
 	ImagePullAuth string `protobuf:"bytes,1000,opt,name=image_pull_auth,json=imagePullAuth,proto3" json:"image_pull_auth,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// herd addition (DEFAUL-1600): the hosts of the template's golden build pull
+	// that speak plain HTTP rather than https, each a host[:port] matched exactly
+	// as written: an image store run without TLS and its token realm. One-shot
+	// like image_pull_auth: used only for the pull that builds the template's
+	// golden snapshot, beside the node's own -insecure-registry hosts, never
+	// stored and never returned. A login (image_pull_auth or the node's) is sent
+	// over plain HTTP only to a host named here or by the node.
+	//
+	// +k8s:optional
+	ImagePlainHttpHosts []string `protobuf:"bytes,1001,rep,name=image_plain_http_hosts,json=imagePlainHttpHosts,proto3" json:"image_plain_http_hosts,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CreateActorTemplateRequest) Reset() {
@@ -4437,6 +4447,13 @@ func (x *CreateActorTemplateRequest) GetImagePullAuth() string {
 		return x.ImagePullAuth
 	}
 	return ""
+}
+
+func (x *CreateActorTemplateRequest) GetImagePlainHttpHosts() []string {
+	if x != nil {
+		return x.ImagePlainHttpHosts
+	}
+	return nil
 }
 
 type GetActorTemplateRequest struct {
@@ -6959,10 +6976,11 @@ const file_ateapi_v1_ateapi_proto_rawDesc = "" +
 	"\vVolumeMount\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"mount_path\x18\x02 \x01(\tR\tmountPath\"\x90\x01\n" +
+	"mount_path\x18\x02 \x01(\tR\tmountPath\"\xc6\x01\n" +
 	"\x1aCreateActorTemplateRequest\x12I\n" +
 	"\x0eactor_template\x18\x01 \x01(\v2\".substrate.ateapi.v1.ActorTemplateR\ractorTemplate\x12'\n" +
-	"\x0fimage_pull_auth\x18\xe8\a \x01(\tR\rimagePullAuth\"`\n" +
+	"\x0fimage_pull_auth\x18\xe8\a \x01(\tR\rimagePullAuth\x124\n" +
+	"\x16image_plain_http_hosts\x18\xe9\a \x03(\tR\x13imagePlainHttpHosts\"`\n" +
 	"\x17GetActorTemplateRequest\x12E\n" +
 	"\x0eactor_template\x18\x01 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\ractorTemplate\"\xa1\x01\n" +
 	"\x1aDeleteActorTemplateRequest\x12E\n" +

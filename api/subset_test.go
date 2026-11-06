@@ -3,7 +3,9 @@ package api_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -170,4 +172,57 @@ func TestHerdAdditionImagePullAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	walk(tpl.(protoreflect.MessageDescriptor), map[protoreflect.FullName]bool{})
+}
+
+// TestHerdAdditionsInTheDescriptor holds ateapi.pb.go to herd-additions.txt and ateapi.proto: every field the
+// additions declare is in ateapi.proto and in the registered descriptor with the same number, type and label, and the
+// descriptor's CreateActorTemplateRequest has no herd field they do not declare. DEFAUL-1600's
+// image_plain_http_hosts was written into ateapi.pb.go without protoc (none in that box), its raw descriptor by
+// descriptorpb and proto.Marshal; go generate ./api with protoc replaces it, and this test holds both to the same.
+func TestHerdAdditionsInTheDescriptor(t *testing.T) {
+	add, err := os.ReadFile("ateapi/v1/herd-additions.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proto, err := os.ReadFile("ateapi/v1/ateapi.proto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]protoreflect.Kind{"string": protoreflect.StringKind}
+	field := regexp.MustCompile(`(?m)^\s+(repeated )?(\w+) (\w+) = (\d+);$`)
+	msgs := regexp.MustCompile(`(?s)message (\w+) \{(.*?)\n\}`).FindAllStringSubmatch(string(add), -1)
+	if len(msgs) == 0 {
+		t.Fatal("herd-additions.txt declares no message")
+	}
+	for _, m := range msgs {
+		d, err := protoregistry.GlobalFiles.FindDescriptorByName(protoreflect.FullName("substrate.ateapi.v1." + m[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		md := d.(protoreflect.MessageDescriptor)
+		declared := map[protoreflect.Name]bool{}
+		for _, f := range field.FindAllStringSubmatch(m[2], -1) {
+			if !strings.Contains(string(proto), f[0]+"\n") {
+				t.Errorf("%s.%s: herd-additions.txt declares it, ateapi.proto does not (go generate ./api)", m[1], f[3])
+			}
+			declared[protoreflect.Name(f[3])] = true
+			fd := md.Fields().ByName(protoreflect.Name(f[3]))
+			card := protoreflect.Optional
+			if f[1] != "" {
+				card = protoreflect.Repeated
+			}
+			kind, ok := kinds[f[2]]
+			if !ok {
+				t.Fatalf("%s.%s: type %s: teach this test its kind", m[1], f[3], f[2])
+			}
+			if fd == nil || fmt.Sprint(fd.Number()) != f[4] || fd.Kind() != kind || fd.Cardinality() != card {
+				t.Errorf("%s.%s: the descriptor has %v, herd-additions.txt declares %q", m[1], f[3], fd, strings.TrimSpace(f[0]))
+			}
+		}
+		for i := 0; i < md.Fields().Len(); i++ {
+			if fd := md.Fields().Get(i); fd.Number() >= 1000 && !declared[fd.Name()] {
+				t.Errorf("%s.%s: a herd field herd-additions.txt does not declare", m[1], fd.Name())
+			}
+		}
+	}
 }

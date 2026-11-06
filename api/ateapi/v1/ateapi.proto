@@ -1541,6 +1541,17 @@ message CreateActorTemplateRequest {
   //
   // +k8s:optional
   string image_pull_auth = 1000;
+
+  // herd addition (DEFAUL-1600): the hosts of the template's golden build pull
+  // that speak plain HTTP rather than https, each a host[:port] matched exactly
+  // as written: an image store run without TLS and its token realm. One-shot
+  // like image_pull_auth: used only for the pull that builds the template's
+  // golden snapshot, beside the node's own -insecure-registry hosts, never
+  // stored and never returned. A login (image_pull_auth or the node's) is sent
+  // over plain HTTP only to a host named here or by the node.
+  //
+  // +k8s:optional
+  repeated string image_plain_http_hosts = 1001;
 }
 
 message GetActorTemplateRequest {
