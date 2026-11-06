@@ -8,7 +8,9 @@
 //
 // Order of checks for every destination: the Guard (host-side names and addresses) first, then the actor's policy
 // (Substrate's EgressPolicy, package egress/policy), default-deny; at dial time the Guard again on every resolved
-// address. A matching https rule intercepts the TLS connection with a leaf from the gateway CA and decides each
+// address. A declared host service (LoadHostServices) is the one exception at the Guard: its exact name:port skips
+// the name check and is dialed at its declared target with no lookup and no address check; the policy still decides it.
+// A matching https rule intercepts the TLS connection with a leaf from the gateway CA and decides each
 // request inside it; replace_headers effects put the credential in on the way out, so the actor holds only a
 // placeholder.
 package egress
@@ -81,7 +83,7 @@ type Config struct {
 	OnEvent func(Event)
 	// FirstByteTimeout bounds how long a new flow may stay silent; default 30 s.
 	FirstByteTimeout time.Duration
-	// Endpoints are the Control and router endpoints.
+	// Endpoints are the Control and router endpoints; a declared host service may not name one as its target.
 	Endpoints []netip.AddrPort
 }
 
@@ -113,6 +115,9 @@ type Gateway struct {
 	// syncer, while its Run runs, keeps decisions on the policy herd-api last acknowledged (PLT-229).
 	syncer atomic.Pointer[Syncer]
 
+	// services are the declared host services (LoadHostServices).
+	services atomic.Pointer[map[serviceKey]HostService]
+
 	h1, h2c, tlsUp *http.Transport
 }
 
@@ -131,10 +136,13 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.Dialer == nil {
 		guard := cfg.Guard
-		cfg.Dialer = &net.Dialer{Timeout: 10 * time.Second, ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
+		cfg.Dialer = &net.Dialer{Timeout: 10 * time.Second, ControlContext: func(ctx context.Context, _, address string, _ syscall.RawConn) error {
 			ap, err := netip.ParseAddrPort(address)
 			if err != nil {
 				return err
+			}
+			if t, ok := ctx.Value(declaredTarget{}).(netip.AddrPort); ok && t == netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()) {
+				return nil
 			}
 			return guard.CheckAddr(ap.Addr())
 		}}
@@ -239,12 +247,15 @@ func (g *Gateway) record(a Actor, proto, name string, port int, err error) {
 	}
 }
 
-// decide runs the Guard and then the actor's current policy. With a Syncer running, that policy was read within
+// decide runs the Guard and then the actor's current policy; a declared host service's name:port skips the Guard's
+// name check (its target was checked when it was loaded), never the policy. With a Syncer running, that policy was read within
 // PolicyLease, and a refusal is decided again on a read that started after the decision began, so a policy write
 // herd-api has acknowledged decides this flow even if the periodic sync has not reached it yet (PLT-229).
 func (g *Gateway) decide(ctx context.Context, b *binding, in policy.Input, name string, port int) (policy.Decision, error) {
-	if err := g.cfg.Guard.CheckName(name); err != nil {
-		return policy.Decision{}, err
+	if _, ok := g.declared(name, port); !ok {
+		if err := g.cfg.Guard.CheckName(name); err != nil {
+			return policy.Decision{}, err
+		}
 	}
 	at := time.Now()
 	s := g.syncer.Load()
@@ -475,9 +486,11 @@ func (h *handler) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host = strings.ToLower(host)
-	if err := h.g.cfg.Guard.CheckName(host); err != nil {
-		h.refuse(w, "connect", host, port, err)
-		return
+	if _, ok := h.g.declared(host, port); !ok {
+		if err := h.g.cfg.Guard.CheckName(host); err != nil {
+			h.refuse(w, "connect", host, port, err)
+			return
+		}
 	}
 	if _, ok := policy.NormalizeName(host); !ok {
 		h.refuse(w, "connect", host, port, &RefusedError{Reason: fmt.Sprintf("CONNECT target %q is not a DNS name", host)})
@@ -518,6 +531,7 @@ func (g *Gateway) credential(ctx context.Context, a Actor, h policy.Header) (str
 
 // dial resolves name afresh and dials the first address the Guard passes. A name with any host-side address is
 // refused outright, so a name cannot be made to point at the host by adding an address to its answer.
+// A declared host service's name:port is dialed at exactly its target, with no lookup and no address check.
 func (g *Gateway) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, ps, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -526,6 +540,9 @@ func (g *Gateway) dial(ctx context.Context, network, addr string) (net.Conn, err
 	port, err := strconv.Atoi(ps)
 	if err != nil {
 		return nil, err
+	}
+	if target, ok := g.declared(host, port); ok {
+		return g.dialDeclared(ctx, network, target)
 	}
 	if err := g.cfg.Guard.CheckName(host); err != nil {
 		return nil, err
