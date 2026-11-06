@@ -9,6 +9,12 @@ variable "release_url" {
   type = string
 }
 
+# How long herd-api waits for a herdlet's answer: a golden snapshot of a 4 GiB actor uploads for about 3 minutes.
+variable "call_timeout" {
+  type    = string
+  default = "10m"
+}
+
 job "herd-api" {
   type = "service"
 
@@ -84,6 +90,7 @@ job "herd-api" {
           "-advertise-tunnel", "${NOMAD_ADDR_tunnel}",
           "-s3", "${HERD_S3}",
           "-s3-endpoint", "${HERD_S3_ENDPOINT}",
+          "-call-timeout", "${var.call_timeout}",
         ]
       }
     }

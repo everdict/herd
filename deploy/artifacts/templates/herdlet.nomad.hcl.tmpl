@@ -19,6 +19,12 @@ variable "insecure_registries" {
   default = "[[.InsecureRegistries]]"
 }
 
+# LAB ONLY: a host-side prefix herd-egress stops refusing, e.g. a node's tailnet address as a /32. Empty, none.
+variable "egress_allow_prefix" {
+  type    = string
+  default = ""
+}
+
 job "herdlet" {
   type = "system"
 
@@ -72,6 +78,7 @@ job "herdlet" {
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
           "-registry-auth", "secrets/registry-auth.json",
           "-insecure-registry", "${var.insecure_registries}",
+          "-egress-allow-prefix", "${var.egress_allow_prefix}",
         ]
       }
     }
@@ -96,6 +103,7 @@ job "herdlet" {
           "-token-file", "[[.HerdletStateDir]]/egress.token",
           "-bindings", "/run/herd/egress-bindings.json",
           "-ca-out", "[[.HerdletStateDir]]/egress-ca.pem",
+          "-egress-allow-prefix", "${var.egress_allow_prefix}",
         ]
       }
     }

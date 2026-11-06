@@ -29,7 +29,7 @@ type Params struct {
 	// LibexecDir holds the virtiofsd the Linux release archive carries (deploy.DefaultVirtiofsd).
 	LibexecDir string
 	// InsecureRegistries is the Nomad herdlet job's default -insecure-registry: the cluster's managed image store
-	// (PLT-42), plain HTTP on the tailnet.
+	// (PLT-42) and its token realm (PLT-330), plain HTTP on the tailnet.
 	InsecureRegistries string
 
 	MacBinDir          string
@@ -43,7 +43,7 @@ type Params struct {
 var Defaults = Params{
 	BinDir: "/usr/local/bin", DataDir: "/var/lib/herd", SnapshotDir: "/var/lib/herd/snapshots",
 	HerdletStateDir: "/var/lib/herdlet", GuestDir: "/usr/local/share/herd", LibexecDir: "/usr/local/libexec/herd",
-	InsecureRegistries: "100.69.164.81:5001",
+	InsecureRegistries: "100.69.164.81:5001,100.69.164.81:8787",
 	MacBinDir:          "/usr/local/bin", MacDataDir: "/usr/local/var/herd", MacEtcDir: "/usr/local/etc/herd",
 	MacHerdletStateDir: "/usr/local/var/herdlet", MacGuestDir: "/usr/local/share/herd",
 }

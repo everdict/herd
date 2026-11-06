@@ -384,7 +384,8 @@ func TestEveryHerdletPassesRegistryAuth(t *testing.T) {
 
 // TestNomadHerdletsSpeakPlainHTTPToTheManagedStore (criterion insecure-registry): the Nomad herdlet job passes
 // -insecure-registry from its job variable insecure_registries, which defaults to the cluster's managed image store
-// (PLT-42: plain HTTP on the tailnet at 100.69.164.81:5001), so its herdlets pull workspace images from it.
+// (PLT-42: plain HTTP on the tailnet at 100.69.164.81:5001) and its token realm on the control plane (PLT-330:
+// 100.69.164.81:8787), so its herdlets pull workspace images from it.
 func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
 	files, err := artifacts.Render(artifacts.Defaults)
 	if err != nil {
@@ -395,8 +396,8 @@ func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
 			continue
 		}
 		v := regexp.MustCompile(`(?s)variable "insecure_registries" \{\s*type\s*=\s*string\s*default\s*=\s*"([^"]*)"`).FindSubmatch(f.Data)
-		if v == nil || string(v[1]) != "100.69.164.81:5001" {
-			t.Errorf("%s: variable insecure_registries = %q, want a string defaulting to the managed store 100.69.164.81:5001", f.Path, v)
+		if v == nil || string(v[1]) != "100.69.164.81:5001,100.69.164.81:8787" {
+			t.Errorf("%s: variable insecure_registries = %q, want a string defaulting to the managed store and its realm 100.69.164.81:5001,100.69.164.81:8787", f.Path, v)
 		}
 		invs, err := artifacts.Invocations(f)
 		if err != nil {
