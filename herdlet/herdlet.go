@@ -39,6 +39,9 @@ type Agent struct {
 	// HypervisorVersion and Reason are reported with the capabilities.
 	HypervisorVersion string
 	Reason            string
+	// Guest names the guest build this herdlet boots (deploy.GuestIdentity), reported with the capabilities so that
+	// herd-api can rebuild a golden snapshot an older guest made (DEFAUL-1606).
+	Guest string
 	// EgressAllowPrefixes are the operator's lab allowances on this host's herd-egress; they are reported with the
 	// capabilities so a conformance report can say they were set.
 	EgressAllowPrefixes []string
@@ -377,6 +380,7 @@ func (a *Agent) declare(caps vmm.Capabilities) link.Capabilities {
 		Platform: caps.Platform, Arch: caps.Arch, SuspendMaxFidelity: caps.SuspendMaxFidelity,
 		RestoreFamily: caps.RestoreFamily, PortableRestoreFamily: vmm.PortableRestoreFamily,
 		HypervisorVersion: a.HypervisorVersion, Reason: reason, EgressAllowPrefixes: a.EgressAllowPrefixes,
+		Guest: a.Guest,
 	}
 }
 

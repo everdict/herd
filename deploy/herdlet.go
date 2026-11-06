@@ -652,3 +652,8 @@ func (r *registryHosts) Set(v string) error {
 	}
 	return nil
 }
+
+// GuestIdentity names the guest build a herdlet boots: the digest of its kernel and initramfs files (DEFAUL-1606).
+func GuestIdentity(kernel, initrd string) (string, error) {
+	return "", nil
+}

@@ -64,6 +64,9 @@ type Capabilities struct {
 	Reason                string       `json:"reason,omitempty"`
 	// EgressAllowPrefixes are the operator's lab allowances on the host's herd-egress (-egress-allow-prefix).
 	EgressAllowPrefixes []string `json:"egressAllowPrefixes,omitempty"`
+	// Guest names the guest build the herdlet boots its VMs with (the digest of its kernel and initramfs,
+	// deploy.GuestIdentity); a golden snapshot records the guest that built it (DEFAUL-1606). Empty: not known.
+	Guest string `json:"guest,omitempty"`
 }
 
 // Register is a herdlet's first message.

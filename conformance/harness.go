@@ -31,6 +31,8 @@ type HerdletSpec struct {
 	Caps   vmm.Capabilities
 	// Backend, if set, is the herdlet's hypervisor instead of the fake (Herdlet.VMM is then nil); Caps is unused.
 	Backend vmm.VMM
+	// Guest is the guest build the herdlet declares (herdlet.Agent.Guest).
+	Guest string
 	// Configure, if set, finishes the herdlet before it dials (e.g. gives it Machines over its VMM).
 	Configure func(*herdlet.Agent)
 }
@@ -97,6 +99,9 @@ var GoldenWarmup time.Duration
 // GoldenRetryBackoff is herd-api's apiserver.Config.GoldenRetryBackoff in the harness (tests may set it).
 var GoldenRetryBackoff time.Duration
 
+// GoldenRebuilds is herd-api's apiserver.Config.GoldenRebuilds in the harness (tests may set it).
+var GoldenRebuilds int
+
 // CallTimeout is how long herd-api waits for a herdlet in the harness.
 const CallTimeout = 400 * time.Millisecond
 
@@ -127,6 +132,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		ReconcileCallTimeout: ReconcileCallTimeout,
 		GoldenWarmup:         GoldenWarmup,
 		GoldenRetryBackoff:   GoldenRetryBackoff,
+		GoldenRebuilds:       GoldenRebuilds,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +195,7 @@ func (e *Env) AddHerdlet(t testing.TB, s HerdletSpec) *Herdlet {
 		backend = h.VMM
 	}
 	a := &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: backend,
-		Snapshots: e.Snapshots, Rewrite: h.answer}
+		Snapshots: e.Snapshots, Rewrite: h.answer, Guest: s.Guest}
 	if s.Configure != nil {
 		s.Configure(a)
 	}

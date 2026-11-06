@@ -70,6 +70,9 @@ type Config struct {
 	// GoldenRetryBackoff is how long after a failed golden build the first retry waits; each retry after it waits
 	// twice as long as the one before (default DefaultGoldenRetryBackoff).
 	GoldenRetryBackoff time.Duration
+	// GoldenRebuilds is how many templates' golden snapshots Reconcile rebuilds at a time because the guest that built
+	// them no longer runs on any connected worker (DEFAUL-1606; default DefaultGoldenRebuilds, negative: none).
+	GoldenRebuilds int
 }
 
 // Server is herd-api.
