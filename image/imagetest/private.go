@@ -20,6 +20,9 @@ type Private struct {
 	// IdentityToken, if set, is accepted as a refresh_token at the realm (grant_type=refresh_token).
 	IdentityToken string
 	Basic         bool
+	// Realm is the host[:port] the Bearer challenge names its realm on (http://<Realm>/token); default the host the
+	// request was sent to. Its /token is served by this same handler.
+	Realm string
 
 	mu     sync.Mutex
 	issued map[string]bool
@@ -85,7 +88,11 @@ func (p *Private) admit(w http.ResponseWriter, r *http.Request) bool {
 			repo = repo[:i]
 		}
 	}
-	w.Header().Set("WWW-Authenticate", `Bearer realm="http://`+r.Host+`/token",service="private",scope="repository:`+repo+`:pull"`)
+	realm := p.Realm
+	if realm == "" {
+		realm = r.Host
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="http://`+realm+`/token",service="private",scope="repository:`+repo+`:pull"`)
 	http.Error(w, "token required", http.StatusUnauthorized)
 	return false
 }

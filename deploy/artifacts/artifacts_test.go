@@ -382,22 +382,37 @@ func TestEveryHerdletPassesRegistryAuth(t *testing.T) {
 	}
 }
 
-// TestNomadHerdletsSpeakPlainHTTPToTheManagedStore (criterion insecure-registry): the Nomad herdlet job passes
-// -insecure-registry from its job variable insecure_registries, which defaults to the cluster's managed image store
-// (PLT-42: plain HTTP on the tailnet at 100.69.164.81:5001) and its token realm on the control plane (PLT-330:
-// 100.69.164.81:8787), so its herdlets pull workspace images from it.
-func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
+// TestArtifactsNameNoRegistryAddress (DEFAUL-1600, criterion a-pull-names-its-plain-hosts): a template's golden
+// pull names its own plain-HTTP hosts (image_plain_http_hosts), so the Nomad herdlet job's insecure_registries, the
+// node-level fallback it still passes as -insecure-registry, defaults to none, as artifacts.Defaults does; and no
+// rendered artifact nor file under dist/ holds an IPv4 address other than loopback or the unspecified one: no job
+// names a cluster's address.
+func TestArtifactsNameNoRegistryAddress(t *testing.T) {
+	if artifacts.Defaults.InsecureRegistries != "" {
+		t.Errorf("artifacts.Defaults.InsecureRegistries = %q, want none", artifacts.Defaults.InsecureRegistries)
+	}
 	files, err := artifacts.Render(artifacts.Defaults)
 	if err != nil {
 		t.Fatal(err)
 	}
+	addr := regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	allowed := map[string]bool{"127.0.0.1": true, "0.0.0.0": true}
+	scan := func(what string, b []byte) {
+		for _, a := range addr.FindAll(b, -1) {
+			if !allowed[string(a)] {
+				t.Errorf("%s holds the address %s", what, a)
+			}
+		}
+	}
+	runs := false
 	for _, f := range files {
+		scan("rendered "+f.Path, f.Data)
 		if f.Path != "nomad/herdlet.nomad.hcl" {
 			continue
 		}
 		v := regexp.MustCompile(`(?s)variable "insecure_registries" \{\s*type\s*=\s*string\s*default\s*=\s*"([^"]*)"`).FindSubmatch(f.Data)
-		if v == nil || string(v[1]) != "100.69.164.81:5001,100.69.164.81:8787" {
-			t.Errorf("%s: variable insecure_registries = %q, want a string defaulting to the managed store and its realm 100.69.164.81:5001,100.69.164.81:8787", f.Path, v)
+		if v == nil || string(v[1]) != "" {
+			t.Errorf("%s: variable insecure_registries = %q, want a string defaulting to none", f.Path, v)
 		}
 		invs, err := artifacts.Invocations(f)
 		if err != nil {
@@ -407,13 +422,33 @@ func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
 			if inv.Binary != "herdlet" {
 				continue
 			}
+			runs = true
 			if i := slices.Index(inv.Args, "-insecure-registry"); i < 0 || i+1 >= len(inv.Args) || inv.Args[i+1] != "${var.insecure_registries}" {
 				t.Errorf("%s: herdlet %q does not pass -insecure-registry ${var.insecure_registries}", f.Path, inv.Args)
 			}
-			return
 		}
 	}
-	t.Error("nomad/herdlet.nomad.hcl runs no herdlet")
+	if !runs {
+		t.Error("nomad/herdlet.nomad.hcl runs no herdlet")
+	}
+	n := 0
+	if err := filepath.WalkDir(dist, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		n++
+		scan(p, b)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n < len(files) {
+		t.Fatalf("read %d files under dist/, fewer than the %d rendered: the scan did not read the tree", n, len(files))
+	}
 }
 
 // TestNomadEgressDeclaresHostServicesByDiscovery (DEFAUL-1599): the Nomad herd-egress task takes -host-services-file
