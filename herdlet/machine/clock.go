@@ -44,6 +44,28 @@ type GuestClock struct {
 // SetClock dials the guest until it answers (as GuestFlush does) and only then reads the host's clock and calls
 // SetClock, so the time the guest is handed is not stale by a dial's retries.
 func (c GuestClock) SetClock(ctx context.Context, vmID string) (time.Duration, error) {
+	return retryUnavailable(ctx, func() (time.Duration, error) { return c.setOnce(ctx, vmID) })
+}
+
+// retryUnavailable calls once again while the guest is not serving yet: a restored guest's vsock accepts before its
+// server answers, so one connection can end in "error reading server preface". Anything else, or the context's end,
+// answers at once.
+func retryUnavailable(ctx context.Context, once func() (time.Duration, error)) (time.Duration, error) {
+	for {
+		d, err := once()
+		if status.Code(err) != codes.Unavailable {
+			return d, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, err
+		case <-time.After(DialRetry):
+		}
+	}
+}
+
+// setOnce makes one connection and one call.
+func (c GuestClock) setOnce(ctx context.Context, vmID string) (time.Duration, error) {
 	conn, err := dialGuest(ctx, c.Guests, vmID, c.Port)
 	if err != nil {
 		return 0, err

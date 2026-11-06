@@ -15,6 +15,8 @@ import (
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
 	"github.com/everdict/herd/vmm/fakeguest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // clockHost is a host whose VMs run the real herd-guest (fakeguest, each guest with a wall clock of its own) and whose
@@ -172,5 +174,38 @@ func TestGuestClockOfAnOlderGuest(t *testing.T) {
 	_, err := GuestClock{Guests: g, Port: 8080}.SetClock(context.Background(), "actor-1")
 	if !errors.Is(err, ErrClockUnsupported) {
 		t.Fatalf("SetClock of a guest that serves only Sync: %v, want ErrClockUnsupported", err)
+	}
+}
+
+// A restored guest's vsock accepts before its server answers: walked live, the first connection ended in "error reading
+// server preface: EOF", and the restore was refused with a healthy guest. The call is tried again until its context ends.
+func TestSetClockRetriesAGuestThatIsNotServingYet(t *testing.T) {
+	calls := 0
+	once := func() (time.Duration, error) {
+		calls++
+		if calls < 3 {
+			return 0, status.Error(codes.Unavailable, "error reading server preface: EOF")
+		}
+		return time.Second, nil
+	}
+	got, err := retryUnavailable(context.Background(), once)
+	if err != nil || got != time.Second || calls != 3 {
+		t.Fatalf("retryUnavailable = %v, %v after %d calls", got, err, calls)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls = 0
+	if _, err := retryUnavailable(ctx, func() (time.Duration, error) {
+		calls++
+		return 0, status.Error(codes.Unavailable, "down")
+	}); err == nil || calls != 1 {
+		t.Fatalf("an ended context answered %v after %d calls", err, calls)
+	}
+	calls = 0
+	if _, err := retryUnavailable(context.Background(), func() (time.Duration, error) {
+		calls++
+		return 0, ErrClockUnsupported
+	}); !errors.Is(err, ErrClockUnsupported) || calls != 1 {
+		t.Fatalf("a refusal answered %v after %d calls", err, calls)
 	}
 }
