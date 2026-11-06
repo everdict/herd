@@ -8,15 +8,25 @@
 // checksums, its own SHA-256 of what it stored; without one, Put re-reads the object). An S3 PUT that returned 200 is
 // durable. Any failed or unknown outcome deletes the key, so Stat never reports an object after a failed Put — not
 // the new bytes, and not the old ones it was replacing.
+//
+// An object larger than the part size (Store.PartSize) goes up as a multipart upload, since one PUT takes at most
+// 5 GiB: each part is hashed in the same first pass and sent with its own signed payload hash and SHA-256 checksum,
+// so the endpoint refuses a part that is not those bytes; the completed object's checksum is S3's composite one (the
+// SHA-256 of the parts' SHA-256s), which Put checks against the parts it hashed, and the herd digest of the whole
+// object is recorded as before. A multipart Put that fails aborts its upload, so the endpoint keeps none of its parts,
+// and then deletes the key as any failed Put does.
 package s3
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,8 +38,18 @@ import (
 	"github.com/everdict/herd/snapstore"
 )
 
-// MaxObjectSize is the largest object one S3 PUT takes (5 GiB); Put refuses larger ones.
-const MaxObjectSize = 5 << 30
+// The sizes S3 takes.
+const (
+	// MaxPutSize is the largest object, or part of one, one PUT takes (5 GiB).
+	MaxPutSize = 5 << 30
+	// MaxObjectSize is the largest object S3 stores (5 TiB); Put refuses larger ones.
+	MaxObjectSize = 5 << 40
+	// MaxParts is the most parts one multipart upload has.
+	MaxParts = 10000
+)
+
+// DefaultPartSize is Store.PartSize's default. An object of up to this size is one PUT.
+const DefaultPartSize = 64 << 20
 
 // The object metadata Put records.
 const (
@@ -72,6 +92,9 @@ type Store struct {
 	client   *http.Client
 	// Now, if set, is the signing clock.
 	Now func() time.Time
+	// PartSize is the size of the parts Put uploads an object larger than it in (zero: DefaultPartSize). Put raises
+	// it for an object that would need more than MaxParts parts. S3 takes no part but the last smaller than 5 MiB.
+	PartSize int64
 }
 
 // New returns a store for cfg. client nil means http.DefaultClient.
@@ -119,10 +142,16 @@ func (s *Store) objectURL(key string) (*url.URL, error) {
 
 // do sends one signed request. body, if not nil, has size bytes whose hex SHA-256 is payloadHash.
 func (s *Store) do(ctx context.Context, method, key string, hdr http.Header, body io.Reader, size int64, payloadHash string) (*http.Response, error) {
+	return s.doQuery(ctx, method, key, nil, hdr, body, size, payloadHash)
+}
+
+// doQuery is do on the object's URL with query q (a multipart upload's calls).
+func (s *Store) doQuery(ctx context.Context, method, key string, q url.Values, hdr http.Header, body io.Reader, size int64, payloadHash string) (*http.Response, error) {
 	u, err := s.objectURL(key)
 	if err != nil {
 		return nil, err
 	}
+	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
 	if err != nil {
 		return nil, err
@@ -227,23 +256,88 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 		return snapstore.Object{}, err
 	}
 	defer cleanup()
-	h := sha256.New()
-	size, err := io.Copy(h, ctxReader{ctx, rs})
+	end, err := rs.Seek(0, io.SeekEnd)
 	if err != nil {
 		return snapstore.Object{}, err
 	}
-	if size > MaxObjectSize {
-		return snapstore.Object{}, fmt.Errorf("%d bytes is more than one PUT takes (%d)", size, int64(MaxObjectSize))
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return snapstore.Object{}, err
+	}
+	want := end - start
+	if want > MaxObjectSize {
+		return snapstore.Object{}, fmt.Errorf("%d bytes is more than S3 stores in one object (%d)", want, int64(MaxObjectSize))
+	}
+	part := s.partSize(want)
+	h := sha256.New()
+	var w io.Writer = h
+	var parts *partSums
+	if want > part {
+		parts = &partSums{size: part}
+		w = io.MultiWriter(h, parts)
+	}
+	size, err := io.Copy(w, ctxReader{ctx, rs})
+	if err != nil {
+		return snapstore.Object{}, err
+	}
+	if size != want {
+		return snapstore.Object{}, fmt.Errorf("the source changed while it was read: %d bytes, then %d", want, size)
 	}
 	if _, err := rs.Seek(start, io.SeekStart); err != nil {
 		return snapstore.Object{}, err
 	}
 	sum := h.Sum(nil)
 	obj := snapstore.Object{Key: key, Digest: "sha256:" + hex.EncodeToString(sum), Size: size}
-	if err := s.upload(ctx, key, rs, obj, sum); err != nil {
+	if parts != nil {
+		err = s.uploadParts(ctx, key, rs, start, obj, part, parts.done())
+	} else {
+		err = s.upload(ctx, key, rs, obj, sum)
+	}
+	if err != nil {
 		return snapstore.Object{}, err
 	}
 	return obj, nil
+}
+
+// partSize is the part size an object of size bytes goes up in: PartSize, or larger where that would make more than
+// MaxParts parts.
+func (s *Store) partSize(size int64) int64 {
+	part := s.PartSize
+	if part <= 0 {
+		part = DefaultPartSize
+	}
+	return max(part, (size+MaxParts-1)/MaxParts)
+}
+
+// partSums is the SHA-256 of each consecutive size bytes written to it.
+type partSums struct {
+	size int64
+	n    int64
+	h    hash.Hash
+	sums [][]byte
+}
+
+func (p *partSums) Write(b []byte) (int, error) {
+	total := len(b)
+	for len(b) > 0 {
+		if p.h == nil {
+			p.h, p.n = sha256.New(), 0
+		}
+		k := min(int64(len(b)), p.size-p.n)
+		p.h.Write(b[:k])
+		p.n += k
+		b = b[k:]
+		if p.n == p.size {
+			p.sums, p.h = append(p.sums, p.h.Sum(nil)), nil
+		}
+	}
+	return total, nil
+}
+
+func (p *partSums) done() [][]byte {
+	if p.h != nil {
+		p.sums, p.h = append(p.sums, p.h.Sum(nil)), nil
+	}
+	return p.sums
 }
 
 // upload PUTs the bytes and checks that the endpoint holds exactly them.
@@ -260,16 +354,23 @@ func (s *Store) upload(ctx context.Context, key string, body io.Reader, obj snap
 		return statusError("put", key, resp)
 	}
 	drain(resp)
-	got, checksum, err := s.head(ctx, key)
+	return s.check(ctx, key, obj, base64.StdEncoding.EncodeToString(sum))
+}
+
+// check answers whether the endpoint holds exactly obj under key: the size and herd digest it records, and the
+// endpoint's own SHA-256 checksum of what it stored, which must be checksum; an endpoint that keeps none has the
+// object read back.
+func (s *Store) check(ctx context.Context, key string, obj snapstore.Object, checksum string) error {
+	got, have, err := s.head(ctx, key)
 	if err != nil {
 		return fmt.Errorf("after upload: %w", err)
 	}
 	if got.Size != obj.Size || got.Digest != obj.Digest {
 		return fmt.Errorf("%w: the endpoint holds %d bytes recorded %s, uploaded %d bytes %s", snapstore.ErrDigestMismatch, got.Size, got.Digest, obj.Size, obj.Digest)
 	}
-	if checksum != "" {
-		if want := base64.StdEncoding.EncodeToString(sum); checksum != want {
-			return fmt.Errorf("%w: the endpoint's SHA-256 of what it stored is %s, uploaded %s", snapstore.ErrDigestMismatch, checksum, want)
+	if have != "" {
+		if have != checksum {
+			return fmt.Errorf("%w: the endpoint's SHA-256 of what it stored is %s, uploaded %s", snapstore.ErrDigestMismatch, have, checksum)
 		}
 		return nil
 	}
@@ -277,6 +378,136 @@ func (s *Store) upload(ctx context.Context, key string, body io.Reader, obj snap
 	if _, err := s.Verify(ctx, key, obj.Digest); err != nil {
 		return fmt.Errorf("after upload: %w", err)
 	}
+	return nil
+}
+
+// uploadParts stores obj as a multipart upload of the parts of body (from start) whose SHA-256s are sums, each part
+// bytes long but the last, and checks the endpoint holds exactly them. An upload that does not complete is aborted.
+func (s *Store) uploadParts(ctx context.Context, key string, body io.ReadSeeker, start int64, obj snapstore.Object, part int64, sums [][]byte) (err error) {
+	hdr := http.Header{}
+	hdr.Set(DigestHeader, obj.Digest)
+	hdr.Set("X-Amz-Checksum-Algorithm", "SHA256")
+	id, err := s.createUpload(ctx, key, hdr)
+	if err != nil {
+		return err
+	}
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		// The endpoint keeps the parts of an upload until it is completed or aborted, out of Stat's sight.
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if aerr := s.abortUpload(actx, key, id); aerr != nil {
+			err = fmt.Errorf("%w (and aborting the upload: %v)", err, aerr)
+		}
+	}()
+	done := completeUpload{}
+	all := make([]byte, 0, len(sums)*sha256.Size)
+	for i, sum := range sums {
+		off := int64(i) * part
+		n := min(part, obj.Size-off)
+		if _, err := body.Seek(start+off, io.SeekStart); err != nil {
+			return err
+		}
+		checksum := base64.StdEncoding.EncodeToString(sum)
+		phdr := http.Header{}
+		phdr.Set(ChecksumHeader, checksum)
+		q := url.Values{"partNumber": {strconv.Itoa(i + 1)}, "uploadId": {id}}
+		resp, err := s.doQuery(ctx, http.MethodPut, key, q, phdr, ctxReader{ctx, io.LimitReader(body, n)}, n, hex.EncodeToString(sum))
+		if err != nil {
+			return fmt.Errorf("part %d: %w", i+1, err)
+		}
+		if resp.StatusCode/100 != 2 {
+			defer resp.Body.Close()
+			return fmt.Errorf("part %d: %w", i+1, statusError("put", key, resp))
+		}
+		drain(resp)
+		etag := resp.Header.Get("ETag")
+		if etag == "" {
+			return fmt.Errorf("part %d: the endpoint answered no ETag", i+1)
+		}
+		done.Parts = append(done.Parts, completedPart{PartNumber: i + 1, ETag: etag, ChecksumSHA256: checksum})
+		all = append(all, sum...)
+	}
+	if err := s.completeUpload(ctx, key, id, done); err != nil {
+		return err
+	}
+	completed = true
+	composite := sha256.Sum256(all)
+	return s.check(ctx, key, obj, base64.StdEncoding.EncodeToString(composite[:])+"-"+strconv.Itoa(len(sums)))
+}
+
+type completeUpload struct {
+	XMLName xml.Name        `xml:"CompleteMultipartUpload"`
+	Parts   []completedPart `xml:"Part"`
+}
+
+type completedPart struct {
+	PartNumber     int
+	ETag           string
+	ChecksumSHA256 string
+}
+
+// createUpload starts a multipart upload of key and returns its id.
+func (s *Store) createUpload(ctx context.Context, key string, hdr http.Header) (string, error) {
+	resp, err := s.doQuery(ctx, http.MethodPost, key, url.Values{"uploads": {""}}, hdr, nil, 0, "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", statusError("create upload", key, resp)
+	}
+	var out struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&out); err != nil || out.UploadID == "" {
+		return "", fmt.Errorf("create upload %s: the endpoint answered no upload id (%v)", key, err)
+	}
+	return out.UploadID, nil
+}
+
+// completeUpload completes the upload with the parts. S3 may answer 200 and an error in the body, so the body is read
+// for one.
+func (s *Store) completeUpload(ctx context.Context, key, id string, c completeUpload) error {
+	b, err := xml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(b)
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "application/xml")
+	resp, err := s.doQuery(ctx, http.MethodPost, key, url.Values{"uploadId": {id}}, hdr, bytes.NewReader(b), int64(len(b)), hex.EncodeToString(sum[:]))
+	if err != nil {
+		return fmt.Errorf("complete upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return statusError("complete upload", key, resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return fmt.Errorf("complete upload: %w", err)
+	}
+	if !bytes.Contains(body, []byte("<CompleteMultipartUploadResult")) {
+		return fmt.Errorf("complete upload %s: the endpoint answered %d without a result: %.200s", key, resp.StatusCode, body)
+	}
+	return nil
+}
+
+// abortUpload aborts the upload; one the endpoint no longer knows is gone already.
+func (s *Store) abortUpload(ctx context.Context, key, id string) error {
+	resp, err := s.doQuery(ctx, http.MethodDelete, key, url.Values{"uploadId": {id}}, nil, nil, 0, "")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
+		defer resp.Body.Close()
+		return statusError("abort upload", key, resp)
+	}
+	drain(resp)
 	return nil
 }
 
