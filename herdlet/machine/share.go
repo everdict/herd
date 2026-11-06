@@ -117,6 +117,10 @@ func layVolumes(root *os.Root, p *initd.Plan) error {
 		if !fi.IsDir() {
 			return fmt.Errorf("%w: volume %q is a %v in the share, not a directory", ErrOutsideShare, v.Name, fi.Mode().Type())
 		}
+		// Shared like a Kubernetes emptyDir: an image may run as any user, and the umask must not decide that.
+		if err := root.Chmod(v.Name, 0o777); err != nil {
+			return fmt.Errorf("machine: volume %q: %w", v.Name, err)
+		}
 	}
 	return nil
 }
