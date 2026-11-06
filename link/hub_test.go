@@ -72,7 +72,9 @@ func TestCallSizedWaitsForReportedBytes(t *testing.T) {
 	const timeout = 200 * time.Millisecond
 	got := make(chan link.Outcome, 1)
 	start := time.Now()
-	go func() { got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte) }()
+	go func() {
+		got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte)
+	}()
 	w := (<-downs).Work
 	if dl := time.UnixMilli(w.DeadlineUnixMilli); dl.After(start.Add(timeout + 50*time.Millisecond)) {
 		t.Errorf("the work's first deadline is %v after the call, want its timeout %v", dl.Sub(start), timeout)
@@ -121,7 +123,9 @@ func TestCallSizedStillEnds(t *testing.T) {
 	}
 
 	// A report of fewer bytes than one before leaves the deadline.
-	go func() { got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte) }()
+	go func() {
+		got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte)
+	}()
 	w = (<-downs).Work
 	send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: 500}})
 	first := (<-downs).Extend

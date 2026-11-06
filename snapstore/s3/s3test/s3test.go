@@ -84,7 +84,7 @@ type Server struct {
 	readRate int64
 	// writeRate, if positive, is the bytes per second a PUT's body is taken at.
 	writeRate int64
-	served   int64
+	served    int64
 	// maxPut, if positive, is the largest body one PUT takes (S3's is 5 GiB).
 	maxPut  int64
 	minPart int64
