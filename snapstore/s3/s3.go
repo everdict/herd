@@ -390,8 +390,16 @@ func (s *Store) check(ctx context.Context, key string, obj snapstore.Object, che
 // uploadParts stores obj as a multipart upload of the parts of body (from start) whose SHA-256s are sums, each part
 // bytes long but the last, and checks the endpoint holds exactly them. An upload that does not complete is aborted.
 func (s *Store) uploadParts(ctx context.Context, key string, body io.ReadSeeker, start int64, obj snapstore.Object, part int64, sums [][]byte) (err error) {
+	all := make([]byte, 0, len(sums)*sha256.Size)
+	for _, sum := range sums {
+		all = append(all, sum...)
+	}
+	sum := sha256.Sum256(all)
+	composite := base64.StdEncoding.EncodeToString(sum[:]) + "-" + strconv.Itoa(len(sums))
 	hdr := http.Header{}
 	hdr.Set(DigestHeader, obj.Digest)
+	// The composite checksum the parts make is recorded with the object, so Prove can check the endpoint's by a HEAD.
+	hdr.Set(ChecksumMetaHeader, composite)
 	hdr.Set("X-Amz-Checksum-Algorithm", "SHA256")
 	id, err := s.createUpload(ctx, key, hdr)
 	if err != nil {
@@ -410,7 +418,6 @@ func (s *Store) uploadParts(ctx context.Context, key string, body io.ReadSeeker,
 		}
 	}()
 	done := completeUpload{}
-	all := make([]byte, 0, len(sums)*sha256.Size)
 	for i, sum := range sums {
 		off := int64(i) * part
 		n := min(part, obj.Size-off)
@@ -435,14 +442,12 @@ func (s *Store) uploadParts(ctx context.Context, key string, body io.ReadSeeker,
 			return fmt.Errorf("part %d: the endpoint answered no ETag", i+1)
 		}
 		done.Parts = append(done.Parts, completedPart{PartNumber: i + 1, ETag: etag, ChecksumSHA256: checksum})
-		all = append(all, sum...)
 	}
 	if err := s.completeUpload(ctx, key, id, done); err != nil {
 		return err
 	}
 	completed = true
-	composite := sha256.Sum256(all)
-	return s.check(ctx, key, obj, base64.StdEncoding.EncodeToString(composite[:])+"-"+strconv.Itoa(len(sums)))
+	return s.check(ctx, key, obj, composite)
 }
 
 type completeUpload struct {
@@ -607,6 +612,12 @@ func (s *Store) Verify(ctx context.Context, key, digest string) (snapstore.Objec
 		return snapstore.Object{}, fmt.Errorf("%w: %s holds %s (%d bytes), recorded %s, want %s", snapstore.ErrDigestMismatch, key, got, n, o.Digest, digest)
 	}
 	return o, nil
+}
+
+// Prove answers whether the object at key holds digest's bytes by a HEAD where the endpoint keeps a checksum (see
+// prove), and by reading it (Verify) where it keeps none.
+func (s *Store) Prove(ctx context.Context, key, digest string) (snapstore.Object, error) {
+	return s.prove(ctx, key, digest, -1)
 }
 
 func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {

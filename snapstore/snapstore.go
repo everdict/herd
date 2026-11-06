@@ -32,6 +32,10 @@ type Store interface {
 	Stat(ctx context.Context, key string) (Object, error)
 	// Verify re-reads the object and checks it against digest: ErrNotFound, ErrDigestMismatch.
 	Verify(ctx context.Context, key, digest string) (Object, error)
+	// Prove checks the object against digest as Verify does, but by a checksum the store keeps of the bytes it holds
+	// where it keeps one, without reading them; a store that keeps none reads them (Verify). It is for an object
+	// just written, whose writer's own checks rested on that same checksum (Put); Verify stays for a re-read.
+	Prove(ctx context.Context, key, digest string) (Object, error)
 	// Open returns the object's bytes.
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
 	// Delete removes the object and verifies it is gone; deleting a missing object is not an error.

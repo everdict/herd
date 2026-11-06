@@ -269,6 +269,27 @@ func Run(t *testing.T, h Harness) {
 		}
 	})
 
+	t.Run("ProveChecksTheDigest", func(t *testing.T) {
+		ctx := ctxT(t)
+		s := h.Open(t)
+		o, err := s.Put(ctx, "p/1", strings.NewReader("snapshot bytes"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := h.Open(t).Prove(ctx, "p/1", o.Digest); err != nil || got != o {
+			t.Errorf("Prove = %+v, %v; want %+v", got, err, o)
+		}
+		if got, err := s.Prove(ctx, "p/1", digestOf([]byte("other"))); !errors.Is(err, snapstore.ErrDigestMismatch) {
+			t.Errorf("Prove under another digest = %+v, %v; want ErrDigestMismatch", got, err)
+		}
+		if _, err := s.Prove(ctx, "p/none", o.Digest); !errors.Is(err, snapstore.ErrNotFound) {
+			t.Errorf("Prove of a missing object: %v; want ErrNotFound", err)
+		}
+		if _, err := s.Prove(ctx, "../x", o.Digest); !errors.Is(err, snapstore.ErrBadKey) {
+			t.Errorf("Prove of a bad key: %v; want ErrBadKey", err)
+		}
+	})
+
 	t.Run("CopyHoldsTheBytes", func(t *testing.T) {
 		ctx := ctxT(t)
 		s := h.Open(t)

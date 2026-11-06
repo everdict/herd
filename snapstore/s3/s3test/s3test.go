@@ -283,6 +283,28 @@ func (s *Server) Tamper(path string) bool {
 	return true
 }
 
+// Plant stores data at path ("/bucket/key") as an object whose herd digest metadata is digest and whose recorded
+// checksum metadata (s3.ChecksumMetaHeader) is recorded, whatever the bytes are: what a writer that lied, or an
+// endpoint that broke after it took the bytes, would leave. With partSize positive the object is made of parts of
+// that size, and its checksum is their composite one.
+func (s *Server) Plant(path string, data []byte, digest, recorded string, partSize int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o := object{data: bytes.Clone(data), digest: digest, recorded: recorded}
+	if partSize > 0 {
+		var sums []byte
+		for off := 0; off < len(data); off += partSize {
+			p := data[off:min(off+partSize, len(data))]
+			sum := sha256.Sum256(p)
+			sums = append(sums, sum[:]...)
+			o.parts = append(o.parts, int64(len(p)))
+		}
+		composite := sha256.Sum256(sums)
+		o.composite = base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(o.parts))
+	}
+	s.objects[path] = o
+}
+
 // Size is the length of the object at path ("/bucket/key"), or -1.
 func (s *Server) Size(path string) int64 {
 	s.mu.Lock()

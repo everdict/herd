@@ -23,8 +23,9 @@ func presenceName(p string) string {
 }
 
 // takeSnapshot asks the actor's herdlet for a snapshot at f under key and verifies the object in the snapshot store
-// against the digest the herdlet answered. Only a verified object comes back as done; an answer without one is
-// unknown, since a snapshot may or may not exist.
+// against the digest the herdlet answered (Prove: by the store's checksum of the bytes it holds where it keeps one,
+// as the herdlet's Put checked it, else by reading them). Only a verified object comes back as done; an answer
+// without one is unknown, since a snapshot may or may not exist.
 func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity, cause link.Cause) (*link.SnapshotRef, link.Result, string) {
 	o := s.step(ctx, ar, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key, Cause: cause})
 	if o.Result != link.ResultDone {
@@ -33,7 +34,7 @@ func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f v
 	if o.Snapshot == nil || o.Snapshot.Key != key {
 		return nil, link.ResultUnknown, fmt.Sprintf("herdlet answered done but named no snapshot under %q", key)
 	}
-	obj, err := s.cfg.Snapshots.Verify(ctx, key, o.Snapshot.Digest)
+	obj, err := s.cfg.Snapshots.Prove(ctx, key, o.Snapshot.Digest)
 	if err != nil {
 		return nil, link.ResultUnknown, fmt.Sprintf("%v: %v", errNotDurable, err)
 	}

@@ -165,6 +165,11 @@ func (s *Store) Verify(ctx context.Context, key, digest string) (snapstore.Objec
 	return o, nil
 }
 
+// Prove reads the object (Verify): a directory keeps no checksum of its own.
+func (s *Store) Prove(ctx context.Context, key, digest string) (snapstore.Object, error) {
+	return s.Verify(ctx, key, digest)
+}
+
 func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
