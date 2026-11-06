@@ -16,7 +16,13 @@ variable "release_url" {
 
 variable "insecure_registries" {
   type    = string
-  default = "100.69.164.81:5001"
+  default = "100.69.164.81:5001,100.69.164.81:8787"
+}
+
+# LAB ONLY: a host-side prefix herd-egress stops refusing, e.g. a node's tailnet address as a /32. Empty, none.
+variable "egress_allow_prefix" {
+  type    = string
+  default = ""
 }
 
 job "herdlet" {
@@ -72,6 +78,7 @@ job "herdlet" {
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
           "-registry-auth", "secrets/registry-auth.json",
           "-insecure-registry", "${var.insecure_registries}",
+          "-egress-allow-prefix", "${var.egress_allow_prefix}",
         ]
       }
     }
@@ -96,6 +103,7 @@ job "herdlet" {
           "-token-file", "/var/lib/herdlet/egress.token",
           "-bindings", "/run/herd/egress-bindings.json",
           "-ca-out", "/var/lib/herdlet/egress-ca.pem",
+          "-egress-allow-prefix", "${var.egress_allow_prefix}",
         ]
       }
     }

@@ -26,7 +26,13 @@ import (
 type list []string
 
 func (l *list) String() string     { return strings.Join(*l, ",") }
-func (l *list) Set(s string) error { *l = append(*l, s); return nil }
+// Set ignores an empty value, so a job can pass a flag whose variable is unset and mean no value.
+func (l *list) Set(s string) error {
+	if s != "" {
+		*l = append(*l, s)
+	}
+	return nil
+}
 
 // egressAllowUsage is -egress-allow-prefix's usage on herd-egress, herdlet and herd.
 const egressAllowUsage = "LAB ONLY: a prefix inside the host-side ranges herd-egress refuses, e.g. 100.113.143.93/32 for a tailnet echo host, that it no longer refuses (repeatable); a policy must still name the host, and nothing broader than written is opened. Logged at start and reported in the worker's capabilities"
