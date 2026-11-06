@@ -71,7 +71,7 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 		return err
 	}
 	for _, f := range m.Memory {
-		if err := writeMemoryFile(tw, f); err != nil {
+		if err := writeMemoryFile(tw, w, f); err != nil {
 			return fmt.Errorf("machine: bundle: memory file %s: %w", f.Name, err)
 		}
 	}
@@ -227,8 +227,9 @@ func wrapEscape(name string, err error) error {
 	return fmt.Errorf("machine: bundle: %s: %w", name, err)
 }
 
-// writeMemoryFile writes one of the VMM's snapshot files as memory/<name>, exactly its recorded size.
-func writeMemoryFile(tw *tar.Writer, f vmm.SnapshotFile) error {
+// writeMemoryFile writes one of the VMM's snapshot files as memory/<name>, exactly its recorded size, to tw, which
+// writes to w. A file that can be read at offsets and has zero pages goes in as a sparse entry without them.
+func writeMemoryFile(tw *tar.Writer, w io.Writer, f vmm.SnapshotFile) error {
 	if f.Open == nil {
 		return errors.New("no way to read it")
 	}
@@ -237,6 +238,15 @@ func writeMemoryFile(tw *tar.Writer, f vmm.SnapshotFile) error {
 		return err
 	}
 	defer r.Close()
+	if ra, ok := r.(io.ReaderAt); ok {
+		frags, err := dataFragments(ra, f.Size)
+		if err != nil {
+			return err
+		}
+		if len(frags) != 1 || frags[0].off != 0 || frags[0].n != f.Size {
+			return writeSparse(tw, w, bundleMemory+"/"+f.Name, f.Size, ra, frags)
+		}
+	}
 	if err := tw.WriteHeader(&tar.Header{Name: bundleMemory + "/" + f.Name, Mode: 0o600, Size: f.Size, Typeflag: tar.TypeReg, Format: tar.FormatPAX}); err != nil {
 		return err
 	}
