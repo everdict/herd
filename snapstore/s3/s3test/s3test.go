@@ -51,6 +51,8 @@ type object struct {
 	composite string
 	// parts are the sizes of the parts of an object a multipart upload made, nil for one PUT.
 	parts []int64
+	// recorded is the object's s3.ChecksumMetaHeader metadata.
+	recorded string
 }
 
 // checksum is what HEAD reports as the object's x-amz-checksum-sha256.
@@ -68,9 +70,10 @@ type part struct {
 }
 
 type upload struct {
-	path   string
-	digest string
-	parts  map[int]part
+	path     string
+	digest   string
+	recorded string
+	parts    map[int]part
 }
 
 // Server is a fake S3 endpoint.
@@ -390,6 +393,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set(s3.DigestHeader, o.digest)
+		if o.recorded != "" {
+			w.Header().Set(s3.ChecksumMetaHeader, o.recorded)
+		}
 		if !noChecksum && r.Header.Get("X-Amz-Checksum-Mode") == "ENABLED" {
 			w.Header().Set(s3.ChecksumHeader, o.checksum())
 		}
@@ -494,7 +500,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request, path strin
 	s.mu.Lock()
 	s.nextID++
 	id := "upload-" + strconv.Itoa(s.nextID)
-	s.uploads[id] = &upload{path: path, digest: r.Header.Get(s3.DigestHeader), parts: map[int]part{}}
+	s.uploads[id] = &upload{path: path, digest: r.Header.Get(s3.DigestHeader), recorded: r.Header.Get(s3.ChecksumMetaHeader), parts: map[int]part{}}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/xml")
 	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>", id)
@@ -591,7 +597,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, path, id
 	}
 	fault := s.fault
 	composite := sha256.Sum256(sums)
-	s.objects[path] = object{data: data, digest: u.digest,
+	s.objects[path] = object{data: data, digest: u.digest, recorded: u.recorded,
 		composite: base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(req.Parts)), parts: sizes}
 	delete(s.uploads, id)
 	s.puts++
@@ -663,16 +669,16 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, path string)
 		s3Error(w, http.StatusServiceUnavailable, "ServiceUnavailable")
 		return
 	}
-	digest := o.digest
+	digest, recorded := o.digest, o.recorded
 	if r.Header.Get("X-Amz-Metadata-Directive") == "REPLACE" {
-		digest = r.Header.Get(s3.DigestHeader)
+		digest, recorded = r.Header.Get(s3.DigestHeader), r.Header.Get(s3.ChecksumMetaHeader)
 	}
 	data := o.data
 	if s.fault == Corrupt && len(data) > 0 {
 		data = bytes.Clone(data)
 		data[len(data)-1] ^= 0x01
 	}
-	c := object{data: data, digest: digest}
+	c := object{data: data, digest: digest, recorded: recorded}
 	s.objects[path] = c
 	s.copies++
 	if s.fault == DropAnswer {

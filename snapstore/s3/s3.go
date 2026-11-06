@@ -57,6 +57,9 @@ const (
 	DigestHeader = "X-Amz-Meta-Herd-Digest"
 	// ChecksumHeader is S3's full-object SHA-256 checksum (base64), sent on PUT and read back on HEAD.
 	ChecksumHeader = "X-Amz-Checksum-Sha256"
+	// ChecksumMetaHeader carries, on an object made of parts, the composite checksum the endpoint's own must equal:
+	// the one Copy's parts, being the source's, must have.
+	ChecksumMetaHeader = "X-Amz-Meta-Herd-Checksum"
 )
 
 // Config names a bucket and the credentials to reach it. It is JSON so herd-api can hand it to herdlets in the join
@@ -516,29 +519,67 @@ func (s *Store) abortUpload(ctx context.Context, key, id string) error {
 
 // head reports the object and the endpoint's own SHA-256 checksum of it (base64; empty if it keeps none).
 func (s *Store) head(ctx context.Context, key string) (snapstore.Object, string, error) {
+	o, have, _, err := s.headRecorded(ctx, key)
+	return o, have, err
+}
+
+// headRecorded is head, and the checksum recorded in the object's metadata (ChecksumMetaHeader) or "".
+func (s *Store) headRecorded(ctx context.Context, key string) (o snapstore.Object, have, recorded string, err error) {
 	hdr := http.Header{}
 	hdr.Set("X-Amz-Checksum-Mode", "ENABLED")
 	resp, err := s.do(ctx, http.MethodHead, key, hdr, nil, 0, "")
 	if err != nil {
-		return snapstore.Object{}, "", fmt.Errorf("snapstore/s3: stat %s: %w", key, err)
+		return snapstore.Object{}, "", "", fmt.Errorf("snapstore/s3: stat %s: %w", key, err)
 	}
 	defer drain(resp)
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return snapstore.Object{}, "", fmt.Errorf("%s: %w", key, snapstore.ErrNotFound)
+		return snapstore.Object{}, "", "", fmt.Errorf("%s: %w", key, snapstore.ErrNotFound)
 	case resp.StatusCode/100 != 2:
-		return snapstore.Object{}, "", fmt.Errorf("snapstore/s3: stat %s: HTTP %d", key, resp.StatusCode)
+		return snapstore.Object{}, "", "", fmt.Errorf("snapstore/s3: stat %s: HTTP %d", key, resp.StatusCode)
 	}
-	o := snapstore.Object{Key: key, Digest: resp.Header.Get(DigestHeader)}
+	o = snapstore.Object{Key: key, Digest: resp.Header.Get(DigestHeader)}
 	if !strings.HasPrefix(o.Digest, "sha256:") {
-		return snapstore.Object{}, "", fmt.Errorf("snapstore/s3: stat %s: the object has no herd digest (not written by this store)", key)
+		return snapstore.Object{}, "", "", fmt.Errorf("snapstore/s3: stat %s: the object has no herd digest (not written by this store)", key)
 	}
 	n, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	if err != nil {
-		return snapstore.Object{}, "", fmt.Errorf("snapstore/s3: stat %s: content length: %w", key, err)
+		return snapstore.Object{}, "", "", fmt.Errorf("snapstore/s3: stat %s: content length: %w", key, err)
 	}
 	o.Size = n
-	return o, resp.Header.Get(ChecksumHeader), nil
+	return o, resp.Header.Get(ChecksumHeader), resp.Header.Get(ChecksumMetaHeader), nil
+}
+
+// prove answers whether the object at key holds digest's bytes (and is size bytes long, unless size is negative) by
+// a HEAD where the endpoint's checksum can say it: a full-object SHA-256 checksum must be the digest itself, and a
+// composite one (an object made of parts) the checksum recorded with the object (ChecksumMetaHeader). An endpoint
+// that keeps no checksum, or a composite one nothing was recorded for, has the object read back (Verify).
+func (s *Store) prove(ctx context.Context, key, digest string, size int64) (snapstore.Object, error) {
+	o, have, recorded, err := s.headRecorded(ctx, key)
+	if err != nil {
+		return snapstore.Object{}, err
+	}
+	if o.Digest != digest || (size >= 0 && o.Size != size) {
+		return snapstore.Object{}, fmt.Errorf("%w: %s holds %d bytes recorded %s, want %d bytes %s", snapstore.ErrDigestMismatch, key, o.Size, o.Digest, size, digest)
+	}
+	composite := strings.Contains(have, "-")
+	switch {
+	case have == "", composite && recorded == "":
+		return s.Verify(ctx, key, digest)
+	case !composite && have == fullChecksum(digest), composite && have == recorded:
+		return o, nil
+	}
+	return snapstore.Object{}, fmt.Errorf("%w: the endpoint's SHA-256 of what %s holds is %s, want %s", snapstore.ErrDigestMismatch, key, have,
+		map[bool]string{false: fullChecksum(digest), true: recorded}[composite])
+}
+
+// fullChecksum is S3's full-object SHA-256 checksum (base64) of the bytes whose digest is "sha256:<hex>", or "".
+func fullChecksum(digest string) string {
+	sum, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:"))
+	if err != nil || len(sum) != sha256.Size || !strings.HasPrefix(digest, "sha256:") {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(sum)
 }
 
 func (s *Store) Stat(ctx context.Context, key string) (snapstore.Object, error) {
@@ -606,6 +647,197 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// errCopyRefused is an endpoint's answer that it does not copy objects server-side; Copy streams the object instead.
+var errCopyRefused = errors.New("the endpoint does not copy objects")
+
+// copyAnswer reads the answer to a CopyObject or UploadPartCopy into result, the element a success carries. Copy
+// falls back to streaming (errCopyRefused) on an answer that says the endpoint does not implement the call — HTTP
+// 501 or 405, or an error whose code is NotImplemented, MethodNotAllowed, InvalidRequest or InvalidArgument, which
+// S3-compatible endpoints answer to headers they do not take — and on a success without the result element (an
+// endpoint that ignored x-amz-copy-source and stored the empty body). Anything else fails the copy: a 5xx or a
+// network error is retried by the caller, never hidden by a stream of the whole object. S3 may answer 200 with an
+// error in the body, which fails the copy too.
+func copyAnswer(op, key string, resp *http.Response, result any) error {
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return fmt.Errorf("snapstore/s3: %s %s: %w", op, key, err)
+	}
+	code := ""
+	if i := bytes.Index(b, []byte("<Code>")); i >= 0 {
+		if j := bytes.Index(b[i:], []byte("</Code>")); j > 0 {
+			code = string(b[i+6 : i+j])
+		}
+	}
+	switch {
+	case resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusMethodNotAllowed,
+		resp.StatusCode/100 == 4 && (code == "NotImplemented" || code == "MethodNotAllowed" || code == "InvalidRequest" || code == "InvalidArgument"):
+		return fmt.Errorf("%w: %s %s: HTTP %d %s", errCopyRefused, op, key, resp.StatusCode, code)
+	case resp.StatusCode == http.StatusNotFound && code == "NoSuchKey":
+		return fmt.Errorf("%s: %w", key, snapstore.ErrNotFound)
+	case resp.StatusCode/100 != 2 || code != "":
+		return fmt.Errorf("snapstore/s3: %s %s: HTTP %d %s", op, key, resp.StatusCode, code)
+	}
+	if err := xml.Unmarshal(b, result); err != nil {
+		return fmt.Errorf("%w: %s %s: HTTP %d without a result: %.200s", errCopyRefused, op, key, resp.StatusCode, b)
+	}
+	return nil
+}
+
+// copySource is the x-amz-copy-source of key.
+func (s *Store) copySource(key string) string {
+	return "/" + s.cfg.Bucket + "/" + uriEncode(s.prefix+key, false)
+}
+
+// Copy copies the object inside the bucket, so none of its bytes pass through herd: one CopyObject up to
+// MaxCopySize (S3's 5 GiB), and UploadPartCopy of the source's own parts past it. The copy's metadata is the herd
+// digest; it is proved as Prove proves an object, by a HEAD: the endpoint's SHA-256 of what a CopyObject stored is
+// the digest itself, and the composite checksum of a part copy, made of the source's parts, is the source's; only an
+// endpoint that keeps no checksum has the copy read. An endpoint that does not copy objects (see copyAnswer) has the
+// object streamed through herd instead (snapstore.StreamCopy). A Copy that fails leaves nothing under to.
 func (s *Store) Copy(ctx context.Context, from, to, digest string) (snapstore.Object, error) {
-	return snapstore.StreamCopy(ctx, s, from, to, digest)
+	if _, err := s.objectURL(to); err != nil {
+		return snapstore.Object{}, err
+	}
+	src, sum, err := s.head(ctx, from)
+	if err != nil {
+		return snapstore.Object{}, err
+	}
+	if src.Digest != digest {
+		return snapstore.Object{}, fmt.Errorf("%w: %s records %s, want %s", snapstore.ErrDigestMismatch, from, src.Digest, digest)
+	}
+	obj, err := s.copy(ctx, from, to, src, sum)
+	if err == nil {
+		return obj, nil
+	}
+	// As in Put: whatever is under to is not what this Copy answers for.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if derr := s.Delete(dctx, to); derr != nil {
+		return snapstore.Object{}, fmt.Errorf("snapstore/s3: copy %s to %s: %w (and removing what is under the key: %v)", from, to, err, derr)
+	}
+	if errors.Is(err, errCopyRefused) {
+		return snapstore.StreamCopy(ctx, s, from, to, digest)
+	}
+	return snapstore.Object{}, fmt.Errorf("snapstore/s3: copy %s to %s: %w", from, to, err)
+}
+
+func (s *Store) copy(ctx context.Context, from, to string, src snapstore.Object, sum string) (snapstore.Object, error) {
+	maxCopy := s.MaxCopySize
+	if maxCopy <= 0 {
+		maxCopy = MaxPutSize
+	}
+	if src.Size <= maxCopy {
+		if err := s.copyObject(ctx, from, to, src.Digest); err != nil {
+			return snapstore.Object{}, err
+		}
+		return s.prove(ctx, to, src.Digest, src.Size)
+	}
+	part, composite, err := s.sourceParts(ctx, from, src.Size, sum)
+	if err != nil {
+		return snapstore.Object{}, err
+	}
+	if part > maxCopy {
+		return snapstore.Object{}, fmt.Errorf("%w: %s's parts are %d bytes, more than one copy takes (%d)", errCopyRefused, from, part, maxCopy)
+	}
+	if err := s.copyParts(ctx, from, to, src, part, composite); err != nil {
+		return snapstore.Object{}, err
+	}
+	return s.prove(ctx, to, src.Digest, src.Size)
+}
+
+// copyObject is one CopyObject of from to to, with the herd digest as the copy's metadata and a SHA-256 checksum of
+// the bytes the endpoint stores.
+func (s *Store) copyObject(ctx context.Context, from, to, digest string) error {
+	hdr := http.Header{}
+	hdr.Set("X-Amz-Copy-Source", s.copySource(from))
+	hdr.Set("X-Amz-Metadata-Directive", "REPLACE")
+	hdr.Set(DigestHeader, digest)
+	hdr.Set("X-Amz-Checksum-Algorithm", "SHA256")
+	resp, err := s.do(ctx, http.MethodPut, to, hdr, nil, 0, "")
+	if err != nil {
+		return err
+	}
+	var out struct {
+		XMLName xml.Name `xml:"CopyObjectResult"`
+	}
+	return copyAnswer("copy", to, resp, &out)
+}
+
+// sourceParts is the part size the source was uploaded in, from a HEAD of its first part, and its composite checksum
+// when a copy in those parts can be proved by it (empty otherwise: the source is not a multipart object of parts of
+// that size, or the endpoint reports no checksum).
+func (s *Store) sourceParts(ctx context.Context, key string, size int64, sum string) (int64, string, error) {
+	hdr := http.Header{}
+	hdr.Set("X-Amz-Checksum-Mode", "ENABLED")
+	resp, err := s.doQuery(ctx, http.MethodHead, key, url.Values{"partNumber": {"1"}}, hdr, nil, 0, "")
+	if err != nil {
+		return 0, "", fmt.Errorf("snapstore/s3: stat %s part 1: %w", key, err)
+	}
+	drain(resp)
+	if resp.StatusCode/100 != 2 {
+		return 0, "", fmt.Errorf("snapstore/s3: stat %s part 1: HTTP %d", key, resp.StatusCode)
+	}
+	part, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	n, nerr := strconv.Atoi(resp.Header.Get("X-Amz-Mp-Parts-Count"))
+	if err != nil || nerr != nil || part <= 0 || int64(n) != (size+part-1)/part || !strings.HasSuffix(sum, "-"+strconv.Itoa(n)) {
+		// Not parts this copy can repeat: copy in parts of the store's own size, and prove the copy by reading it.
+		return s.partSize(size), "", nil
+	}
+	return part, sum, nil
+}
+
+// copyParts copies from to to as a multipart upload of UploadPartCopy calls of part bytes each but the last, and
+// records composite (the source's composite checksum, if the parts are the source's) as the checksum the copy must
+// have. An upload that does not complete is aborted.
+func (s *Store) copyParts(ctx context.Context, from, to string, src snapstore.Object, part int64, composite string) (err error) {
+	hdr := http.Header{}
+	hdr.Set(DigestHeader, src.Digest)
+	if composite != "" {
+		hdr.Set(ChecksumMetaHeader, composite)
+	}
+	hdr.Set("X-Amz-Checksum-Algorithm", "SHA256")
+	id, err := s.createUpload(ctx, to, hdr)
+	if err != nil {
+		return err
+	}
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if aerr := s.abortUpload(actx, to, id); aerr != nil {
+			err = fmt.Errorf("%w (and aborting the upload: %v)", err, aerr)
+		}
+	}()
+	done := completeUpload{}
+	for i, off := 0, int64(0); off < src.Size; i, off = i+1, off+part {
+		phdr := http.Header{}
+		phdr.Set("X-Amz-Copy-Source", s.copySource(from))
+		phdr.Set("X-Amz-Copy-Source-Range", fmt.Sprintf("bytes=%d-%d", off, min(off+part, src.Size)-1))
+		q := url.Values{"partNumber": {strconv.Itoa(i + 1)}, "uploadId": {id}}
+		resp, err := s.doQuery(ctx, http.MethodPut, to, q, phdr, nil, 0, "")
+		if err != nil {
+			return fmt.Errorf("part %d: %w", i+1, err)
+		}
+		var out struct {
+			XMLName        xml.Name `xml:"CopyPartResult"`
+			ETag           string
+			ChecksumSHA256 string
+		}
+		if err := copyAnswer("copy part", to, resp, &out); err != nil {
+			return fmt.Errorf("part %d: %w", i+1, err)
+		}
+		if out.ETag == "" {
+			return fmt.Errorf("part %d: the endpoint answered no ETag", i+1)
+		}
+		done.Parts = append(done.Parts, completedPart{PartNumber: i + 1, ETag: out.ETag, ChecksumSHA256: out.ChecksumSHA256})
+	}
+	if err := s.completeUpload(ctx, to, id, done); err != nil {
+		return err
+	}
+	completed = true
+	return nil
 }
