@@ -6,11 +6,13 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/egress"
 )
@@ -128,4 +130,54 @@ func TestHostServicesFileReload(t *testing.T) {
 	if got := names(); got != "b.herd.internal:80 -> 10.0.0.2:80" {
 		t.Errorf("after the file went away: %q, want the last good set", got)
 	}
+}
+
+// TestHostServicesFileRun (declared-host-service): a running herd-egress re-reads -host-services-file on its
+// -interval, in the loop that re-reads the bindings, so a service added or removed reaches the gateway.
+func TestHostServicesFileRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "host-services")
+	if err := os.WriteFile(path, []byte("a.herd.internal:80 10.0.0.1:80\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := make(chan *egress.Gateway, 1)
+	eg := &Egress{API: "127.0.0.1:1", Token: "t", Bindings: filepath.Join(dir, "bindings.json"), CAOut: filepath.Join(dir, "ca.pem"),
+		DNSAnswer: "198.18.0.1", Interval: 20 * time.Millisecond, HostServicesFile: path,
+		NewGateway: func(c egress.Config) (*egress.Gateway, error) {
+			g, err := egress.New(c)
+			gw <- g
+			return g, err
+		}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eg.Run(ctx, ln, pc) }()
+	defer func() { cancel(); <-done }()
+	g := <-gw
+	waitFor := func(want string) {
+		t.Helper()
+		var got string
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			var s []string
+			for _, h := range g.HostServices() {
+				s = append(s, h.String())
+			}
+			if got = strings.Join(s, ","); got == want {
+				return
+			}
+		}
+		t.Fatalf("host services %q, want %q", got, want)
+	}
+	waitFor("a.herd.internal:80 -> 10.0.0.1:80")
+	if err := os.WriteFile(path, []byte("b.herd.internal:80 10.0.0.2:80\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("b.herd.internal:80 -> 10.0.0.2:80")
 }
