@@ -178,8 +178,8 @@ func TestGoldenDisabledBootsCold(t *testing.T) {
 	}
 }
 
-// TestGoldenBuildFailureReported (criterion golden): a build that cannot succeed ends in error_message
-// "<Reason>: <detail>", never in a silent absence, and lets its golden actor go.
+// TestGoldenBuildFailureReported (criterion golden): a build that cannot succeed answers error_message
+// "<Reason>: <detail>", never a silent absence, and lets its golden actor go.
 func TestGoldenBuildFailureReported(t *testing.T) {
 	for _, c := range []struct {
 		name, reason string
@@ -203,7 +203,7 @@ func TestGoldenBuildFailureReported(t *testing.T) {
 			}
 			_, err := e.Client.GetActor(ctxT(t), &ateapi.GetActorRequest{Actor: oref(e, tpl.GetMetadata().GetUid())})
 			wantCode(t, "GetActor of the failed golden actor", err, codes.NotFound)
-			// Terminal: a later pass does not rebuild it.
+			// A later pass within the retry backoff (a minute here) does not rebuild it (goldenretry_test.go: after it).
 			if left, err := e.Server.Reconcile(ctxT(t)); err != nil || left != 0 {
 				t.Errorf("Reconcile = %d, %v", left, err)
 			}

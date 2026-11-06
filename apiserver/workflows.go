@@ -359,7 +359,7 @@ func (s *Server) Reconcile(ctx context.Context) (int, error) {
 		if err != nil {
 			return left, err
 		}
-		if !goldenEnabled(t) || goldenDone(t.GetStatus().GetGoldenSnapshotStatus()) {
+		if gs := t.GetStatus().GetGoldenSnapshotStatus(); !goldenEnabled(t) || goldenDone(gs) && !goldenRetryDue(r, gs, time.Now()) {
 			continue
 		}
 		again, pending, err := s.goldenPass(ctx, r.Key)

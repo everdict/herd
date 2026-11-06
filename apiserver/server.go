@@ -63,6 +63,13 @@ type Config struct {
 	// GoldenWarmup is how long a template's golden actor runs before its snapshot is taken. Substrate waits 20 s
 	// (herd-api's -golden-warmup default); zero takes it as soon as the actor runs.
 	GoldenWarmup time.Duration
+	// GoldenRetries is how many times Reconcile builds a template's failed golden snapshot again, with no change to the
+	// template (default DefaultGoldenRetries; negative: never). A failure that a retry can heal (a golden actor lost
+	// when herd-api restarted, a herdlet that could not store the snapshot) heals; one that cannot ends after them.
+	GoldenRetries int
+	// GoldenRetryBackoff is how long after a failed golden build the first retry waits; each retry after it waits
+	// twice as long as the one before (default DefaultGoldenRetryBackoff).
+	GoldenRetryBackoff time.Duration
 }
 
 // Server is herd-api.
@@ -94,6 +101,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.RestoreBandwidth <= 0 {
 		cfg.RestoreBandwidth = DefaultRestoreBandwidth
+	}
+	if cfg.GoldenRetries == 0 {
+		cfg.GoldenRetries = DefaultGoldenRetries
+	}
+	if cfg.GoldenRetryBackoff <= 0 {
+		cfg.GoldenRetryBackoff = DefaultGoldenRetryBackoff
 	}
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pullAuths: map[string]link.Secret{}}
 	cfg.Hub.OnRegister = s.recordWorker

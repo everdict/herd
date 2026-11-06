@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -22,8 +23,10 @@ import (
 // DISABLED (an omitted config or UNSPECIFIED is stored as ENABLED, defaults.Apply) gets a golden actor named by the
 // template's uid in its atespace; once it has run for the warmup, a PUBLISHED tag of the same name takes its
 // snapshot, the golden actor is deleted, and status.golden_snapshot_status.golden_tag names the tag. A build that
-// cannot succeed ends in error_message "<Reason>: <detail>"; both are terminal. CreateActor without a source_tag then
-// starts from the golden tag.
+// cannot succeed ends in error_message "<Reason>: <detail>". A tag is terminal; an error is herd's to retry
+// (DEFAUL-1601): Reconcile builds a failed golden again after Config.GoldenRetryBackoff, doubled for each retry, up to
+// Config.GoldenRetries times, and the message says when, so a transient failure heals with no change to the
+// template and a permanent one ends. CreateActor without a source_tag then starts from the golden tag.
 
 // Reasons of a failed golden build, Substrate's where it has one.
 const (
@@ -36,6 +39,49 @@ const (
 
 // maxGoldenErrorMessageLen is the maxLength of GoldenSnapshotStatus.error_message.
 const maxGoldenErrorMessageLen = 4096
+
+// Config.GoldenRetries and Config.GoldenRetryBackoff defaults: retries 1, 2, 4, 8 and 16 minutes after a failure.
+const (
+	DefaultGoldenRetries      = 5
+	DefaultGoldenRetryBackoff = time.Minute
+)
+
+// templateState is herd-api's bookkeeping for a template (store.Record.State): its failed golden builds.
+type templateState struct {
+	// GoldenFailures counts the template's golden builds that failed.
+	GoldenFailures int `json:"goldenFailures,omitempty"`
+	// GoldenRetryAt is when Reconcile builds the failed golden again; nil: not again.
+	GoldenRetryAt *time.Time `json:"goldenRetryAt,omitempty"`
+}
+
+func parseTemplateState(r store.Record) (templateState, error) {
+	var st templateState
+	if len(r.State) == 0 {
+		return st, nil
+	}
+	if err := json.Unmarshal(r.State, &st); err != nil {
+		return st, fmt.Errorf("apiserver: %v: state: %w", r.Key, err)
+	}
+	return st, nil
+}
+
+// goldenRetryDue: the template's golden build failed and its retry is due.
+func goldenRetryDue(r store.Record, gs *ateapi.GoldenSnapshotStatus, now time.Time) bool {
+	if gs.GetErrorMessage() == "" || gs.GetGoldenTag() != nil {
+		return false
+	}
+	st, err := parseTemplateState(r)
+	return err == nil && st.GoldenRetryAt != nil && !now.Before(*st.GoldenRetryAt)
+}
+
+// goldenBackoff is the wait before retry n (from 1): the backoff, doubled for each retry before it, at most a day.
+func goldenBackoff(base time.Duration, n int) time.Duration {
+	d := base
+	for i := 1; i < n && d < 24*time.Hour; i++ {
+		d *= 2
+	}
+	return min(d, 24*time.Hour)
+}
 
 func templateKey(space, name string) store.Key {
 	return store.Key{Kind: store.KindActorTemplate, Space: space, Name: name}
@@ -129,8 +175,17 @@ func (g *goldenBuild) run(ctx context.Context) (time.Duration, bool, error) {
 			return 0, true, err
 		}
 		gs := tpl.GetStatus().GetGoldenSnapshotStatus()
+		if goldenEnabled(tpl) && goldenRetryDue(g.rec, gs, time.Now()) {
+			if err := g.retry(ctx, gs.GetErrorMessage()); err != nil {
+				return 0, true, err
+			}
+			continue
+		}
 		if !goldenEnabled(tpl) || goldenDone(gs) {
-			s.dropPullAuth(uid)
+			if st, _ := parseTemplateState(g.rec); !goldenEnabled(tpl) || gs.GetGoldenTag() != nil || st.GoldenRetryAt == nil {
+				// The build ended for good; a retry still to come boots with the template's image_pull_auth.
+				s.dropPullAuth(uid)
+			}
 			return 0, false, nil
 		}
 		// A complete tag survives a failure between the tag and the status write.
@@ -190,8 +245,9 @@ func (g *goldenBuild) run(ctx context.Context) (time.Duration, bool, error) {
 				return 0, false, g.fail(ctx, reasonGoldenSnapshotFailed, status.Convert(err).Message())
 			}
 			return 0, true, fmt.Errorf("tagging golden actor: %w", err)
-		case ateapi.ActorState_ACTOR_STATE_RESUMING, ateapi.ActorState_ACTOR_STATE_SUSPENDING:
-			// An owed boot or suspend: Reconcile settles the actor, and the next pass goes on from there.
+		case ateapi.ActorState_ACTOR_STATE_RESUMING, ateapi.ActorState_ACTOR_STATE_SUSPENDING, ateapi.ActorState_ACTOR_STATE_DELETING:
+			// An owed boot or suspend, or the delete of a failed build's golden actor before a retry: Reconcile settles
+			// the actor, and the next pass goes on from there.
 			return 0, true, fmt.Errorf("golden actor is %v: %s", st, owedReason(ar))
 		default:
 			return 0, false, g.fail(ctx, reasonUnexpectedState, fmt.Sprintf("golden actor in unexpected state %v", st))
@@ -219,18 +275,56 @@ func (g *goldenBuild) saveTag(ctx context.Context, ref *ateapi.ObjectRef) error 
 	return nil
 }
 
-// fail records the terminal error message, prefixed with its reason and cut to error_message's bound, and lets the
-// golden actor go: nothing will snapshot it any more, and it holds a slot.
+// fail records the error message, prefixed with its reason and cut to error_message's bound, schedules the build's
+// retry if it has one left and says so in the message, and lets the golden actor go: nothing will snapshot it any
+// more, and it holds a slot.
 func (g *goldenBuild) fail(ctx context.Context, reason, msg string) error {
-	m := truncateUTF8(reason+": "+msg, maxGoldenErrorMessageLen)
+	st, err := parseTemplateState(g.rec)
+	if err != nil {
+		return err
+	}
+	st.GoldenFailures++
+	st.GoldenRetryAt = nil
+	retries := max(g.s.cfg.GoldenRetries, 0)
+	note := ""
+	if n := st.GoldenFailures; n <= retries {
+		at := time.Now().Add(goldenBackoff(g.s.cfg.GoldenRetryBackoff, n)).UTC()
+		st.GoldenRetryAt = &at
+		note = fmt.Sprintf(" (herd-api builds it again at %s, retry %d of %d)", at.Format(time.RFC3339), n, retries)
+	} else if retries > 0 {
+		note = fmt.Sprintf(" (not built again: its %d retries failed)", retries)
+	}
+	if g.rec.State, err = json.Marshal(st); err != nil {
+		return err
+	}
+	m := truncateUTF8(reason+": "+msg, maxGoldenErrorMessageLen-len(note)) + note
 	if err := g.checkpoint(ctx, func(gs *ateapi.GoldenSnapshotStatus) { gs.ErrorMessage = m }); err != nil {
 		return err
 	}
-	g.s.dropPullAuth(g.rec.UID)
+	if st.GoldenRetryAt == nil {
+		g.s.dropPullAuth(g.rec.UID)
+	}
 	log.Printf("herd-api: template %s/%s: golden snapshot failed: %s", g.rec.Space, g.rec.Name, m)
 	if _, err := g.s.deleteActor(ctx, g.rec.Space, g.rec.UID, "", 0); err != nil && status.Code(err) != codes.NotFound {
 		log.Printf("herd-api: template %s/%s: golden actor not deleted yet (Reconcile retries): %v", g.rec.Space, g.rec.Name, err)
 	}
+	return nil
+}
+
+// retry clears a failed build's error so that the build runs again from the start, with no change to the template.
+func (g *goldenBuild) retry(ctx context.Context, failed string) error {
+	st, err := parseTemplateState(g.rec)
+	if err != nil {
+		return err
+	}
+	st.GoldenRetryAt = nil
+	if g.rec.State, err = json.Marshal(st); err != nil {
+		return err
+	}
+	if err := g.checkpoint(ctx, func(gs *ateapi.GoldenSnapshotStatus) { gs.ErrorMessage, gs.SnapshotTime = "", nil }); err != nil {
+		return err
+	}
+	log.Printf("herd-api: template %s/%s: golden snapshot built again (failure %d was %s)", g.rec.Space, g.rec.Name, st.GoldenFailures, failed)
 	return nil
 }
 

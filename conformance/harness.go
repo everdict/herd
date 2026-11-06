@@ -94,6 +94,9 @@ var NewStore = func(t testing.TB) store.Store { return memstore.New() }
 // parallel).
 var GoldenWarmup time.Duration
 
+// GoldenRetryBackoff is herd-api's apiserver.Config.GoldenRetryBackoff in the harness (tests may set it).
+var GoldenRetryBackoff time.Duration
+
 // CallTimeout is how long herd-api waits for a herdlet in the harness.
 const CallTimeout = 400 * time.Millisecond
 
@@ -123,6 +126,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		CallTimeout:          CallTimeout,
 		ReconcileCallTimeout: ReconcileCallTimeout,
 		GoldenWarmup:         GoldenWarmup,
+		GoldenRetryBackoff:   GoldenRetryBackoff,
 	})
 	if err != nil {
 		t.Fatal(err)
