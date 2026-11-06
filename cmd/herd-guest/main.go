@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/execrec"
@@ -132,6 +133,9 @@ func serve(args []string) error {
 	defer g.Close()
 	if *local == "" {
 		g.SyncDirs = []string{initd.DefaultLayout.ShareDir}
+	} else {
+		// A local target is no VM: its clock is the host's already, and the host's is not herd-guest's to set.
+		g.SetTime = func(time.Time) (time.Time, error) { return time.Now(), nil }
 	}
 	l, err := transport.Listen(*listen)
 	if err != nil {

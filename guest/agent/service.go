@@ -21,6 +21,7 @@ const (
 	MethodStatFile            = "/herd.ext.v1.FileInfoService/StatFile"
 	MethodListDirectory       = "/herd.ext.v1.FileInfoService/ListDirectory"
 	MethodSync                = "/herd.ext.v1.SyncService/Sync"
+	MethodSetClock            = "/herd.ext.v1.ClockService/SetClock"
 )
 
 // The service descriptors are written by hand (ADR 0001, A-12): protoc-gen-go-grpc is not available where herd is
@@ -57,6 +58,7 @@ const (
 	fileSystemService = "ateenv.v1alpha.FileSystemService"
 	fileInfoService   = "herd.ext.v1.FileInfoService"
 	syncService       = "herd.ext.v1.SyncService"
+	clockService      = "herd.ext.v1.ClockService"
 )
 
 var processServiceDesc = grpc.ServiceDesc{
@@ -137,10 +139,18 @@ var syncServiceDesc = grpc.ServiceDesc{
 	Metadata:    "herdext/v1/sync.proto",
 }
 
+var clockServiceDesc = grpc.ServiceDesc{
+	ServiceName: clockService,
+	HandlerType: (*any)(nil),
+	Methods:     []grpc.MethodDesc{unary(clockService, "SetClock", (*Guest).SetClock)},
+	Metadata:    "herdext/v1/clock.proto",
+}
+
 // Register adds the guest's services to srv.
 func (g *Guest) Register(srv grpc.ServiceRegistrar) {
 	srv.RegisterService(&processServiceDesc, g)
 	srv.RegisterService(&fileSystemServiceDesc, g)
 	srv.RegisterService(&fileInfoServiceDesc, g)
 	srv.RegisterService(&syncServiceDesc, g)
+	srv.RegisterService(&clockServiceDesc, g)
 }

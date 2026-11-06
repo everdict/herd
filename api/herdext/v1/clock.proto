@@ -1,0 +1,43 @@
+// Copyright 2026 The herd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+syntax = "proto3";
+
+// herd-guest's clock extension (DEFAUL-1595). A guest restored from a MEMORY snapshot, or resumed after its VM was
+// paused for a snapshot, keeps the wall clock its memory held: a golden taken days ago would start every session days
+// behind. herdlet hands the guest the host's time over this service before the VM is handed to anything that runs in
+// it.
+package herd.ext.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/everdict/herd/api/herdext/v1;herdext";
+
+// ClockService sets the guest's wall clock.
+service ClockService {
+  // SetClock steps the guest's wall clock (CLOCK_REALTIME) to now, forwards or backwards; the monotonic clock is not
+  // touched. An error means the guest's clock was not set.
+  rpc SetClock(SetClockRequest) returns (SetClockResponse);
+}
+
+message SetClockRequest {
+  // The host's wall clock when it sent the call.
+  google.protobuf.Timestamp now = 1;
+}
+
+message SetClockResponse {
+  // The guest's wall clock just before it was set, so the host can say how far it stepped.
+  google.protobuf.Timestamp before = 1;
+}
