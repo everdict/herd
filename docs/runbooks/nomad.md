@@ -30,7 +30,10 @@ reach it with no lab allowance and no address in a job file. An actor still need
 - One client holds the host volume `herd-data` (the bbolt store allows one herd-api).
 - An S3-compatible bucket (e.g. `herd-snapshots`) and an access key for it, on an endpoint every client reaches:
   herd-api keeps snapshots there and each herdlet's join hands it the store, so no client mounts a shared directory
-  (see join.md, Snapshots).
+  (see join.md, Snapshots). A snapshot past 64 MiB goes up as a multipart upload, so the key needs
+  `s3:AbortMultipartUpload` besides put, get and delete (an upload that fails is aborted). The job sets no
+  `-call-timeout`: herd-api waits for a snapshot by the size its herdlet reports, at `-restore-bandwidth` (8 MiB/s by
+  default), as it waits for a restore by its object's size (ADR A-35).
 
 ## Steps
 
