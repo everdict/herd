@@ -708,8 +708,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 	w.Header().Set("Content-Type", "application/xml")
+	sum := sha256.Sum256(data)
 	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyObjectResult><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></CopyObjectResult>",
-		etag(sha256.Sum256(data)), c.checksum())
+		etag(sum), base64.StdEncoding.EncodeToString(sum[:]))
 }
 
 // uploadPartCopy is UploadPartCopy: the bytes x-amz-copy-source-range names of the source become a part of the
