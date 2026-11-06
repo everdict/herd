@@ -91,9 +91,19 @@ job "herdlet" {
       }
 
       template {
-        data        = "HERD_API={{ range nomadService \"herd-api\" }}{{ .Address }}:{{ .Port }}{{ end }}"
+        data        = "HERD_API={{ range nomadService \"herd-api\" }}{{ .Address }}:{{ .Port }}{{ end }}\nHERD_ROUTER={{ range $i, $s := nomadService \"herd-router\" }}{{ if $i }},{{ end }}{{ .Address }}:{{ .Port }}{{ end }}"
         destination = "local/herd-api.env"
         env         = true
+      }
+
+      # The declared host services (-host-services-file, DEFAUL-1599): every Nomad service tagged herd-host-service is
+      # <service>.herd.internal on its port, dialed at the address Nomad registered for it (its first instance), so an
+      # actor whose policy allows that name reaches a service on a node's private address. Empty when none is
+      # registered. herd-egress re-reads the file every -interval, so a change does not restart it.
+      template {
+        data        = "{{ range nomadServices }}{{ if .Tags | contains \"herd-host-service\" }}{{ $name := .Name }}{{ range $i, $s := nomadService .Name }}{{ if eq $i 0 }}{{ $name }}.herd.internal:{{ .Port }} {{ .Address }}:{{ .Port }}\n{{ end }}{{ end }}{{ end }}{{ end }}"
+        destination = "local/host-services"
+        change_mode = "noop"
       }
 
       config {
@@ -103,6 +113,8 @@ job "herdlet" {
           "-token-file", "[[.HerdletStateDir]]/egress.token",
           "-bindings", "/run/herd/egress-bindings.json",
           "-ca-out", "[[.HerdletStateDir]]/egress-ca.pem",
+          "-host-services-file", "local/host-services",
+          "-router", "${HERD_ROUTER}",
           "-egress-allow-prefix", "${var.egress_allow_prefix}",
         ]
       }

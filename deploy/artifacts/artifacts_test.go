@@ -415,3 +415,51 @@ func TestNomadHerdletsSpeakPlainHTTPToTheManagedStore(t *testing.T) {
 	}
 	t.Error("nomad/herdlet.nomad.hcl runs no herdlet")
 }
+
+// TestNomadEgressDeclaresHostServicesByDiscovery (DEFAUL-1599): the Nomad herd-egress task takes -host-services-file
+// from a template that Nomad's service discovery renders (empty when no service is tagged), which herd-egress re-reads
+// itself, so no address is an input of the job; its -router comes from the registered herd-router service.
+func TestNomadEgressDeclaresHostServicesByDiscovery(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Path != "nomad/herdlet.nomad.hcl" {
+			continue
+		}
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var args []string
+		for _, inv := range invs {
+			if inv.Binary == "herd-egress" {
+				args = inv.Args
+			}
+		}
+		i := slices.Index(args, "-host-services-file")
+		if i < 0 || i+1 >= len(args) {
+			t.Fatalf("herd-egress %q takes no -host-services-file", args)
+		}
+		if j := slices.Index(args, "-router"); j < 0 || j+1 >= len(args) || args[j+1] != "${HERD_ROUTER}" {
+			t.Errorf("herd-egress %q takes no -router ${HERD_ROUTER}", args)
+		}
+		m := regexp.MustCompile(`(?s)template \{\s*data\s*=\s*"([^\n]*)"\s*destination\s*=\s*"` + regexp.QuoteMeta(args[i+1]) + `"\s*change_mode\s*=\s*"noop"`).FindSubmatch(f.Data)
+		if m == nil {
+			t.Fatalf("no template renders %s with change_mode noop", args[i+1])
+		}
+		data := string(m[1])
+		if !strings.Contains(data, "nomadServices") || !strings.Contains(data, "nomadService .Name") || !strings.Contains(data, `\"herd-host-service\"`) {
+			t.Errorf("the host services template is not rendered from Nomad service discovery: %s", data)
+		}
+		if regexp.MustCompile(`\d+\.\d+\.\d+\.\d+`).MatchString(data) {
+			t.Errorf("the host services template holds an address: %s", data)
+		}
+		if !regexp.MustCompile(`HERD_ROUTER=\{\{ range [^"]*nomadService \\"herd-router\\"`).Match(f.Data) {
+			t.Errorf("HERD_ROUTER is not rendered from the herd-router service")
+		}
+		return
+	}
+	t.Error("no nomad/herdlet.nomad.hcl")
+}
