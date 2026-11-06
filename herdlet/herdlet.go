@@ -72,6 +72,8 @@ type Agent struct {
 	Watch time.Duration
 
 	vms sync.Map // VM id → vmLock
+	// leases are the deadlines of the work in flight, by work id.
+	leases sync.Map
 
 	runMu   sync.Mutex
 	running map[string]bool // VM ids (as herd-api names them) of the VMs this herdlet runs for actors
@@ -169,6 +171,10 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		if err := json.Unmarshal(b, &d); err != nil {
 			return fmt.Errorf("herdlet: decode: %w", err)
 		}
+		if d.Extend != nil {
+			a.extend(*d.Extend)
+			continue
+		}
 		if d.Work == nil {
 			continue
 		}
@@ -176,7 +182,8 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o := a.logged(ctx, w)
+			wctx := withProgress(ctx, func(n int64) { _ = send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: n}}) })
+			o := a.logged(wctx, w)
 			o.ID = w.ID
 			if a.Rewrite != nil {
 				var ok bool
@@ -217,11 +224,8 @@ func (a *Agent) spec(id string) vmm.Spec {
 }
 
 func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
-	if w.DeadlineUnixMilli != 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, time.UnixMilli(w.DeadlineUnixMilli))
-		defer cancel()
-	}
+	ctx, end := a.withLease(ctx, w)
+	defer end()
 	release, err := a.acquire(ctx, w.VM)
 	if err != nil {
 		return classify(err)

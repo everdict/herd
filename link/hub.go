@@ -45,8 +45,15 @@ type conn struct {
 	stream  Stream
 	sendMu  sync.Mutex
 	mu      sync.Mutex // guards pending and done
-	pending map[string]chan Outcome
+	pending map[string]*pending
 	done    chan struct{}
+}
+
+// pending is a call waiting for its outcome.
+type pending struct {
+	out chan Outcome
+	// progress holds the latest bytes the herdlet reported for the call.
+	progress chan int64
 }
 
 // NewHub returns a hub with no herdlets.
@@ -70,7 +77,7 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 			return err
 		}
 	}
-	c := &conn{reg: *up.Register, stream: s, pending: map[string]chan Outcome{}, done: make(chan struct{})}
+	c := &conn{reg: *up.Register, stream: s, pending: map[string]*pending{}, done: make(chan struct{})}
 	h.mu.Lock()
 	if old, ok := h.workers[c.reg.Worker]; ok {
 		// A reconnect replaces the old link; its pending calls end unknown.
@@ -104,6 +111,8 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		switch {
 		case up.Outcome != nil:
 			c.deliver(*up.Outcome)
+		case up.Progress != nil:
+			c.progress(*up.Progress)
 		case up.Exited != nil:
 			if h.OnExit != nil {
 				h.OnExit(ctx, c.reg.Worker, *up.Exited)
@@ -139,12 +148,27 @@ func (c *conn) send(d Down) error {
 
 func (c *conn) deliver(o Outcome) {
 	c.mu.Lock()
-	ch, ok := c.pending[o.ID]
+	p, ok := c.pending[o.ID]
 	delete(c.pending, o.ID)
 	c.mu.Unlock()
 	if ok {
-		ch <- o
+		p.out <- o
 	}
+}
+
+// progress hands the call its latest report; an older one not yet read is replaced.
+func (c *conn) progress(r Progress) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.pending[r.ID]
+	if !ok {
+		return
+	}
+	select {
+	case <-p.progress:
+	default:
+	}
+	p.progress <- r.Bytes
 }
 
 func (c *conn) close() {
@@ -178,6 +202,21 @@ func (h *Hub) Call(ctx context.Context, worker string, w Work) Outcome {
 		defer cancel()
 	}
 	dl, _ := ctx.Deadline()
+	return h.call(ctx, worker, w, dl, nil)
+}
+
+// CallSized is Call for work whose time follows the bytes it moves: the call waits timeout plus grow(n), where n is
+// the most bytes the herdlet has reported for it (Progress; none at first). Each report that moves the deadline later
+// is sent to the herdlet (Extend), so it works on as long as the call waits. A deadline of ctx still bounds the call.
+func (h *Hub) CallSized(ctx context.Context, worker string, w Work, timeout time.Duration, grow func(bytes int64) time.Duration) Outcome {
+	start := time.Now()
+	return h.call(ctx, worker, w, start.Add(timeout+grow(0)), func(n int64) time.Time { return start.Add(timeout + grow(n)) })
+}
+
+func (h *Hub) call(ctx context.Context, worker string, w Work, dl time.Time, sized func(int64) time.Time) Outcome {
+	if cdl, ok := ctx.Deadline(); ok && cdl.Before(dl) {
+		dl = cdl
+	}
 	h.mu.Lock()
 	c, ok := h.workers[worker]
 	h.seq++
@@ -190,9 +229,9 @@ func (h *Hub) Call(ctx context.Context, worker string, w Work) Outcome {
 		return unknown(fmt.Sprintf("herdlet %q is not connected", worker))
 	}
 	w.DeadlineUnixMilli = dl.UnixMilli()
-	ch := make(chan Outcome, 1)
+	p := &pending{out: make(chan Outcome, 1), progress: make(chan int64, 1)}
 	c.mu.Lock()
-	c.pending[w.ID] = ch
+	c.pending[w.ID] = p
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
@@ -202,12 +241,33 @@ func (h *Hub) Call(ctx context.Context, worker string, w Work) Outcome {
 	if err := c.send(Down{Work: &w}); err != nil {
 		return unknown(fmt.Sprintf("herdlet %q: send %s: %v", worker, w.Op, err))
 	}
-	select {
-	case o := <-ch:
-		return o
-	case <-c.done:
-		return unknown(fmt.Sprintf("herdlet %q: link closed before it answered %s", worker, w.Op))
-	case <-ctx.Done():
-		return unknown(fmt.Sprintf("herdlet %q: no answer to %s: %v", worker, w.Op, ctx.Err()))
+	timer := time.NewTimer(time.Until(dl))
+	defer timer.Stop()
+	for {
+		select {
+		case o := <-p.out:
+			return o
+		case <-c.done:
+			return unknown(fmt.Sprintf("herdlet %q: link closed before it answered %s", worker, w.Op))
+		case <-ctx.Done():
+			return unknown(fmt.Sprintf("herdlet %q: no answer to %s: %v", worker, w.Op, ctx.Err()))
+		case <-timer.C:
+			return unknown(fmt.Sprintf("herdlet %q: no answer to %s: %v", worker, w.Op, context.DeadlineExceeded))
+		case n := <-p.progress:
+			if sized == nil {
+				continue
+			}
+			next := sized(n)
+			if cdl, ok := ctx.Deadline(); ok && cdl.Before(next) {
+				next = cdl
+			}
+			if next.UnixMilli() <= dl.UnixMilli() {
+				continue
+			}
+			dl = next
+			timer.Reset(time.Until(dl))
+			// A herdlet that misses this works to the old deadline and answers unknown, as without the report.
+			_ = c.send(Down{Extend: &Extend{ID: w.ID, DeadlineUnixMilli: dl.UnixMilli()}})
+		}
 	}
 }

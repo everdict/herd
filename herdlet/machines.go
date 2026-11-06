@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/link"
@@ -108,10 +109,14 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	snap, err := a.Machines.Snapshot(ctx, w.VM, w.Fidelity, stop, f)
+	// herd-api waits for the bundle by its size (link.Progress): it learns the size as the bundle grows, and in full
+	// before the upload.
+	pw := &progressWriter{ctx: ctx, w: f, last: time.Now()}
+	snap, err := a.Machines.Snapshot(ctx, w.VM, w.Fidelity, stop, pw)
 	if err != nil {
 		return classify(err)
 	}
+	progress(ctx, pw.n)
 	if _, err := f.Seek(0, 0); err != nil {
 		return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
 	}

@@ -463,3 +463,34 @@ func TestNomadEgressDeclaresHostServicesByDiscovery(t *testing.T) {
 	}
 	t.Error("no nomad/herdlet.nomad.hcl")
 }
+
+// TestNoArtifactSetsTheCallTimeout (DEFAUL-1601): no shipped herd-api passes -call-timeout. A snapshot's call waits
+// for its size and a restore's for its object's, so -call-timeout is the bound of a call that moves no bytes, and its
+// default fits that; the Nomad job's 10m was set by hand for a 4 GiB golden.
+func TestNoArtifactSetsTheCallTimeout(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apis := 0
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f.Path, err)
+		}
+		for _, inv := range invs {
+			if inv.Binary != "herd-api" {
+				continue
+			}
+			apis++
+			for _, a := range inv.Args {
+				if n := strings.TrimLeft(a, "-"); a != n && (n == "call-timeout" || strings.HasPrefix(n, "call-timeout=")) {
+					t.Errorf("%s runs herd-api with %s", f.Path, a)
+				}
+			}
+		}
+	}
+	if apis == 0 {
+		t.Fatal("no artifact runs herd-api: the test read nothing")
+	}
+}

@@ -27,12 +27,30 @@ type Up struct {
 	Outcome      *Outcome      `json:"outcome,omitempty"`
 	// Exited says that a VM the herdlet ran for an actor stopped running without being asked to.
 	Exited *Exited `json:"exited,omitempty"`
+	// Progress reports the bytes a piece of work in flight has moved so far.
+	Progress *Progress `json:"progress,omitempty"`
 }
 
 // Down is a herd-api → herdlet message. Exactly one field is set.
 type Down struct {
 	Registered *Registered `json:"registered,omitempty"`
 	Work       *Work       `json:"work,omitempty"`
+	// Extend moves the deadline of a piece of work in flight.
+	Extend *Extend `json:"extend,omitempty"`
+}
+
+// Progress reports how many bytes the work with ID moves, as far as the herdlet knows yet: for OpSnapshot, the size
+// its snapshot object has reached, which it then puts in the snapshot store. herd-api may lengthen the work's
+// deadline by them (Hub.CallSized) and then sends the new deadline (Extend). A report never shortens a deadline.
+type Progress struct {
+	ID    string `json:"id"`
+	Bytes int64  `json:"bytes"`
+}
+
+// Extend moves the deadline of the work with ID (Work.DeadlineUnixMilli) later.
+type Extend struct {
+	ID                string `json:"id"`
+	DeadlineUnixMilli int64  `json:"deadlineUnixMilli"`
 }
 
 // Capabilities is what the host declares (ADR 0001, A-5; vmm.Capabilities).

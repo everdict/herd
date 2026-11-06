@@ -54,9 +54,11 @@ type Config struct {
 	// the same VM that it is still finishing, which this bound covers too.
 	ReconcileCallTimeout time.Duration
 	// RestoreBandwidth is the slowest rate, in bytes per second, at which a herdlet is expected to read a snapshot
-	// object it restores from the snapshot store (default DefaultRestoreBandwidth). A restore's call waits its usual
-	// timeout plus the object's size at this rate, so a node that does not hold the object yet (a golden fetched from
-	// S3 for the first time) is not cut off by a timeout sized for work that moves no bytes (PLT-227).
+	// object it restores from the snapshot store, or to write one it takes (default DefaultRestoreBandwidth). A
+	// restore's call waits its usual timeout plus the object's size at this rate, so a node that does not hold the
+	// object yet (a golden fetched from S3 for the first time) is not cut off by a timeout sized for work that moves no
+	// bytes (PLT-227). A snapshot's call does the same with the size the herdlet reports as its object grows
+	// (link.Progress), so a large golden stores without a longer CallTimeout (DEFAUL-1601).
 	RestoreBandwidth int64
 	// GoldenWarmup is how long a template's golden actor runs before its snapshot is taken. Substrate waits 20 s
 	// (herd-api's -golden-warmup default); zero takes it as soon as the actor runs.
@@ -131,17 +133,18 @@ type reconciling struct{}
 // top of its timeout.
 type moving struct{}
 
+// call sends w to the worker and waits its timeout plus the bytes it moves at RestoreBandwidth: the size of the object
+// a restore reads (moving), or the most a snapshot's herdlet reported its object has grown to (link.Progress).
 func (s *Server) call(ctx context.Context, worker string, w link.Work) link.Outcome {
 	timeout := s.cfg.CallTimeout
 	if ctx.Value(reconciling{}) != nil {
 		timeout = s.cfg.ReconcileCallTimeout
 	}
-	if n, ok := ctx.Value(moving{}).(int64); ok && n > 0 {
-		timeout += time.Duration(float64(n) / float64(s.cfg.RestoreBandwidth) * float64(time.Second))
+	known, _ := ctx.Value(moving{}).(int64)
+	grow := func(n int64) time.Duration {
+		return time.Duration(float64(max(known, n, 0)) / float64(s.cfg.RestoreBandwidth) * float64(time.Second))
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return s.cfg.Hub.Call(ctx, worker, w)
+	return s.cfg.Hub.CallSized(ctx, worker, w, timeout, grow)
 }
 
 // principal authenticates the caller of ctx.

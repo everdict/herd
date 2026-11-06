@@ -82,6 +82,8 @@ type Server struct {
 	puts       int
 	// readRate, if positive, is the bytes per second a GET's body is sent at (a slow link to the endpoint).
 	readRate int64
+	// writeRate, if positive, is the bytes per second a PUT's body is taken at.
+	writeRate int64
 	served   int64
 	// maxPut, if positive, is the largest body one PUT takes (S3's is 5 GiB).
 	maxPut  int64
@@ -154,6 +156,33 @@ func (s *Server) SetReadRate(bytesPerSecond int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.readRate = bytesPerSecond
+}
+
+// SetWriteRate takes every PUT's body at bytesPerSecond from now on (0: as fast as the connection goes), as an
+// endpoint across a slow link does.
+func (s *Server) SetWriteRate(bytesPerSecond int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writeRate = bytesPerSecond
+}
+
+// slowReader reads at most what a link of rate bytes per second carried since start.
+type slowReader struct {
+	r     io.Reader
+	rate  int64
+	start time.Time
+	n     int64
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	for {
+		if allowed := s.rate*int64(time.Since(s.start))/int64(time.Second) - s.n; allowed > 0 {
+			n, err := s.r.Read(p[:min(int64(len(p)), allowed)])
+			s.n += int64(n)
+			return n, err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // Served counts the object bytes the server sent in GET bodies.
@@ -335,13 +364,17 @@ func (s *Server) body(w http.ResponseWriter, r *http.Request) ([]byte, [32]byte,
 		return nil, [32]byte{}, false
 	}
 	s.mu.Lock()
-	maxPut := s.maxPut
+	maxPut, rate := s.maxPut, s.writeRate
 	s.mu.Unlock()
 	if maxPut > 0 && r.ContentLength > maxPut {
 		s3Error(w, http.StatusBadRequest, "EntityTooLarge")
 		return nil, [32]byte{}, false
 	}
-	data, err := io.ReadAll(r.Body)
+	var body io.Reader = r.Body
+	if rate > 0 {
+		body = &slowReader{r: r.Body, rate: rate, start: time.Now()}
+	}
+	data, err := io.ReadAll(body)
 	if err != nil || int64(len(data)) != r.ContentLength {
 		s3Error(w, http.StatusBadRequest, "IncompleteBody")
 		return nil, [32]byte{}, false
