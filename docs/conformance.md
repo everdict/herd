@@ -263,7 +263,9 @@ egress allowances: LAB -egress-allow-prefix 100.113.143.93/32 on worker aio (hos
 
 A run without one says `egress allowances: none on N workers`, and against Substrate `egress allowances: not
 reported by the target (Unimplemented)`. A report whose egress cases passed under an allowance is a lab run, not a
-production configuration. The run then is:
+production configuration. The allowance is for a conformance echo host only: a service a node runs for its actors on
+its private address (a herder's door relay) is a declared host service (`-host-services-file`, ADR A-18), which herd-egress
+dials at exactly its declared target for exactly its declared name, never an allowance. The run then is:
 
 ```sh
 echo 100.113.143.93 echo.lab.example | sudo tee -a /etc/hosts   # or use 100.113.143.93.sslip.io below

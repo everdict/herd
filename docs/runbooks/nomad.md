@@ -5,6 +5,11 @@ Nomad supervises herd's processes; herd places actors (R-D4). herd-api and herd-
 `dist/nomad/herdlet.nomad.hcl`. They are the same binaries as in the other modes, from the same release archive. The
 commands below are checked by `docs/runbooks/runbooks_test.go`.
 
+A service a node runs for its actors (a herder's door relay) is reached by registering it as a Nomad service tagged
+`herd-host-service`: each client's herd-egress renders it into its `-host-services-file` as
+`<service>.herd.internal:<port>`, dialed at the address Nomad registered (ADR A-18), so actors on any private network
+reach it with no lab allowance and no address in a job file. An actor still needs a policy rule for that name.
+
 ## Cluster prerequisites
 
 - Nomad 1.7+ (Nomad variables, `nomadService` templates), with the `exec` and `raw_exec` drivers enabled on the
