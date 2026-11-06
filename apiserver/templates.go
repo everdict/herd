@@ -117,7 +117,7 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 		if err != nil {
 			return nil, toStatus(err)
 		}
-		if ar.st.TemplateUID == r.UID && !(ar.st.Golden && a.Name == r.UID) {
+		if ar.st.TemplateUID == r.UID && !ar.st.Golden {
 			return nil, status.Errorf(codes.FailedPrecondition, "template %s/%s is used by actor %s", space, name, a.Name)
 		}
 	}
@@ -125,7 +125,11 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	if err := s.deleteGolden(ctx, space, r.UID); err != nil {
+	t, err := decode(r, &ateapi.ActorTemplate{})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	if err := s.deleteGolden(ctx, space, r.UID, goldenNames(r, t)); err != nil {
 		return nil, err
 	}
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {

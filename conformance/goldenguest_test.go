@@ -175,6 +175,15 @@ func TestUpgradedGuestRebuildsGolden(t *testing.T) {
 	if n, _, _ := g.counts(); n != 1 {
 		t.Errorf("the upgraded guest took %d golden snapshots, want 1", n)
 	}
+	// Deleting the template deletes the rebuilt golden too.
+	if _, err := e.Client.DeleteActor(ctxT(t), &ateapi.DeleteActorRequest{Actor: oref(e, "a1")}); err != nil {
+		t.Fatalf("DeleteActor a1: %v", err)
+	}
+	if _, err := e.Client.DeleteActorTemplate(ctxT(t), &ateapi.DeleteActorTemplateRequest{ActorTemplate: oref(e, "tpl")}); err != nil {
+		t.Fatalf("DeleteActorTemplate: %v", err)
+	}
+	_, err = e.Client.GetTag(ctxT(t), &ateapi.GetTagRequest{Tag: oref(e, name)})
+	wantCode(t, "GetTag of the rebuilt golden tag after its template's delete", err, codes.NotFound)
 }
 
 // TestOldGoldenServesUntilRebuildReady (DEFAUL-1606): while the golden of the new guest is being built, the template

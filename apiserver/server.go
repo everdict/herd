@@ -83,6 +83,8 @@ type Server struct {
 	locks   sync.Map // store.Key → *sync.Mutex: one workflow per actor (or template) at a time in this process
 	bg      sync.WaitGroup
 
+	// rebuildMu serializes Reconcile's template loop, which alone begins golden rebuilds and bounds how many run.
+	rebuildMu    sync.Mutex
 	goldenMu     sync.Mutex
 	goldenTimers map[store.Key]*time.Timer // golden passes waiting out a warmup
 	// pulls are the image_pull_auth and image_plain_http_hosts of templates whose golden build has not ended, by
@@ -111,6 +113,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.GoldenRetryBackoff <= 0 {
 		cfg.GoldenRetryBackoff = DefaultGoldenRetryBackoff
+	}
+	if cfg.GoldenRebuilds == 0 {
+		cfg.GoldenRebuilds = DefaultGoldenRebuilds
 	}
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}}
 	cfg.Hub.OnRegister = s.recordWorker

@@ -453,8 +453,15 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		return err
 	}
 	log.Printf("herdlet: rootfs images: %s", why)
+	guest, err := GuestIdentity(h.Kernel, h.Initrd)
+	if err != nil {
+		// A golden this herdlet builds then records no guest, and an upgrade does not rebuild it (DEFAUL-1606).
+		log.Printf("herdlet: guest build not known: %v", err)
+	} else {
+		log.Printf("herdlet: guest build %s", guest)
+	}
 	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, VMM: host.VMM,
-		Snapshots: snaps, Bundles: bundles, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow,
+		Snapshots: snaps, Bundles: bundles, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow, Guest: guest,
 		Boot: vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}}
 	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console
 	// locked is VOLUMES at once).
@@ -651,9 +658,4 @@ func (r *registryHosts) Set(v string) error {
 		*r = append(*r, h)
 	}
 	return nil
-}
-
-// GuestIdentity names the guest build a herdlet boots: the digest of its kernel and initramfs files (DEFAUL-1606).
-func GuestIdentity(kernel, initrd string) (string, error) {
-	return "", nil
 }

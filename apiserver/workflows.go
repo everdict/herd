@@ -354,12 +354,42 @@ func (s *Server) Reconcile(ctx context.Context) (int, error) {
 	if err != nil {
 		return left, err
 	}
+	// Golden rebuilds for the guests the workers run now (DEFAUL-1606): at most GoldenRebuilds in progress at once,
+	// counted over every template, and only this loop begins one.
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+	pool, rebuilds := s.guestPool(), 0
+	for _, r := range tpls {
+		if rebuilding(r) {
+			rebuilds++
+		}
+	}
 	for _, r := range tpls {
 		t, err := decode(r, &ateapi.ActorTemplate{})
 		if err != nil {
 			return left, err
 		}
-		if gs := t.GetStatus().GetGoldenSnapshotStatus(); !goldenEnabled(t) || goldenDone(gs) && !goldenRetryDue(r, gs, time.Now()) {
+		gs := t.GetStatus().GetGoldenSnapshotStatus()
+		if goldenEnabled(t) && gs.GetGoldenTag() != nil && rebuilds < s.rebuildLimit() {
+			st, err := parseTemplateState(r)
+			if err != nil {
+				return left, err
+			}
+			if goldenRebuildDue(st, pool) {
+				started, err := s.startRebuild(ctx, r.Key, pool)
+				if err != nil {
+					log.Printf("herd-api: template %s/%s: golden rebuild not begun yet: %v", r.Space, r.Name, err)
+				}
+				if started {
+					rebuilds++
+					if r, err = s.cfg.Store.Get(ctx, r.Key); err != nil {
+						return left, err
+					}
+				}
+			}
+		}
+		renewing := gs.GetGoldenTag() != nil && (rebuilding(r) || retiring(r))
+		if !goldenEnabled(t) || goldenDone(gs) && !goldenRetryDue(r, gs, time.Now()) && !renewing {
 			continue
 		}
 		again, pending, err := s.goldenPass(ctx, r.Key)

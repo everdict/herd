@@ -17,6 +17,9 @@ import (
 
 type tagState struct {
 	Snapshot *link.SnapshotRef `json:"snapshot,omitempty"`
+	// Guest is the guest build of the worker that took the snapshot of a running actor (link.Capabilities.Guest); a
+	// template's golden records it (DEFAUL-1606). "" when it was copied from a suspended actor or not declared.
+	Guest string `json:"guest,omitempty"`
 }
 
 type tagRec struct {
@@ -108,6 +111,7 @@ func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.Tag
 	}
 	key := snapshotKey("tags", space, name, nonce, 1)
 	var snap *link.SnapshotRef
+	var guest string
 	switch ar.actor.Status.GetState() {
 	case ateapi.ActorState_ACTOR_STATE_RUNNING:
 		caps, ok := s.workerCaps(ar.st.Worker)
@@ -118,6 +122,7 @@ func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.Tag
 		if err != nil {
 			return nil, toStatus(err)
 		}
+		guest = caps.Guest
 		var res link.Result
 		var reason string
 		snap, res, reason = s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), "")
@@ -151,7 +156,7 @@ func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.Tag
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	st, err := json.Marshal(tagState{Snapshot: snap})
+	st, err := json.Marshal(tagState{Snapshot: snap, Guest: guest})
 	if err != nil {
 		return nil, toStatus(err)
 	}
