@@ -1,6 +1,6 @@
 // Package s3 is a snapstore.Store in an S3-compatible bucket (AWS S3, MinIO, ...), so herd-api and herdlets on
-// different hosts share snapshots without a shared filesystem. It speaks the four object calls it needs (PUT, GET,
-// HEAD, DELETE, path-style) signed with SigV4; there is no SDK dependency.
+// different hosts share snapshots without a shared filesystem. It speaks the object calls it needs (PUT, GET, HEAD,
+// DELETE, the multipart upload and the server-side copies, path-style) signed with SigV4; there is no SDK dependency.
 //
 // Durability: Put hashes the bytes first and uploads them in one PUT whose signed payload hash
 // (x-amz-content-sha256) and x-amz-checksum-sha256 make the endpoint refuse any other bytes; it then HEADs the object
@@ -15,6 +15,9 @@
 // SHA-256 of the parts' SHA-256s), which Put checks against the parts it hashed, and the herd digest of the whole
 // object is recorded as before. A multipart Put that fails aborts its upload, so the endpoint keeps none of its parts,
 // and then deletes the key as any failed Put does.
+//
+// Copy copies inside the bucket (CopyObject, UploadPartCopy past 5 GiB) and Prove checks an object by the endpoint's
+// checksum, each with a HEAD and no byte through the client where the endpoint keeps checksums (ADR A-39).
 package s3
 
 import (
