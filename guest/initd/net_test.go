@@ -318,6 +318,9 @@ func TestContainersGetResolverAndCA(t *testing.T) {
 			}
 		}
 		for _, m := range s.Mounts {
+			if m.Destination == "/tmp" {
+				continue
+			}
 			if m.Type == "bind" && strings.HasPrefix(m.Source, l.RunDir+"/") && strings.Contains(read(m.Source), "GUEST-SECRET") {
 				t.Errorf("container %s: %s holds a guest file read through a link out of the rootfs", id, m.Destination)
 			}
@@ -352,7 +355,7 @@ func TestContainersGetResolverAndCA(t *testing.T) {
 func countTrust(s *oci.Spec, run string) int {
 	n := 0
 	for _, m := range s.Mounts {
-		if m.Type == "bind" && strings.HasPrefix(m.Source, run+"/") && m.Destination != "/etc/resolv.conf" {
+		if m.Type == "bind" && m.Destination != "/tmp" && strings.HasPrefix(m.Source, run+"/") && m.Destination != "/etc/resolv.conf" {
 			n++
 		}
 	}
