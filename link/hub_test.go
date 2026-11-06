@@ -60,6 +60,18 @@ func herdlet(t *testing.T, h *link.Hub) (downs <-chan link.Down, send func(link.
 	return ds, send
 }
 
+// next is the herdlet's next Down, or a failure after a while.
+func next(t *testing.T, downs <-chan link.Down) link.Down {
+	t.Helper()
+	select {
+	case d := <-downs:
+		return d
+	case <-time.After(5 * time.Second):
+		t.Fatal("the herdlet got nothing more within 5 s")
+		return link.Down{}
+	}
+}
+
 // perByte is a grow function of 1 ms a byte.
 func perByte(n int64) time.Duration { return time.Duration(n) * time.Millisecond }
 
@@ -75,12 +87,12 @@ func TestCallSizedWaitsForReportedBytes(t *testing.T) {
 	go func() {
 		got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte)
 	}()
-	w := (<-downs).Work
+	w := next(t, downs).Work
 	if dl := time.UnixMilli(w.DeadlineUnixMilli); dl.After(start.Add(timeout + 50*time.Millisecond)) {
 		t.Errorf("the work's first deadline is %v after the call, want its timeout %v", dl.Sub(start), timeout)
 	}
 	send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: 1000}})
-	ext := (<-downs).Extend
+	ext := next(t, downs).Extend
 	if ext == nil || ext.ID != w.ID {
 		t.Fatalf("after a report of 1000 bytes the herdlet got %+v, want its work's deadline moved", ext)
 	}
@@ -111,10 +123,10 @@ func TestCallSizedStillEnds(t *testing.T) {
 	defer cancel()
 	got := make(chan link.Outcome, 1)
 	go func() { got <- h.CallSized(ctx, "w", link.Work{Op: link.OpSnapshot}, timeout, perByte) }()
-	w := (<-downs).Work
+	w := next(t, downs).Work
 	send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: 1 << 20}})
 	cdl, _ := ctx.Deadline()
-	if ext := (<-downs).Extend; ext == nil || time.UnixMilli(ext.DeadlineUnixMilli).After(cdl) {
+	if ext := next(t, downs).Extend; ext == nil || time.UnixMilli(ext.DeadlineUnixMilli).After(cdl) {
 		t.Errorf("the herdlet got %+v, want its deadline moved to the caller's %v", ext, cdl)
 	}
 	o = <-got
@@ -126,9 +138,9 @@ func TestCallSizedStillEnds(t *testing.T) {
 	go func() {
 		got <- h.CallSized(context.Background(), "w", link.Work{Op: link.OpSnapshot}, timeout, perByte)
 	}()
-	w = (<-downs).Work
+	w = next(t, downs).Work
 	send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: 500}})
-	first := (<-downs).Extend
+	first := next(t, downs).Extend
 	send(link.Up{Progress: &link.Progress{ID: w.ID, Bytes: 10}})
 	send(link.Up{Outcome: &link.Outcome{ID: w.ID, Result: link.ResultDone}})
 	if o := <-got; o.Result != link.ResultDone || first == nil {
