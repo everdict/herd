@@ -81,6 +81,8 @@ type Config struct {
 	OnEvent func(Event)
 	// FirstByteTimeout bounds how long a new flow may stay silent; default 30 s.
 	FirstByteTimeout time.Duration
+	// Endpoints are the Control and router endpoints.
+	Endpoints []netip.AddrPort
 }
 
 // Event is one decision of the gateway.
