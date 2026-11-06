@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -135,6 +136,13 @@ func (p *Pool) Take(ctx context.Context, t link.Template) (string, bool) {
 		p.mu.Unlock()
 		took = true
 		if err := p.Health.Check(ctx, id); err != nil {
+			p.discard(ctx, id)
+			continue
+		}
+		// A warm VM may have waited long on a host whose clock moved (stepped, or a laptop that slept): it is handed
+		// out on the host's clock, or not at all.
+		if err := p.Machines.setClock(ctx, id, "warm VM "+id); err != nil {
+			log.Printf("machine: warm VM %s: its wall clock could not be set, so it is not handed out: %v", id, err)
 			p.discard(ctx, id)
 			continue
 		}

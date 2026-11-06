@@ -54,6 +54,11 @@ type Config struct {
 	// answer within FlushTimeout (default DefaultFlushTimeout) fails the snapshot.
 	Flush        Flusher
 	FlushTimeout time.Duration
+	// Clock, if set, hands the guest the host's wall clock (GuestClock) whenever it runs on from a snapshot's memory: a
+	// MEMORY restore (refused when the clock cannot be set, see Restore), a VM a snapshot paused, and a warm VM taken.
+	// ClockTimeout (default DefaultClockTimeout) bounds it.
+	Clock        Clocker
+	ClockTimeout time.Duration
 	// Network, if set, gives each VM its link (Network): herd-guest's plan carries the guest's half, the spec the NIC.
 	Network Network
 }
@@ -369,6 +374,13 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if err != nil {
 		return vmm.Snapshot{}, err
 	}
+	if !stop {
+		// The VM runs on from its pause, its clock behind by the pause. Logged and not refused: the snapshot is whole,
+		// and failing it would not set the clock either.
+		if err := m.setClock(ctx, vmID, "snapshot "+id); err != nil {
+			log.Printf("machine: snapshot %s: the guest's wall clock is NOT set and is behind by the snapshot's pause: %v", id, err)
+		}
+	}
 	if stop {
 		if p, err := m.cfg.VMM.Delete(ctx, vmID); p != vmm.PresenceGone {
 			return vmm.Snapshot{}, fmt.Errorf("machine: snapshot %s: stopping the VM before reading its volumes: %s: %w", id, p, err)
@@ -534,6 +546,21 @@ func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
 		}
 	} else if err == nil {
 		_, err = m.cfg.VMM.Boot(ctx, spec)
+	}
+	if err == nil && snap.Fidelity == vmm.FidelityMemory && !cold {
+		// The memory runs on from the snapshot's clock. The host's is set before Restore answers, and so before herdlet lets
+		// anything reach the VM; a guest whose clock cannot be set is stopped rather than run a session on a stale clock.
+		if cerr := m.setClock(ctx, vmID, "restore "+id); cerr != nil {
+			if p, derr := m.cfg.VMM.Delete(ctx, vmID); p != vmm.PresenceGone {
+				// It may still run: it keeps its share and link and is recorded, so a delete removes it.
+				m.mu.Lock()
+				m.tpl[vmID], m.images[vmID] = man.Template, roots
+				m.mu.Unlock()
+				m.Adopt(id, vmID)
+				return fmt.Errorf("machine: restore %s: the guest's wall clock could not be set (%v), and stopping the VM: %s: %w", id, cerr, p, derr)
+			}
+			err = fmt.Errorf("machine: restore %s: the guest's wall clock could not be set, so the VM was stopped rather than run on its snapshot's clock: %v", id, cerr)
+		}
 	}
 	if err != nil {
 		err = m.withGuestBootError(vmID, err)

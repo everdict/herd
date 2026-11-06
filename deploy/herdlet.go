@@ -372,7 +372,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 		if h.Images == nil {
 			return host, nil, "given", nil
 		}
-		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, Flush: h.flusher(h.Guests), ShareDir: shares, Images: h.Images, Base: base, Network: host.Network})
+		m, err := machine.New(machine.Config{VMM: h.VMM, Guests: h.Guests, Flush: h.flusher(h.Guests), Clock: h.clocker(h.Guests), ShareDir: shares, Images: h.Images, Base: base, Network: host.Network})
 		return host, m, "given", err
 	}
 	host, err := h.newHost(ctx)
@@ -388,7 +388,7 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 		return Backend{}, nil, why, err
 	}
 	m, err := machine.New(machine.Config{
-		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), ShareDir: shares,
+		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), Clock: h.clocker(host.Guests), ShareDir: shares,
 		Network: host.Network,
 		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: h.imageSource(), Builder: builder,
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}},
@@ -568,6 +568,19 @@ func (h *Herdlet) flusher(g machine.GuestDialer) machine.Flusher {
 		port = 8080
 	}
 	return machine.GuestFlush{Guests: g, Port: port}
+}
+
+// clocker is how machines hand a guest the host's wall clock when it runs on from a snapshot's memory (DEFAUL-1595):
+// herd-guest's SetClock on the guest port. Without a guest dialer there is no guest to ask.
+func (h *Herdlet) clocker(g machine.GuestDialer) machine.Clocker {
+	if g == nil {
+		return nil
+	}
+	port := uint32(h.GuestPort)
+	if port == 0 {
+		port = 8080
+	}
+	return machine.GuestClock{Guests: g, Port: port}
 }
 
 // snapshots opens the herdlet's snapshot store: the S3 store herd-api handed out at join (no shared filesystem), else

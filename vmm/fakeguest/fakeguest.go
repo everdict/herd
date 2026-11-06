@@ -49,11 +49,19 @@ type VMM struct {
 	ShimFor func(vm string) []string
 	// SyncFS, if set, is each guest's flush of one directory (agent.Guest.SyncFS); nil flushes nothing.
 	SyncFS func(*os.File) error
+	// PauseLag, if set, is how far a snapshot leaves a VM's wall clock behind, as Cloud Hypervisor stops the guest's clock
+	// while it pauses the VM for one.
+	PauseLag time.Duration
 
 	mu      sync.Mutex
 	guests  map[string]*guest
 	sockMu  sync.Mutex // guards sockDir only: start calls sockPath with mu held
 	sockDir string     // a short directory for sockets whose path under Dir would be too long
+
+	// clocks is each VM's wall clock as an offset from the host's, which herd-guest's SetClock sets (agent.Guest.SetTime);
+	// snapClocks is the wall clock each MEMORY snapshot's memory holds, which a restore of it runs on from.
+	clocks     map[string]time.Duration
+	snapClocks map[string]time.Time
 }
 
 // maxSockPath keeps a unix socket path under sun_path's limit (104 bytes on macOS, 108 on Linux).
@@ -89,7 +97,7 @@ type guest struct {
 
 // New wraps f; dir must be short enough for unix socket paths.
 func New(f *fake.Fake, dir string, shim []string) *VMM {
-	return &VMM{Fake: f, Dir: dir, Shim: shim, guests: map[string]*guest{}}
+	return &VMM{Fake: f, Dir: dir, Shim: shim, guests: map[string]*guest{}, clocks: map[string]time.Duration{}, snapClocks: map[string]time.Time{}}
 }
 
 func (v *VMM) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
@@ -97,6 +105,7 @@ func (v *VMM) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
 	if err != nil {
 		return vm, err
 	}
+	v.setOffset(spec.ID, 0)
 	// A booted guest's memory is new: its containers' roots start empty.
 	if err := os.RemoveAll(filepath.Join(v.Dir, spec.ID, "containers")); err != nil {
 		return vm, fmt.Errorf("fakeguest: %w", err)
@@ -109,6 +118,13 @@ func (v *VMM) Restore(ctx context.Context, s vmm.Snapshot, spec vmm.Spec) (vmm.V
 	if err != nil {
 		return vm, err
 	}
+	// A MEMORY restore runs on from the clock its snapshot's memory held; a VOLUMES one boots on the host's.
+	v.mu.Lock()
+	v.clocks[spec.ID] = 0
+	if at, ok := v.snapClocks[s.ID]; ok && s.Fidelity == vmm.FidelityMemory {
+		v.clocks[spec.ID] = time.Until(at)
+	}
+	v.mu.Unlock()
 	return vm, v.start(spec.ID)
 }
 
@@ -185,6 +201,8 @@ func (v *VMM) start(id string) error {
 	if v.SyncFS != nil {
 		g.SyncFS = v.SyncFS
 	}
+	// The guest's clock is its own offset from the host's: herd-guest must not set the host's clock.
+	g.SetTime = func(t time.Time) (time.Time, error) { return v.setTime(id, t) }
 	sock, err := v.sockPath(id)
 	if err != nil {
 		g.Close()
@@ -250,4 +268,60 @@ func (v *VMM) DialGuest(ctx context.Context, vm string, port uint32) (net.Conn, 
 		return nil, fmt.Errorf("%w: VM %s port %d", ErrNoGuest, vm, port)
 	}
 	return transport.DialUnix(gu.sock)(ctx)
+}
+
+// Snapshot records the wall clock a MEMORY snapshot's memory holds, and leaves the VM's clock behind by PauseLag.
+func (v *VMM) Snapshot(ctx context.Context, id string, f vmm.Fidelity) (vmm.Snapshot, error) {
+	at := v.Clock(id)
+	s, err := v.Fake.Snapshot(ctx, id, f)
+	if err != nil {
+		return s, err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if s.Fidelity == vmm.FidelityMemory {
+		v.snapClocks[s.ID] = at
+	}
+	v.clocks[id] -= v.PauseLag
+	return s, nil
+}
+
+// AgeSnapshots makes every snapshot taken so far d older: its memory's clock is d further behind the host's, as a
+// golden built d ago is.
+func (v *VMM) AgeSnapshots(d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for id, at := range v.snapClocks {
+		v.snapClocks[id] = at.Add(-d)
+	}
+}
+
+// Clock is vm's wall clock: what date(1) in its guest would read.
+func (v *VMM) Clock(vm string) time.Time {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return time.Now().Add(v.clocks[vm])
+}
+
+func (v *VMM) setOffset(vm string, d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.clocks[vm] = d
+}
+
+// setTime is vm's herd-guest stepping its wall clock to t (agent.Guest.SetTime): the host's own clock is not touched.
+func (v *VMM) setTime(vm string, t time.Time) (time.Time, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	now := time.Now()
+	before := now.Add(v.clocks[vm])
+	v.clocks[vm] = t.Sub(now)
+	return before, nil
+}
+
+// Skew moves vm's wall clock by d, as a host clock stepped under a running VM leaves the guest's apart from it.
+func (v *VMM) Skew(vm string, d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.clocks[vm] += d
 }
