@@ -25,7 +25,8 @@ import (
 
 type list []string
 
-func (l *list) String() string     { return strings.Join(*l, ",") }
+func (l *list) String() string { return strings.Join(*l, ",") }
+
 // Set ignores an empty value, so a job can pass a flag whose variable is unset and mean no value.
 func (l *list) Set(s string) error {
 	if s != "" {
