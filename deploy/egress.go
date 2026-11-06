@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
@@ -109,6 +110,11 @@ type Egress struct {
 	HostNames list
 	// AllowPrefixes are the operator's lab allowances (-egress-allow-prefix, egress.GuardConfig.LabAllow).
 	AllowPrefixes list
+	// HostServicesFile declares host services (-host-services-file, egress.Gateway.LoadHostServices), re-read every
+	// Interval.
+	HostServicesFile string
+	// Routers are herd-router's endpoints (-router), which a declared host service may not name, as it may not name API.
+	Routers list
 
 	// Token, if set, is used instead of TokenFile.
 	Token string
@@ -135,6 +141,8 @@ func (e *Egress) Flags(fs *flag.FlagSet) {
 	fs.Var(&e.HostAddrs, "host-addr", "a host or herd-api address or prefix to refuse (repeatable)")
 	fs.Var(&e.HostNames, "host-name", "a host or herd-api name to refuse (repeatable)")
 	fs.Var(&e.AllowPrefixes, "egress-allow-prefix", egressAllowUsage)
+	fs.StringVar(&e.HostServicesFile, "host-services-file", "", hostServicesUsage)
+	fs.Var(&e.Routers, "router", "herd-router endpoint(s), address:port, comma-separated (repeatable), that a declared host service may not name")
 }
 
 // Run serves the gateway's transparent TCP listener on ln and its synthetic DNS on pc until ctx ends.
@@ -161,6 +169,9 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 			log.Printf("herd-egress: refused %s %s %s:%d host-side=%v: %s", ev.Actor, ev.Protocol, ev.Name, ev.Port, ev.HostSide, ev.Reason)
 		}
 	}}
+	if cfg.Endpoints, err = e.endpoints(); err != nil {
+		return err
+	}
 	cfg.Credentials = credentialStores(e.Secrets)
 	if e.JWTKey != "" {
 		k, err := loadECKey(e.JWTKey)
@@ -176,6 +187,14 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	g, err := newGateway(cfg)
 	if err != nil {
 		return err
+	}
+	var services *hostServicesFile
+	if e.HostServicesFile != "" {
+		services = &hostServicesFile{path: e.HostServicesFile, g: g}
+		if err := services.load(); err != nil {
+			return fmt.Errorf("-host-services-file: %w", err)
+		}
+		log.Printf("herd-egress: declared host services are not reported in the worker's capabilities: that needs a capabilities field herd does not have yet")
 	}
 	answer, err := netip.ParseAddr(e.DNSAnswer)
 	if err != nil {
@@ -206,6 +225,9 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	reload := func() {
 		if err := loadBindings(e.Bindings, g, &src); err != nil {
 			log.Printf("herd-egress: bindings: %v", err)
+		}
+		if services != nil {
+			services.reload()
 		}
 	}
 	reload()
@@ -336,4 +358,76 @@ func credentialStores(dir string) egress.Credentials {
 		return nil
 	}
 	return egress.Providers{"dir": egress.DirProvider{Root: dir}}
+}
+
+// hostServicesUsage is -host-services-file's usage on herd-egress and herd.
+const hostServicesUsage = "file of declared host services, one '<name>:<port> <address>:<port> [loopback]' per line (# comments): an actor whose policy allows <name>:<port> reaches exactly that address, private or not, with no lookup. Re-read every -interval; a bad read keeps the last good set, and a file unreadable at start refuses the start. A line whose target is a -host-addr, the -api or -router endpoint, a metadata endpoint, or loopback without 'loopback' is dropped with a log"
+
+// endpoints are the Control (-api) and router (-router) endpoints a declared host service may not name.
+func (e *Egress) endpoints() ([]netip.AddrPort, error) {
+	var out []netip.AddrPort
+	if ap, err := netip.ParseAddrPort(e.API); err == nil {
+		out = append(out, ap)
+	} else if e.HostServicesFile != "" {
+		log.Printf("herd-egress: -api %s is not an address:port, so a host service naming herd-api is refused only as a -host-addr", e.API)
+	}
+	for _, r := range e.Routers {
+		for _, s := range strings.Split(r, ",") {
+			if s = strings.TrimSpace(s); s == "" {
+				continue
+			}
+			ap, err := netip.ParseAddrPort(s)
+			if err != nil {
+				return nil, fmt.Errorf("-router %q: want address:port: %w", s, err)
+			}
+			out = append(out, ap)
+		}
+	}
+	return out, nil
+}
+
+// hostServicesFile is -host-services-file: the gateway's declared host services follow it.
+type hostServicesFile struct {
+	path    string
+	g       *egress.Gateway
+	last    []byte
+	loaded  bool
+	lastErr string
+}
+
+// load reads the file and gives the gateway its services; a file that cannot be read or parsed changes nothing.
+func (f *hostServicesFile) load() error {
+	b, err := os.ReadFile(f.path)
+	if err != nil {
+		return err
+	}
+	if f.loaded && bytes.Equal(b, f.last) {
+		return nil
+	}
+	dropped, err := f.g.LoadHostServices(b)
+	if err != nil {
+		return err
+	}
+	f.last, f.loaded = b, true
+	for _, d := range dropped {
+		log.Printf("herd-egress: %s: %v; that line is dropped", f.path, d)
+	}
+	var names []string
+	for _, s := range f.g.HostServices() {
+		names = append(names, s.String())
+	}
+	log.Printf("herd-egress: declared host services from %s: [%s]", f.path, strings.Join(names, ", "))
+	return nil
+}
+
+// reload is load on the -interval: a failure is logged once until the file changes, and keeps the last good set.
+func (f *hostServicesFile) reload() {
+	msg := ""
+	if err := f.load(); err != nil {
+		msg = err.Error()
+		if msg != f.lastErr {
+			log.Printf("herd-egress: -host-services-file: %v; keeping the last good set", err)
+		}
+	}
+	f.lastErr = msg
 }

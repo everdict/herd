@@ -33,6 +33,8 @@ type AllInOne struct {
 	// Secrets is herd-egress's -secrets, and on a Mac the herdlet's (Herdlet.Secrets): the directory they resolve
 	// ate-secret://dir/<name>/<tail> credentials from.
 	Secrets string
+	// HostServicesFile is herd-egress's -host-services-file.
+	HostServicesFile string
 	// GoldenWarmup is herd-api's -golden-warmup.
 	GoldenWarmup time.Duration
 
@@ -57,6 +59,7 @@ func (a *AllInOne) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.DNSListen, "dns-listen", ":15053", "herd-egress synthetic DNS listener (UDP)")
 	fs.BoolVar(&a.Egress, "egress", true, "run herd-egress")
 	fs.StringVar(&a.Secrets, "secrets", "", "herd-egress (and on a Mac the herdlet's in-process one): directory for ate-secret://dir/<name>/<tail> credentials")
+	fs.StringVar(&a.HostServicesFile, "host-services-file", "", "herd-egress: "+hostServicesUsage)
 	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead of <data>/snapshots, s3://bucket[/prefix] (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
 	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
 	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
@@ -181,7 +184,8 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		}
 		eg := &Egress{API: addrs.API, Token: st.Grant.EgressCredential, Bindings: h.EgressBindings,
 			CACert: caCert, CAKey: caKey, DNSAnswer: "198.18.0.1", Interval: time.Second,
-			Secrets: a.Secrets, AllowPrefixes: h.EgressAllow, NewGateway: a.NewGateway}
+			Secrets: a.Secrets, AllowPrefixes: h.EgressAllow, NewGateway: a.NewGateway,
+			HostServicesFile: a.HostServicesFile, Routers: list{addrs.Router, addrs.Tunnel}}
 		start("herd-egress", func() error { return eg.Run(ctx, eln, pc) })
 	}
 	start("herdlet", func() error { return h.Run(ctx) })
