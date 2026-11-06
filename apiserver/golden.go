@@ -183,8 +183,8 @@ func (g *goldenBuild) run(ctx context.Context) (time.Duration, bool, error) {
 		}
 		if !goldenEnabled(tpl) || goldenDone(gs) {
 			if st, _ := parseTemplateState(g.rec); !goldenEnabled(tpl) || gs.GetGoldenTag() != nil || st.GoldenRetryAt == nil {
-				// The build ended for good; a retry still to come boots with the template's image_pull_auth.
-				s.dropPullAuth(uid)
+				// The build ended for good; a retry still to come boots with the template's image_pull_auth and plain hosts.
+				s.dropPull(uid)
 			}
 			return 0, false, nil
 		}
@@ -270,7 +270,7 @@ func (g *goldenBuild) saveTag(ctx context.Context, ref *ateapi.ObjectRef) error 
 	if err := g.checkpoint(ctx, func(gs *ateapi.GoldenSnapshotStatus) { gs.GoldenTag = ref }); err != nil {
 		return err
 	}
-	g.s.dropPullAuth(g.rec.UID)
+	g.s.dropPull(g.rec.UID)
 	log.Printf("herd-api: template %s/%s: golden snapshot built: tag %s", g.rec.Space, g.rec.Name, ref.GetName())
 	return nil
 }
@@ -302,7 +302,7 @@ func (g *goldenBuild) fail(ctx context.Context, reason, msg string) error {
 		return err
 	}
 	if st.GoldenRetryAt == nil {
-		g.s.dropPullAuth(g.rec.UID)
+		g.s.dropPull(g.rec.UID)
 	}
 	log.Printf("herd-api: template %s/%s: golden snapshot failed: %s", g.rec.Space, g.rec.Name, m)
 	if _, err := g.s.deleteActor(ctx, g.rec.Space, g.rec.UID, "", 0); err != nil && status.Code(err) != codes.NotFound {
@@ -389,24 +389,31 @@ func (s *Server) deleteGolden(ctx context.Context, space, uid string) error {
 	return nil
 }
 
-// keepPullAuth holds a template's image_pull_auth for its golden build (PLT-330): in this process's memory only, so
-// a golden build herd-api restarts in the middle of goes on without it.
-func (s *Server) keepPullAuth(uid string, a link.Secret) {
-	s.goldenMu.Lock()
-	defer s.goldenMu.Unlock()
-	s.pullAuths[uid] = a
+// goldenPull is what a template's create gave for its golden build's pull only: its image_pull_auth (PLT-330) and
+// its image_plain_http_hosts (DEFAUL-1600).
+type goldenPull struct {
+	auth  link.Secret
+	plain []string
 }
 
-// pullAuth is the image_pull_auth the golden build of the template with uid boots with ("" without one).
-func (s *Server) pullAuth(uid string) link.Secret {
+// keepPull holds a template's goldenPull for its golden build: in this process's memory only, so a golden build
+// herd-api restarts in the middle of goes on without it.
+func (s *Server) keepPull(uid string, p goldenPull) {
 	s.goldenMu.Lock()
 	defer s.goldenMu.Unlock()
-	return s.pullAuths[uid]
+	s.pulls[uid] = p
 }
 
-// dropPullAuth forgets it: the golden build ended, or the template is gone.
-func (s *Server) dropPullAuth(uid string) {
+// pull is the goldenPull the golden build of the template with uid boots with (zero without one).
+func (s *Server) pull(uid string) goldenPull {
 	s.goldenMu.Lock()
 	defer s.goldenMu.Unlock()
-	delete(s.pullAuths, uid)
+	return s.pulls[uid]
+}
+
+// dropPull forgets it: the golden build ended, or the template is gone.
+func (s *Server) dropPull(uid string) {
+	s.goldenMu.Lock()
+	defer s.goldenMu.Unlock()
+	delete(s.pulls, uid)
 }

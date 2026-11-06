@@ -141,22 +141,25 @@ func TestTemplatePlainHostsBuildTheGoldenSnapshot(t *testing.T) {
 		wantCode(t, "CreateActorTemplate with image_plain_http_hosts, "+what, err, codes.InvalidArgument)
 	}
 
-	// Never kept: the realm's host is named nowhere else, so no stored record or answer holds it.
-	for _, name := range []string{"unnamed", "store-only", "named", "later"} {
-		tpl, err := e.Client.GetActorTemplate(ctxT(t), &ateapi.GetActorTemplateRequest{ActorTemplate: oref(e, name)})
-		if err != nil {
-			t.Fatalf("GetActorTemplate %s: %v", name, err)
-		}
-		if out := prototext.Format(tpl); strings.Contains(strings.ToLower(out), "realm.cluster.test") {
-			t.Errorf("GetActorTemplate %s holds the plain hosts: %s", name, out)
-		}
+	// Never kept: the realm's host is named nowhere else for the template whose build succeeded (a failed build's
+	// error message names the realm), so neither its stored record, its GetActorTemplate answer, nor any actor or tag
+	// holds it.
+	tpl, err := e.Client.GetActorTemplate(ctxT(t), &ateapi.GetActorTemplateRequest{ActorTemplate: oref(e, "named")})
+	if err != nil {
+		t.Fatalf("GetActorTemplate named: %v", err)
+	}
+	if out := prototext.Format(tpl); strings.Contains(strings.ToLower(out), "realm.cluster.test") {
+		t.Errorf("GetActorTemplate named holds the plain hosts: %s", out)
 	}
 	for _, k := range []store.Kind{store.KindActorTemplate, store.KindActor, store.KindTag} {
 		recs, err := e.Store.List(ctxT(t), k, e.Space)
 		if err != nil {
-			continue
+			t.Fatal(err)
 		}
 		for _, r := range recs {
+			if k == store.KindActorTemplate && r.Name != "named" {
+				continue
+			}
 			if strings.Contains(strings.ToLower(string(r.Data)), "realm.cluster.test") {
 				t.Errorf("stored %s %s holds the plain hosts", k, r.Name)
 			}

@@ -135,6 +135,10 @@ type Work struct {
 	// image_pull_auth, a docker config's auths as JSON), sent only for the boot of a template's golden actor. The
 	// herdlet's pulls for that boot log in with it ahead of the node's -registry-auth; it is never written down.
 	PullAuth Secret `json:"pullAuth,omitempty"`
+	// PlainHosts are a boot's one-shot plain-HTTP registry hosts (CreateActorTemplateRequest's
+	// image_plain_http_hosts, DEFAUL-1600), sent only with the boot of a template's golden actor: the herdlet's pulls
+	// for that boot speak plain HTTP to them, registries and token realms alike, besides its -insecure-registry.
+	PlainHosts []string `json:"plainHosts,omitempty"`
 }
 
 // ActorRef names an actor.

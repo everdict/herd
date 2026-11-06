@@ -111,12 +111,14 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    whose golden mode is DISABLED, and a node other than the golden builder that restores or cold-boots the template
    without the image in its cache.
 
-8. Optional: a plain-HTTP registry (PLT-224). Pulls speak https to every registry except localhost and 127.0.0.1.
-   `-insecure-registry host[:port]` (repeatable, or comma-separated) adds hosts spoken to over plain HTTP, as the
-   docker daemon's `insecure-registries`: exactly as written, so `100.69.164.81:5001` makes neither
-   `100.69.164.81` nor `100.69.164.81:5002` plain. `-registry-auth` logins apply to them as to any host (a token
-   realm on a named host may be plain HTTP too). `herdlet doctor` prints `insecure registries` with the plain-HTTP
-   hosts.
+8. Optional: a plain-HTTP registry (PLT-224, DEFAUL-1600). Pulls speak https to every registry except localhost and
+   127.0.0.1. Preferred: the template names the plain hosts of its golden build's pull, the store and its token
+   realm, in `CreateActorTemplateRequest.image_plain_http_hosts` (one-shot like `image_pull_auth`, never stored; ADR
+   A-37), so no node is configured for a store. The node-level fallback, for pulls outside a golden build, is
+   `-insecure-registry host[:port]` (repeatable, or comma-separated; none by default), as the docker daemon's
+   `insecure-registries`: exactly as written, so `10.0.0.5:5001` makes neither `10.0.0.5` nor `10.0.0.5:5002` plain.
+   A login (`image_pull_auth` or `-registry-auth`) goes to a token realm only over https or to a host named plain
+   either way. `herdlet doctor` prints `insecure registries` with the node's plain-HTTP hosts.
 
 ## macOS (Apple Silicon, macOS 14+)
 

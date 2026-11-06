@@ -209,6 +209,8 @@ step 7). Run `herdlet doctor` with the node's flags first: its `registry auth` l
 for, or says pulls are anonymous; without a login CreateActor fails `FAILED_PRECONDITION` with the token realm's
 `403 Forbidden`. Preferred over the node login (PLT-330): the template carries a one-shot `image_pull_auth` that its
 golden build pulls with (ADR A-34); without either, the golden build fails `GoldenActorInvalid` with the same 403.
+A store without TLS is named by the template too: `image_plain_http_hosts` lists the store and its token realm for
+the golden build's pull (ADR A-37), and no herdlet needs `-insecure-registry` for it.
 
 `golden-template` runs in both: herd-api builds the template's golden snapshot after `-golden-warmup` (20 s by
 default, Substrate's), on the worker keeping the highest fidelity (ADR 0001 A-30), so on a real host the case takes

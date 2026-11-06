@@ -82,10 +82,11 @@ type Server struct {
 
 	goldenMu     sync.Mutex
 	goldenTimers map[store.Key]*time.Timer // golden passes waiting out a warmup
-	// pullAuths are the image_pull_auth of templates whose golden build has not ended, by template uid: in memory
+	// pulls are the image_pull_auth and image_plain_http_hosts of templates whose golden build has not ended, by
+	// template uid: in memory
 	// only, never stored (PLT-330).
-	pullAuths map[string]link.Secret
-	closed    bool
+	pulls  map[string]goldenPull
+	closed bool
 }
 
 // New returns a server. It registers itself as the hub's registration sink.
@@ -108,7 +109,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.GoldenRetryBackoff <= 0 {
 		cfg.GoldenRetryBackoff = DefaultGoldenRetryBackoff
 	}
-	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pullAuths: map[string]link.Secret{}}
+	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}}
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
 	return s, nil

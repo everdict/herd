@@ -70,10 +70,12 @@ reach it with no lab allowance and no address in a job file. An actor still need
    `registry_auth` as the fallback for pulls outside a golden build (ADR A-34, "Not here"): a node other than the
    golden builder that restores or cold-boots a private template without the image in its cache logs in with it.
 
-   The herdlets pull over plain HTTP from the hosts in the job variable `insecure_registries` (`-insecure-registry`,
-   comma-separated; PLT-224), by default the cluster's managed image store `100.69.164.81:5001` (PLT-42), and over
-   https from every other host. Another store: `nomad job run -var insecure_registries=<host:port> ...`; none:
-   `-var insecure_registries=`.
+   The herdlets pull over https from every registry but loopback. A store run without TLS is named per template:
+   whoever creates the template passes its host and its token realm's in `image_plain_http_hosts` with
+   CreateActorTemplate, beside `image_pull_auth`, and the golden build's pull speaks plain HTTP to exactly those
+   (ADR A-37). The job variable `insecure_registries` (`-insecure-registry`, comma-separated; PLT-224) is a node-level
+   fallback for pulls outside a golden build and names none by default; to set one:
+   `nomad job run -var insecure_registries=<host:port>,<realm host:port> ...`.
 
 3. Serve the archive to the clients and run the job pair. A Nomad artifact cannot sign in to GitHub, and a private
    repository's release URL answers 404 without it, so the jobs fetch `herd_linux_<arch>.tar.gz` from a mirror every

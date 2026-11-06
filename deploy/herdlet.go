@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -646,9 +645,8 @@ func (r *registryHosts) Set(v string) error {
 		if h == "" {
 			continue
 		}
-		u, err := url.Parse("//" + h)
-		if err != nil || u.Host != h || u.Hostname() == "" || u.User != nil {
-			return fmt.Errorf("%q is not a registry host[:port] (no scheme, no path)", h)
+		if err := registry.CheckHost(h); err != nil {
+			return err
 		}
 		*r = append(*r, h)
 	}

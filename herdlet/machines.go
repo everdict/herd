@@ -44,6 +44,10 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			}
 			ctx = registry.WithLogins(ctx, logins, "the template's image_pull_auth")
 		}
+		if len(w.PlainHosts) > 0 {
+			// The golden build's one-shot plain-HTTP hosts (image_plain_http_hosts): this boot's pulls only.
+			ctx = registry.WithPlainHosts(ctx, w.PlainHosts)
+		}
 		if err := m.Boot(ctx, w.VM, *w.Spec); err != nil {
 			return classify(err)
 		}

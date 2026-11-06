@@ -34,7 +34,8 @@ const (
 type Client struct {
 	HTTP *http.Client
 	// PlainHTTP says which registry hosts are spoken to without TLS; default: localhost and 127.0.0.1 only
-	// (Loopback). PlainHosts adds the operator's insecure registries to those.
+	// (Loopback). PlainHosts adds the operator's insecure registries to those. A pull's own plain hosts
+	// (WithPlainHosts) are plain for that pull besides.
 	PlainHTTP func(host string) bool
 
 	// Retries is how often a request the registry refused with 429 or 503 is sent again before it answers
@@ -87,7 +88,10 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-func (c *Client) plain(host string) bool {
+func (c *Client) plain(ctx context.Context, host string) bool {
+	if p, _ := ctx.Value(plainHostsKey{}).(func(string) bool); p != nil && p(host) {
+		return true
+	}
 	if c.PlainHTTP != nil {
 		return c.PlainHTTP(host)
 	}
@@ -114,8 +118,28 @@ func PlainHosts(hosts []string) func(host string) bool {
 	return func(host string) bool { return Loopback(host) || set[strings.ToLower(host)] }
 }
 
-func (c *Client) base(host string) string {
-	if c.plain(host) {
+type plainHostsKey struct{}
+
+// WithPlainHosts makes the pulls made with ctx speak plain HTTP to exactly the named registry hosts too (DEFAUL-1600:
+// a template's image_plain_http_hosts, for its golden build's pull), matched as PlainHosts matches them, besides the
+// Client's own PlainHTTP. They cover a challenge's token realm as they cover a registry: a login is sent over plain
+// HTTP to a realm only when it is named here or by PlainHTTP, and otherwise only to https.
+func WithPlainHosts(ctx context.Context, hosts []string) context.Context {
+	return context.WithValue(ctx, plainHostsKey{}, PlainHosts(hosts))
+}
+
+// CheckHost says whether h is a registry host[:port] as -insecure-registry and image_plain_http_hosts name one: no
+// scheme, no path, no user.
+func CheckHost(h string) error {
+	u, err := url.Parse("//" + h)
+	if err != nil || u.Host != h || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("%q is not a registry host[:port] (no scheme, no path)", h)
+	}
+	return nil
+}
+
+func (c *Client) base(ctx context.Context, host string) string {
+	if c.plain(ctx, host) {
 		return "http://" + host
 	}
 	return "https://" + host
@@ -224,7 +248,7 @@ func (c *Client) Blob(ctx context.Context, ref image.Ref, d image.Descriptor) (i
 }
 
 func (c *Client) get(ctx context.Context, ref image.Ref, path, accept string) (*http.Response, error) {
-	u := c.base(ref.Registry) + "/v2/" + ref.Repository + path
+	u := c.base(ctx, ref.Registry) + "/v2/" + ref.Repository + path
 	key := ref.Registry + "/" + ref.Repository
 	refused, backoff, authed := 0, time.Second, false
 	for {
@@ -366,7 +390,7 @@ func (c *Client) token(ctx context.Context, params string, ref image.Ref, login 
 	if err != nil || realm.Scheme == "" {
 		return "", fmt.Errorf("registry: %s: challenge realm %q", ref, p["realm"])
 	}
-	if has && realm.Scheme != "https" && !c.plain(realm.Host) {
+	if has && realm.Scheme != "https" && !c.plain(ctx, realm.Host) {
 		return "", fmt.Errorf("registry: %s: the challenge's realm %s is not https: the login is not sent to it", ref, realm.Redacted())
 	}
 	q := realm.Query()

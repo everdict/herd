@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -46,6 +47,10 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 	if err != nil {
 		return nil, err
 	}
+	plain, err := checkPlainHosts(req.GetImagePlainHttpHosts(), t)
+	if err != nil {
+		return nil, err
+	}
 	data, err := proto.Marshal(t)
 	if err != nil {
 		return nil, toStatus(err)
@@ -58,8 +63,8 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 		return nil, toStatus(err)
 	}
 	if goldenEnabled(t) {
-		if pullAuth != "" {
-			s.keepPullAuth(r.UID, pullAuth)
+		if pullAuth != "" || len(plain) > 0 {
+			s.keepPull(r.UID, goldenPull{auth: pullAuth, plain: plain})
 		}
 		s.kickGolden(r.Key, 0)
 	}
@@ -126,7 +131,7 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
 		return nil, toStatus(err)
 	}
-	s.dropPullAuth(r.UID)
+	s.dropPull(r.UID)
 	return v, nil
 }
 
@@ -158,6 +163,30 @@ func checkPullAuth(a string, t *ateapi.ActorTemplate) (link.Secret, error) {
 	return "", status.Errorf(codes.InvalidArgument, "image_pull_auth holds logins for %s, and the template's images are on %s",
 		strings.Join(logins.Hosts(), ", "), strings.Join(hosts, ", "))
 }
+
+// checkPlainHosts checks a CreateActorTemplateRequest's image_plain_http_hosts (DEFAUL-1600): registry host[:port]
+// names, as herdlet -insecure-registry takes them, for a template that builds a golden snapshot (the one pull they
+// are for).
+func checkPlainHosts(hosts []string, t *ateapi.ActorTemplate) ([]string, error) {
+	if len(hosts) == 0 {
+		return nil, nil
+	}
+	if !goldenEnabled(t) {
+		return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts are for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
+	}
+	if len(hosts) > maxPlainHosts {
+		return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts names %d hosts, at most %d", len(hosts), maxPlainHosts)
+	}
+	for _, h := range hosts {
+		if err := registry.CheckHost(h); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts: %v", err)
+		}
+	}
+	return slices.Clone(hosts), nil
+}
+
+// maxPlainHosts bounds image_plain_http_hosts: a pull's registries and their token realms.
+const maxPlainHosts = 16
 
 // templateSpec is the template as a herdlet needs it to boot a VM (link.Template). Only DurableDir volumes are
 // herd's; a mount of any other volume kind is left for the herdlet to refuse.
