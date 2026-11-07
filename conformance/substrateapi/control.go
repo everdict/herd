@@ -192,3 +192,7 @@ func (c *Control) ListWorkers(ctx context.Context, opts *ateapi.ListOptions) (*a
 func (c *Control) ListActorTemplates(ctx context.Context, space string, opts *ateapi.ListOptions) (*ateapi.ListActorTemplatesResponse, error) {
 	return invoke(ctx, c, "ListActorTemplates", &ateapi.ListActorTemplatesRequest{Atespace: space, Options: opts}, &ateapi.ListActorTemplatesResponse{})
 }
+
+func (c *Control) ListTags(ctx context.Context, space string, opts *ateapi.ListOptions) (*ateapi.ListTagsResponse, error) {
+	return invoke(ctx, c, "ListTags", &ateapi.ListTagsRequest{Atespace: space, Options: opts}, &ateapi.ListTagsResponse{})
+}
