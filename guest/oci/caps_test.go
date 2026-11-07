@@ -54,8 +54,9 @@ func TestDropNetRawHoldsItInNoSet(t *testing.T) {
 }
 
 // An added capability is held in all five sets, so a non-root USER keeps it across execve too; a capability both
-// added and dropped is in none (drop wins); drop ALL empties the default set and leaves exactly what is added.
-func TestAddIsHonouredAndDropWins(t *testing.T) {
+// added and dropped is granted in all five (Substrate's rule: drop applies first, then add), while a dropped default
+// that is not added stays in none; drop ALL empties the default set and leaves exactly what is added.
+func TestAddIsHonouredAndAddWins(t *testing.T) {
 	c := mainConfig()
 	c.CapAdd = []string{"SYS_PTRACE", "CAP_NET_ADMIN"}
 	s, err := oci.Build(c)
@@ -73,14 +74,17 @@ func TestAddIsHonouredAndDropWins(t *testing.T) {
 	}
 
 	c = mainConfig()
-	c.CapAdd, c.CapDrop = []string{"NET_ADMIN", "NET_RAW"}, []string{"CAP_NET_ADMIN", "NET_RAW"}
+	c.CapAdd, c.CapDrop = []string{"NET_ADMIN", "NET_RAW"}, []string{"CAP_NET_ADMIN", "NET_RAW", "MKNOD"}
 	if s, err = oci.Build(c); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"CAP_NET_ADMIN", "CAP_NET_RAW"} {
-		if in := holdsIn(s.Process.Capabilities, name); len(in) > 0 {
-			t.Errorf("%s both added and dropped: held in %v, want none (drop wins)", name, in)
+		if in := holdsIn(s.Process.Capabilities, name); !slices.Equal(in, all) {
+			t.Errorf("%s both added and dropped: held in %v, want %v (drop first, then add: add wins)", name, in, all)
 		}
+	}
+	if in := holdsIn(s.Process.Capabilities, "CAP_MKNOD"); len(in) > 0 {
+		t.Errorf("CAP_MKNOD dropped and not added: held in %v, want none", in)
 	}
 
 	c = mainConfig()
