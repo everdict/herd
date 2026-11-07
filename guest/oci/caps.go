@@ -43,8 +43,9 @@ func CheckCapabilities(add, drop []string) error {
 
 // capabilitySets is a container process's capabilities: Docker's default set (none if drop holds ALL) and add, as
 // its bounding, effective and permitted sets; add alone as its inheritable and ambient sets, so a non-root USER keeps
-// what the template added across execve; and every capability in drop removed from all five, whether default or
-// added. With neither list it is the default set exactly as before (nothing inheritable or ambient).
+// what the template added across execve. Drop applies first, then add (Substrate's rule): a dropped default is in no
+// set, and a capability in both lists is granted. With neither list it is the default set exactly as before (nothing
+// inheritable or ambient).
 func capabilitySets(add, drop []string) (*Capabilities, error) {
 	names := func(field string, in []string) ([]string, error) {
 		var out []string
@@ -74,16 +75,13 @@ func capabilitySets(add, drop []string) (*Capabilities, error) {
 	if !slices.Contains(drops, "ALL") {
 		base = slices.Clone(DefaultCapabilities)
 	}
-	kept := func(caps []string) []string {
-		var out []string
-		for _, c := range caps {
-			if !slices.Contains(drops, c) && !slices.Contains(out, c) {
-				out = append(out, c)
-			}
+	full := slices.DeleteFunc(base, func(c string) bool { return slices.Contains(drops, c) })
+	for _, c := range adds {
+		if !slices.Contains(full, c) {
+			full = append(full, c)
 		}
-		return out
 	}
-	full, added := kept(append(base, adds...)), kept(adds)
+	added := adds
 	c := &Capabilities{Bounding: full, Effective: slices.Clone(full), Permitted: slices.Clone(full)}
 	if len(added) > 0 {
 		c.Inheritable, c.Ambient = added, slices.Clone(added)

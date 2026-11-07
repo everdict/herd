@@ -67,7 +67,7 @@ type Container struct {
 	User         string        `json:"user,omitempty"`
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 	// CapAdd and CapDrop are the template's security_context.capabilities, as it wrote them (oci.CheckCapabilities):
-	// they change Docker's default set of the container's process and of every exec into it, and drop wins.
+	// they change Docker's default set of the container's process and of every exec into it, drop first, then add.
 	CapAdd  []string `json:"capAdd,omitempty"`
 	CapDrop []string `json:"capDrop,omitempty"`
 }

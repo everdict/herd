@@ -4,9 +4,9 @@
 // given (resolv.conf, trust bundles with herd-egress's CA) as read-only binds, and herd-guest itself
 // at /.herd/herd-guest (read-only) so the container's init, the exec shim and the signal helper run inside it. The
 // process runs as the image's USER (ResolveUser) with Docker's default capability set (DefaultCapabilities) as the
-// template's capabilities.add and drop change it (CheckCapabilities; drop wins): the VM is the isolation boundary, and
-// images whose entrypoints chown or switch user (redis, nginx) need what Docker grants. Every exec into the container
-// is handed the container's process (crun exec --process), so it holds the same set.
+// template's capabilities.add and drop change it (CheckCapabilities; drop, then add): the VM is the isolation
+// boundary, and images whose entrypoints chown or switch user (redis, nginx) need what Docker grants. Every exec into
+// the container is handed the container's process (crun exec --process), so it holds the same set.
 package oci
 
 import (
@@ -114,7 +114,7 @@ type Config struct {
 	Files []FileMount
 	// GuestBinary is herd-guest's path in the guest, bound at GuestBinary in the container.
 	GuestBinary string
-	// CapAdd and CapDrop are the template container's security_context.capabilities (CheckCapabilities): drop wins.
+	// CapAdd and CapDrop are the template container's security_context.capabilities (CheckCapabilities): drop, then add.
 	// Neither: Docker's default set.
 	CapAdd, CapDrop []string
 }

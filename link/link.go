@@ -221,7 +221,7 @@ type Container struct {
 	Env          []EnvVar      `json:"env,omitempty"`
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 	// CapAdd and CapDrop are the container's security_context.capabilities as the template wrote them (herd-api
-	// checked them at create); herd-guest applies them to the container's process and every exec, drop winning.
+	// checked them at create); herd-guest applies them to the container's process and every exec, drop first, then add.
 	CapAdd  []string `json:"capAdd,omitempty"`
 	CapDrop []string `json:"capDrop,omitempty"`
 }
