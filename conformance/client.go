@@ -115,6 +115,9 @@ func (c *Client) CreateActorTemplate(ctx context.Context, r *ateapi.CreateActorT
 func (c *Client) GetActorTemplate(ctx context.Context, r *ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 	return call(ctx, c, "GetActorTemplate", r, &ateapi.ActorTemplate{})
 }
+func (c *Client) ListActorTemplates(ctx context.Context, r *ateapi.ListActorTemplatesRequest) (*ateapi.ListActorTemplatesResponse, error) {
+	return call(ctx, c, "ListActorTemplates", r, &ateapi.ListActorTemplatesResponse{})
+}
 func (c *Client) DeleteActorTemplate(ctx context.Context, r *ateapi.DeleteActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 	return call(ctx, c, "DeleteActorTemplate", r, &ateapi.ActorTemplate{})
 }

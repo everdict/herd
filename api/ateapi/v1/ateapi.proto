@@ -119,6 +119,10 @@ service Control {
     option (method).resource = "ActorTemplate";
   }
 
+  rpc ListActorTemplates(ListActorTemplatesRequest) returns (ListActorTemplatesResponse) {
+    option (method).resource = "ActorTemplate";
+  }
+
   // Delete an ActorTemplate together with its golden actor and golden
   // tag in the template's atespace.
   rpc DeleteActorTemplate(DeleteActorTemplateRequest) returns (ActorTemplate) {
@@ -1558,6 +1562,29 @@ message GetActorTemplateRequest {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor_template = 1;
+}
+
+message ListActorTemplatesRequest {
+  // The atespace to list actor templates from. Empty lists across all
+  // atespaces.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
+  string atespace = 1;
+
+  // Pagination controls.
+  //
+  // +k8s:optional
+  ListOptions options = 2;
+}
+
+message ListActorTemplatesResponse {
+  // The page of actor template versions. This list may be empty even if
+  // there are more results.
+  repeated ActorTemplate actor_templates = 1;
+
+  // Pagination token for the next page. Empty if this is the last page.
+  string next_page_token = 2;
 }
 
 message DeleteActorTemplateRequest {

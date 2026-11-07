@@ -29,3 +29,10 @@ the previous one with the field added (descriptorpb, proto.Marshal deterministic
 it; the unchanged descriptor round-trips byte for byte), its struct field and getter in protoc-gen-go's shape.
 `TestHerdAdditionsInTheDescriptor` holds the descriptor to `herd-additions.txt` and `ateapi.proto`; `go generate`
 with protoc replaces the file.
+
+`ListActorTemplates` (DEFAUL-1613) was added to `subset.txt` and its two messages and method written into
+`ateapi.pb.go` where no protoc was, the same way: the raw descriptor is the previous one with
+`ListActorTemplatesRequest` and `ListActorTemplatesResponse` inserted after `GetActorTemplateRequest` and the method
+after `GetActorTemplate`, where `ateapi.proto` has them; `goTypes`, `depIdxs` and the message indices are rewritten as
+protoc-gen-go orders them (the same rewrite of the previous descriptor reproduces the previous file byte for byte),
+the structs and getters in protoc-gen-go's shape. `go generate` with protoc replaces the file.

@@ -12,6 +12,7 @@ GetTag
 DeleteTag
 CreateActorTemplate
 GetActorTemplate
+ListActorTemplates
 DeleteActorTemplate
 GetActorEgressPolicy
 CreateActorEgressPolicy
