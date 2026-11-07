@@ -36,3 +36,5 @@ with protoc replaces the file.
 after `GetActorTemplate`, where `ateapi.proto` has them; `goTypes`, `depIdxs` and the message indices are rewritten as
 protoc-gen-go orders them (the same rewrite of the previous descriptor reproduces the previous file byte for byte),
 the structs and getters in protoc-gen-go's shape. `go generate` with protoc replaces the file.
+
+`ListTags` (DEFAUL-1613) was added the same way, its messages after `GetTagRequest` and the method after `GetTag`.

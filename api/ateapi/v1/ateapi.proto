@@ -94,6 +94,11 @@ service Control {
     option (method).resource = "Tag";
   }
 
+  // List Tags.
+  rpc ListTags(ListTagsRequest) returns (ListTagsResponse) {
+    option (method).resource = "Tag";
+  }
+
   // Delete a Tag and the external snapshot it owns. Actors created from the
   // tag that have not yet been suspended still point at that external snapshot
   // and become unrecoverable, so do not delete a tag while such Actors exist.
@@ -1771,6 +1776,24 @@ message GetTagRequest {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef tag = 1;
+}
+
+message ListTagsRequest {
+  // The atespace to list tags from. Empty lists across all atespaces.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
+  string atespace = 1;
+
+  // Pagination controls.
+  //
+  // +k8s:optional
+  ListOptions options = 2;
+}
+
+message ListTagsResponse {
+  repeated Tag tags = 1;
+  string next_page_token = 2;
 }
 
 // Request to tag the external snapshot a suspended Actor holds.

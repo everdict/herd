@@ -34,6 +34,7 @@ var controlSubset = map[string]rpc{
 	"ResumeActor":             {"ResumeActorRequest", "ResumeActorResponse"},
 	"CreateTag":               {"CreateTagRequest", "Tag"},
 	"GetTag":                  {"GetTagRequest", "Tag"},
+	"ListTags":                {"ListTagsRequest", "ListTagsResponse"},
 	"DeleteTag":               {"DeleteTagRequest", "Tag"},
 	"CreateActorTemplate":     {"CreateActorTemplateRequest", "ActorTemplate"},
 	"GetActorTemplate":        {"GetActorTemplateRequest", "ActorTemplate"},

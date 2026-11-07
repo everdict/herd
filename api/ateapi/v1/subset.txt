@@ -9,6 +9,7 @@ SuspendActor
 ResumeActor
 CreateTag
 GetTag
+ListTags
 DeleteTag
 CreateActorTemplate
 GetActorTemplate

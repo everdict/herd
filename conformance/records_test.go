@@ -32,10 +32,10 @@ func TestSubsetServed(t *testing.T) {
 			t.Errorf("%s with an empty request: %v (want a served method refusing the request)", m, err)
 		}
 	}
-	if n != 19 {
-		t.Errorf("subset.txt lists %d methods, want 19", n)
+	if n != 20 {
+		t.Errorf("subset.txt lists %d methods, want 20", n)
 	}
-	for _, m := range []string{"RevertActor", "ListTags", "UpdateTag", "GetWorker"} {
+	for _, m := range []string{"RevertActor", "UpdateTag", "GetWorker"} {
 		wantCode(t, m, e.Client.Raw(ctxT(t), m, &ateapi.GetActorRequest{}, &ateapi.Actor{}), codes.Unimplemented)
 	}
 }

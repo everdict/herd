@@ -133,3 +133,6 @@ func (c *Client) UpdateActorEgressPolicy(ctx context.Context, r *ateapi.UpdateAc
 func (c *Client) DeleteActorEgressPolicy(ctx context.Context, r *ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
 	return call(ctx, c, "DeleteActorEgressPolicy", r, &ateapi.EgressPolicy{})
 }
+func (c *Client) ListTags(ctx context.Context, r *ateapi.ListTagsRequest) (*ateapi.ListTagsResponse, error) {
+	return call(ctx, c, "ListTags", r, &ateapi.ListTagsResponse{})
+}
