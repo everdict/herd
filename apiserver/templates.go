@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"slices"
+	"sort"
 	"strings"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -93,7 +94,39 @@ func (s *Server) GetActorTemplate(ctx context.Context, req *ateapi.GetActorTempl
 	return v, toStatus(err)
 }
 
-// DeleteActorTemplate deletes a template no actor uses, after its golden actor and golden tag, as Substrate does.
+// ListActorTemplates lists an atespace's templates by name, as GetActorTemplate answers each; the page token is the
+// last name returned, as for ListActors.
+func (s *Server) ListActorTemplates(ctx context.Context, req *ateapi.ListActorTemplatesRequest) (*ateapi.ListActorTemplatesResponse, error) {
+	space := req.GetAtespace()
+	if err := s.authorize(ctx, space, auth.ActionRead); err != nil {
+		return nil, err
+	}
+	recs, err := s.cfg.Store.List(ctx, store.KindActorTemplate, space)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	size := int(req.GetOptions().GetPageSize())
+	if size <= 0 || size > 1000 {
+		size = 100
+	}
+	after := req.GetOptions().GetPageToken()
+	i := sort.Search(len(recs), func(i int) bool { return recs[i].Name > after })
+	resp := &ateapi.ListActorTemplatesResponse{}
+	for ; i < len(recs) && len(resp.ActorTemplates) < size; i++ {
+		v, err := templateView(recs[i])
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		resp.ActorTemplates = append(resp.ActorTemplates, v)
+	}
+	if i < len(recs) && len(resp.ActorTemplates) > 0 {
+		resp.NextPageToken = resp.ActorTemplates[len(resp.ActorTemplates)-1].GetMetadata().GetName()
+	}
+	return resp, nil
+}
+
+// DeleteActorTemplate deletes a template no actor uses and no tag but its golden holds, after its golden actor and
+// golden tag (with the tag's snapshot object), as Substrate does.
 func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 	space, name, err := ref(req.GetActorTemplate())
 	if err != nil {
@@ -133,7 +166,22 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	if err := s.deleteGolden(ctx, space, r.UID, goldenNames(r, t)); err != nil {
+	golden := goldenNames(r, t)
+	// A tag of one of its actors holds the template's uid, and an actor created from that tag needs the template.
+	tags, err := s.cfg.Store.List(ctx, store.KindTag, space)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	for _, tr := range tags {
+		tag, err := decode(tr, &ateapi.Tag{})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		if tag.GetStatus().GetActorTemplateUid() == r.UID && !slices.Contains(golden, tr.Name) {
+			return nil, status.Errorf(codes.FailedPrecondition, "template %s/%s is held by tag %s", space, name, tr.Name)
+		}
+	}
+	if err := s.deleteGolden(ctx, space, r.UID, golden); err != nil {
 		return nil, err
 	}
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {

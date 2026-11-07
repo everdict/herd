@@ -27,6 +27,7 @@ type ControlServer interface {
 	DeleteTag(context.Context, *ateapi.DeleteTagRequest) (*ateapi.Tag, error)
 	CreateActorTemplate(context.Context, *ateapi.CreateActorTemplateRequest) (*ateapi.ActorTemplate, error)
 	GetActorTemplate(context.Context, *ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error)
+	ListActorTemplates(context.Context, *ateapi.ListActorTemplatesRequest) (*ateapi.ListActorTemplatesResponse, error)
 	DeleteActorTemplate(context.Context, *ateapi.DeleteActorTemplateRequest) (*ateapi.ActorTemplate, error)
 	GetActorEgressPolicy(context.Context, *ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
 	CreateActorEgressPolicy(context.Context, *ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
@@ -88,6 +89,7 @@ var ControlServiceDesc = grpc.ServiceDesc{
 		unary(controlService, "ListWorkers", ControlServer.ListWorkers),
 		unary(controlService, "CreateActorTemplate", ControlServer.CreateActorTemplate),
 		unary(controlService, "GetActorTemplate", ControlServer.GetActorTemplate),
+		unary(controlService, "ListActorTemplates", ControlServer.ListActorTemplates),
 		unary(controlService, "DeleteActorTemplate", ControlServer.DeleteActorTemplate),
 	},
 	Metadata: "ateapi/v1/ateapi.proto",
