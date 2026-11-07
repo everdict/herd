@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/everdict/herd/guest/initd"
@@ -83,7 +84,7 @@ func Plan(t link.Template, roots map[string]image.Rootfs) (*initd.Plan, []string
 			disks = append(disks, r.Path)
 		}
 		ic := initd.Container{Name: c.Name, Image: initd.Image{Device: dev, FSType: r.FSType}, Command: argv(c, r.Config), Env: env(c, r.Config),
-			User: r.Config.User}
+			User: r.Config.User, CapAdd: slices.Clone(c.CapAdd), CapDrop: slices.Clone(c.CapDrop)}
 		// Docker runs in the image's WORKDIR, cleaned (a trailing slash is still the directory).
 		if wd := path.Clean(r.Config.WorkingDir); r.Config.WorkingDir != "" && wd != "/" && strings.HasPrefix(wd, "/") {
 			ic.Workdir = wd

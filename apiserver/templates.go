@@ -7,6 +7,7 @@ import (
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/guest/oci"
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/link"
@@ -38,6 +39,9 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapi.CreateActo
 	}
 	if len(in.GetContainers()) == 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "a template needs at least one container")
+	}
+	if err := checkCapabilities(in); err != nil {
+		return nil, err
 	}
 	t := proto.Clone(in).(*ateapi.ActorTemplate)
 	// Status is server-owned and starts empty, as Substrate's does.
@@ -197,7 +201,8 @@ const maxPlainHosts = 16
 func templateSpec(uid string, t *ateapi.ActorTemplate) *link.Template {
 	out := &link.Template{UID: uid}
 	for _, c := range t.GetContainers() {
-		lc := link.Container{Name: c.GetName(), Image: c.GetImage(), Command: c.GetCommand(), Args: c.GetArgs()}
+		lc := link.Container{Name: c.GetName(), Image: c.GetImage(), Command: c.GetCommand(), Args: c.GetArgs(),
+			CapAdd: c.GetSecurityContext().GetCapabilities().GetAdd(), CapDrop: c.GetSecurityContext().GetCapabilities().GetDrop()}
 		for _, e := range c.GetEnv() {
 			lc.Env = append(lc.Env, link.EnvVar{Name: e.GetName(), Value: e.GetValue()})
 		}
@@ -216,4 +221,17 @@ func templateSpec(uid string, t *ateapi.ActorTemplate) *link.Template {
 		out.MemoryMiB = int(l.GetMemoryBytes() >> 20)
 	}
 	return out
+}
+
+// checkCapabilities refuses a template whose container names a capability Linux does not have, or ALL in add
+// (DEFAUL-1611): herd-guest applies security_context.capabilities at boot, and a name it cannot apply is the
+// template's error, answered at create rather than as a failed boot.
+func checkCapabilities(t *ateapi.ActorTemplate) error {
+	for i, c := range t.GetContainers() {
+		caps := c.GetSecurityContext().GetCapabilities()
+		if err := oci.CheckCapabilities(caps.GetAdd(), caps.GetDrop()); err != nil {
+			return status.Errorf(codes.InvalidArgument, "containers[%d] (%s): security_context.%v", i, c.GetName(), err)
+		}
+	}
+	return nil
 }

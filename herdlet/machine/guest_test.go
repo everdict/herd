@@ -29,7 +29,7 @@ func (r *runs) Run(ctx context.Context, id, bundle string) (*oci.Watch, error) {
 	return nil, nil
 }
 func (r *runs) Exec(context.Context, string, oci.Process, bool) error { return nil }
-func (r *runs) Kill(context.Context, string, syscall.Signal) error { return nil }
+func (r *runs) Kill(context.Context, string, syscall.Signal) error    { return nil }
 
 var _ oci.Runtime = (*runs)(nil)
 

@@ -3,14 +3,17 @@
 // filesystems, its DurableDir volumes as bind mounts of subdirectories of the virtio-fs share, the guest files it is
 // given (resolv.conf, trust bundles with herd-egress's CA) as read-only binds, and herd-guest itself
 // at /.herd/herd-guest (read-only) so the container's init, the exec shim and the signal helper run inside it. The
-// process runs as the image's USER (ResolveUser) with Docker's default capability set (DefaultCapabilities): the VM is
-// the isolation boundary, and images whose entrypoints chown or switch user (redis, nginx) need what Docker grants.
+// process runs as the image's USER (ResolveUser) with Docker's default capability set (DefaultCapabilities) as the
+// template's capabilities.add and drop change it (CheckCapabilities; drop wins): the VM is the isolation boundary, and
+// images whose entrypoints chown or switch user (redis, nginx) need what Docker grants. Every exec into the container
+// is handed the container's process (crun exec --process), so it holds the same set.
 package oci
 
 import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -111,6 +114,9 @@ type Config struct {
 	Files []FileMount
 	// GuestBinary is herd-guest's path in the guest, bound at GuestBinary in the container.
 	GuestBinary string
+	// CapAdd and CapDrop are the template container's security_context.capabilities (CheckCapabilities): drop wins.
+	// Neither: Docker's default set.
+	CapAdd, CapDrop []string
 }
 
 // cleanAbs reports whether p is absolute, clean and not "/".
@@ -139,7 +145,10 @@ func Build(c Config) (*Spec, error) {
 	if !hasEnv(env, "PATH") {
 		env = append([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}, env...)
 	}
-	caps := func() []string { return append([]string(nil), DefaultCapabilities...) }
+	caps, err := capabilitySets(c.CapAdd, c.CapDrop)
+	if err != nil {
+		return nil, fmt.Errorf("oci: container %q: %w", c.Name, err)
+	}
 	user := c.User
 	user.AdditionalGids = append([]uint32(nil), c.User.AdditionalGids...)
 	s := &Spec{
@@ -149,7 +158,7 @@ func Build(c Config) (*Spec, error) {
 			Args:            append([]string{GuestBinary, "cinit", ReportFlag, "--"}, c.Args...),
 			Env:             env,
 			Cwd:             cwd,
-			Capabilities:    &Capabilities{Bounding: caps(), Effective: caps(), Permitted: caps()},
+			Capabilities:    caps,
 			NoNewPrivileges: true,
 		},
 		Root:     Root{Path: c.Rootfs},
@@ -224,4 +233,21 @@ func (s *Spec) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	return append(b, '\n'), nil
+}
+
+// ExecProcess is the process an exec into the container runs: the container's own (its user, environment, cwd,
+// capabilities and noNewPrivileges) with argv as its arguments, so an exec holds no capability the container's
+// process does not.
+func (p *Process) ExecProcess(argv []string) Process {
+	e := *p
+	e.Args = slices.Clone(argv)
+	e.Env = slices.Clone(p.Env)
+	e.User.AdditionalGids = slices.Clone(p.User.AdditionalGids)
+	if p.Capabilities != nil {
+		c := *p.Capabilities
+		c.Bounding, c.Effective, c.Inheritable = slices.Clone(c.Bounding), slices.Clone(c.Effective), slices.Clone(c.Inheritable)
+		c.Permitted, c.Ambient = slices.Clone(c.Permitted), slices.Clone(c.Ambient)
+		e.Capabilities = &c
+	}
+	return e
 }

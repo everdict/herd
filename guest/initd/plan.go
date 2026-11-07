@@ -15,6 +15,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/everdict/herd/guest/oci"
 )
 
 // PlanPath is the plan's path relative to the share.
@@ -64,6 +66,10 @@ type Container struct {
 	// does (oci.ResolveUser); empty is root.
 	User         string        `json:"user,omitempty"`
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
+	// CapAdd and CapDrop are the template's security_context.capabilities, as it wrote them (oci.CheckCapabilities):
+	// they change Docker's default set of the container's process and of every exec into it, and drop wins.
+	CapAdd  []string `json:"capAdd,omitempty"`
+	CapDrop []string `json:"capDrop,omitempty"`
 }
 
 type Image struct {
@@ -142,6 +148,9 @@ func (p *Plan) Validate() error {
 		}
 		if c.Workdir != "" && !cleanAbs(c.Workdir) {
 			return fmt.Errorf("initd: container %q: workdir %q is not a clean absolute path", c.Name, c.Workdir)
+		}
+		if err := oci.CheckCapabilities(c.CapAdd, c.CapDrop); err != nil {
+			return fmt.Errorf("initd: container %q: %w", c.Name, err)
 		}
 		at := map[string]bool{}
 		for _, m := range c.VolumeMounts {

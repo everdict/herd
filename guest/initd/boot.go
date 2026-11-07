@@ -47,6 +47,8 @@ type Booted struct {
 	Volumes map[string]string
 	// User is the identity the container's process runs as (the image's USER, resolved in its rootfs).
 	User oci.User
+	// Process is the container's process as its config.json holds it: every exec runs as it.
+	Process *oci.Process
 	// Watch follows the container's main process (nil if the runtime gave none).
 	Watch *oci.Watch
 }
@@ -178,7 +180,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	}
 	cfg := oci.Config{
 		Name: c.Name, Rootfs: rootfs, Args: append(append([]string(nil), c.Command...), c.Args...),
-		Cwd: c.Workdir, User: user, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary, TmpDir: tmp,
+		Cwd: c.Workdir, User: user, ShareDir: l.ShareDir, GuestBinary: l.GuestBinary, TmpDir: tmp, CapAdd: c.CapAdd, CapDrop: c.CapDrop,
 	}
 	for _, e := range c.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
@@ -207,7 +209,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	if _, ok := mounted["/tmp"]; !ok {
 		mounted["/tmp"] = tmp
 	}
-	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user}, nil
+	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user, Process: &spec.Process}, nil
 }
 
 // Mounts maps each of c's volume mount paths to the volume's directory in vols (from Volumes): every container that
@@ -265,7 +267,7 @@ func Boot(ctx context.Context, m Mounter, nl Netlinker, rt oci.Runtime, l Layout
 
 // Target is the started container as herd-guest's API serves it, with its volumes where the container sees them.
 func (b Booted) Target(rt oci.Runtime) *oci.Target {
-	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes, User: b.User, Watch: b.Watch}
+	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes, User: b.User, Process: b.Process, Watch: b.Watch}
 }
 
 // BootErrorPath is where herd-guest leaves, relative to the share, why its boot failed, before it ends the VM: the

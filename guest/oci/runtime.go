@@ -3,6 +3,7 @@ package oci
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,9 +17,9 @@ type Runtime interface {
 	// Run creates and starts the container from bundle (a directory with config.json) and returns once its process
 	// runs; the container keeps running after Run returns, and the Watch follows its main process.
 	Run(ctx context.Context, id, bundle string) (*Watch, error)
-	// Exec runs argv inside a running container. With detach it returns once the process started; without, once it
-	// ended, with an error if it failed.
-	Exec(ctx context.Context, id string, argv []string, detach bool) error
+	// Exec runs process p (its Args the command) inside a running container. With detach it returns once the process
+	// started; without, once it ended, with an error if it failed.
+	Exec(ctx context.Context, id string, p Process, detach bool) error
 	// Kill sends sig to the container's init.
 	Kill(ctx context.Context, id string, sig syscall.Signal) error
 }
@@ -101,12 +102,34 @@ func (c *Crun) Run(ctx context.Context, id, bundle string) (*Watch, error) {
 	return NewWatch(id, outR, stR), nil
 }
 
-func (c *Crun) Exec(ctx context.Context, id string, argv []string, detach bool) error {
-	args := []string{"exec"}
+// Exec hands crun the whole process (`crun exec --process`): an exec that names only its argv gets what crun fills
+// in, not necessarily the container's capabilities. crun reads the file before it starts the process, so it is gone
+// once Exec returns, detached or not.
+func (c *Crun) Exec(ctx context.Context, id string, p Process, detach bool) error {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("oci: exec process: %w", err)
+	}
+	f, err := os.CreateTemp("", "herd-exec-*.json")
+	if err != nil {
+		return fmt.Errorf("oci: %w", err)
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("oci: exec process: %w", err)
+	}
+	args := []string{"exec", "--process", f.Name()}
 	if detach {
 		args = append(args, "--detach")
 	}
-	return c.run(ctx, append(append(args, id), argv...)...)
+	if err := c.run(ctx, append(args, id)...); err != nil {
+		return fmt.Errorf("%w (process %q)", err, p.Args)
+	}
+	return nil
 }
 
 func (c *Crun) Kill(ctx context.Context, id string, sig syscall.Signal) error {
