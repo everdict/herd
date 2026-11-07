@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -66,10 +67,14 @@ func TestSpecRefusesVolumeOutsideTheShare(t *testing.T) {
 func TestCrunCommands(t *testing.T) {
 	var calls []string
 	rt := &oci.Crun{Runner: func(_ context.Context, _ []*os.File, name string, args ...string) ([]byte, error) {
+		args = slices.Clone(args)
+		if i := slices.Index(args, "--process"); i >= 0 {
+			args[i+1] = "<process.json>"
+		}
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}}
-	tg := &oci.Target{ContainerName: "main", Runtime: rt}
+	tg := &oci.Target{ContainerName: "main", Runtime: rt, Process: &oci.Process{}}
 	ctx := context.Background()
 	rt.Run(ctx, "main", "/run/herd/containers/main")
 	tg.StartShim(ctx, "/everdict/exec/abc")
@@ -77,8 +82,8 @@ func TestCrunCommands(t *testing.T) {
 	rt.Kill(ctx, "main", syscall.SIGTERM)
 	want := []string{
 		"/sbin/crun --root /run/crun run --detach --preserve-fds 2 --bundle /run/herd/containers/main main",
-		"/sbin/crun --root /run/crun exec --detach main /.herd/herd-guest shim /everdict/exec/abc",
-		"/sbin/crun --root /run/crun exec main /.herd/herd-guest signal 42 2",
+		"/sbin/crun --root /run/crun exec --process <process.json> --detach main",
+		"/sbin/crun --root /run/crun exec --process <process.json> main",
 		"/sbin/crun --root /run/crun kill main 15",
 	}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {

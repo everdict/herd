@@ -105,7 +105,7 @@ func (p *privRuntime) run(s *oci.Spec, argv []string) (int, string) {
 	return -1, ""
 }
 
-func (p *privRuntime) Exec(_ context.Context, id string, _ []string, _ bool) error {
+func (p *privRuntime) Exec(_ context.Context, id string, _ oci.Process, _ bool) error {
 	return fmt.Errorf("oci: crun [exec --detach %s]: exit status 255: the container `%s` is not running", id, id)
 }
 func (p *privRuntime) Kill(context.Context, string, syscall.Signal) error { return nil }

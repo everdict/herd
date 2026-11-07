@@ -23,7 +23,7 @@ type deadOnExec struct {
 }
 
 func (d *deadOnExec) Run(context.Context, string, string) (*oci.Watch, error) { return nil, nil }
-func (d *deadOnExec) Exec(_ context.Context, id string, _ []string, _ bool) error {
+func (d *deadOnExec) Exec(_ context.Context, id string, _ oci.Process, _ bool) error {
 	io.WriteString(d.outW, "su-exec: setgroups: Operation not permitted\n")
 	io.WriteString(d.stW, oci.StatusLine(1, 0))
 	d.outW.Close()
@@ -46,7 +46,7 @@ func TestExecIntoAnExitedContainerNamesTheExit(t *testing.T) {
 	}
 	t.Cleanup(func() { outW.Close(); stW.Close() })
 	rt := &deadOnExec{outW: outW, stW: stW}
-	tg := &oci.Target{ContainerName: "box", RootfsDir: t.TempDir(), Dir: "/", Runtime: rt, Watch: oci.NewWatch("box", outR, stR)}
+	tg := &oci.Target{ContainerName: "box", RootfsDir: t.TempDir(), Dir: "/", Runtime: rt, Process: &oci.Process{}, Watch: oci.NewWatch("box", outR, stR)}
 	g, err := agent.New(tg)
 	if err != nil {
 		t.Fatal(err)

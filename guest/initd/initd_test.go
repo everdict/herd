@@ -81,7 +81,7 @@ func (f *fakeRuntime) Run(_ context.Context, id, bundle string) (*oci.Watch, err
 	return nil, nil
 }
 
-func (f *fakeRuntime) Exec(context.Context, string, []string, bool) error { return nil }
+func (f *fakeRuntime) Exec(context.Context, string, oci.Process, bool) error { return nil }
 func (f *fakeRuntime) Kill(context.Context, string, syscall.Signal) error { return nil }
 
 const planJSON = `{
