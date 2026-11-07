@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
@@ -174,6 +175,37 @@ func (s *Server) GetTag(ctx context.Context, req *ateapi.GetTagRequest) (*ateapi
 		return nil, toStatus(err)
 	}
 	return tr.view(), nil
+}
+
+// ListTags lists an atespace's tags by name, as GetTag answers each (scope, source actor, status with the template
+// uid); the page token is the last name returned, as for ListActors.
+func (s *Server) ListTags(ctx context.Context, req *ateapi.ListTagsRequest) (*ateapi.ListTagsResponse, error) {
+	space := req.GetAtespace()
+	if err := s.authorize(ctx, space, auth.ActionRead); err != nil {
+		return nil, err
+	}
+	recs, err := s.cfg.Store.List(ctx, store.KindTag, space)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	size := int(req.GetOptions().GetPageSize())
+	if size <= 0 || size > 1000 {
+		size = 100
+	}
+	after := req.GetOptions().GetPageToken()
+	i := sort.Search(len(recs), func(i int) bool { return recs[i].Name > after })
+	resp := &ateapi.ListTagsResponse{}
+	for ; i < len(recs) && len(resp.Tags) < size; i++ {
+		t, err := decode(recs[i], &ateapi.Tag{})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		resp.Tags = append(resp.Tags, (&tagRec{rec: recs[i], tag: t}).view())
+	}
+	if i < len(recs) && len(resp.Tags) > 0 {
+		resp.NextPageToken = resp.Tags[len(resp.Tags)-1].GetMetadata().GetName()
+	}
+	return resp, nil
 }
 
 // DeleteTag deletes a tag after its snapshot object is verified deleted.
