@@ -188,3 +188,7 @@ func (c *Control) UpdateActorEgressPolicy(ctx context.Context, space, actor stri
 func (c *Control) ListWorkers(ctx context.Context, opts *ateapi.ListOptions) (*ateapi.ListWorkersResponse, error) {
 	return invoke(ctx, c, "ListWorkers", &ateapi.ListWorkersRequest{Options: opts}, &ateapi.ListWorkersResponse{})
 }
+
+func (c *Control) ListActorTemplates(ctx context.Context, space string, opts *ateapi.ListOptions) (*ateapi.ListActorTemplatesResponse, error) {
+	return invoke(ctx, c, "ListActorTemplates", &ateapi.ListActorTemplatesRequest{Atespace: space, Options: opts}, &ateapi.ListActorTemplatesResponse{})
+}

@@ -86,5 +86,6 @@ func (r *run) goldenTemplate(ctx context.Context) (string, error) {
 	} else if err := r.cfg.Probe.Request(ctx, r.cfg.Router, r.target(actor)); err != nil {
 		return "", fmt.Errorf("%s in %s: %w", r.cfg.Probe.Name(), actor, err)
 	}
+	r.golden.template, r.golden.actor, r.golden.tag = name, actor, tag
 	return fmt.Sprintf("golden tag %s after %v; actor %s from it RUNNING, %s", tag.GetName(), built, actor, ran), nil
 }

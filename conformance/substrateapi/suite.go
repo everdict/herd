@@ -110,7 +110,8 @@ type Report struct {
 // Cases are the suite's cases, in the order they run.
 var Cases = []string{
 	"create-from-template", "resume", "request", "suspend", "resume-on-request", "fork-via-tag", "delete-verified",
-	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "golden-template", "move",
+	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "golden-template", "list-templates",
+	"delete-template", "move",
 	"egress-walk", "credential-header", "long-stream", "two-containers",
 }
 
@@ -206,6 +207,11 @@ type run struct {
 	tags []string
 	// templates the suite created, for cleanup (after the actors of them)
 	templates []string
+	// golden is what the golden-template case built, once it passed: its template, its golden tag and the actor of it.
+	golden struct {
+		template, actor string
+		tag             *ateapi.ObjectRef
+	}
 	// ranOn is the worker the resume case's actor was assigned (WorkerAssignment.worker), once it passed.
 	ranOn string
 }
@@ -304,6 +310,8 @@ func Run(ctx context.Context, cfg Config) Report {
 		{"refuse-unknown-actor", r.unknownActor},
 		{"list-workers", r.listWorkers},
 		{"golden-template", r.goldenTemplate},
+		{"list-templates", r.listTemplates},
+		{"delete-template", r.deleteTemplate},
 		{"move", r.move},
 		{"egress-walk", r.egressWalk},
 		{"credential-header", r.credentialHeader},
