@@ -5,6 +5,7 @@
 #
 #   BUSYBOX_<arch>=... CRUN_<arch>=... guest/build.sh <amd64|arm64|all> <out-dir>
 #   guest/build.sh --plan <amd64|arm64|all> <out-dir>     (print what would be built, build nothing)
+#   BUSYBOX=... CRUN=... guest/build.sh --initrd <amd64|arm64|all> <out-dir>   (herd-guest and initrd.img only, no kernel)
 #
 # BUSYBOX and CRUN (or BUSYBOX_<arch> and CRUN_<arch>, which win) are static binaries for the target architecture.
 # herd-guest is built from this checkout (CGO_ENABLED=0 GOOS=linux GOARCH=<arch>) unless HERD_GUEST(_<arch>) names
@@ -13,18 +14,24 @@
 # Output: <out-dir>/herd-guest-<arch>/{kernel,initrd.img,config}.
 set -eu
 
-PLAN=
-if [ "${1:-}" = --plan ]; then
+PLAN= INITRD=
+case "${1:-}" in
+--plan)
 	PLAN=1
 	shift
-fi
-ARCH=${1:?usage: build.sh [--plan] <amd64|arm64|all> <out-dir>}
-OUT=${2:?usage: build.sh [--plan] <amd64|arm64|all> <out-dir>}
+	;;
+--initrd)
+	INITRD=1
+	shift
+	;;
+esac
+ARCH=${1:?usage: build.sh [--plan|--initrd] <amd64|arm64|all> <out-dir>}
+OUT=${2:?usage: build.sh [--plan|--initrd] <amd64|arm64|all> <out-dir>}
 here=$(cd "$(dirname "$0")" && pwd)
 
 if [ "$ARCH" = all ]; then
 	for a in amd64 arm64; do
-		sh "$0" ${PLAN:+--plan} "$a" "$OUT"
+		sh "$0" ${PLAN:+--plan} ${INITRD:+--initrd} "$a" "$OUT"
 	done
 	exit 0
 fi
@@ -71,6 +78,16 @@ fi
 : "${CRUN:?CRUN or CRUN_$ARCH must name a static crun for $ARCH}"
 export HERD_GUEST BUSYBOX CRUN
 
+# The initramfs: herd-guest as /init, busybox and crun, assembled by guest/initrd (gen_init_cpio's list format).
+initrd() {
+	mkdir -p "$dist"
+	(cd "$here/.." && go run ./guest/initrd/mkinitrd "$here/initrd/initramfs.list") | gzip -9 >"$dist/initrd.img"
+}
+if [ -n "$INITRD" ]; then
+	initrd
+	echo "build.sh: $dist/initrd.img"
+	exit 0
+fi
 if [ ! -d "$src/.git" ]; then
 	git clone --depth 1 --branch "$KERNEL_REF" "$KERNEL_REPO" "$src"
 fi
@@ -96,9 +113,8 @@ for frag in herd-guest.config "${ARCH}.config"; do
 done
 
 kmake -j"$(nproc)" "$TARGET"
-"${HOSTCC:-cc}" -o "$build/gen_init_cpio" "$src/usr/gen_init_cpio.c"
 mkdir -p "$dist"
 cp "$build/$IMAGE" "$dist/kernel"
 cp "$build/.config" "$dist/config"
-"$build/gen_init_cpio" "$here/initrd/initramfs.list" | gzip -9 >"$dist/initrd.img"
+initrd
 echo "build.sh: $dist"
