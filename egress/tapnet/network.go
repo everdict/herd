@@ -23,7 +23,8 @@ type Actor struct {
 //   - Lease leases the VM its link and answers the guest's half for herd-guest's plan (address, default route and
 //     resolver at the host's address, herd-egress's CA) and the NIC Cloud Hypervisor attaches.
 //   - Up creates the TAP, loads the table, then sets the link up (nft.Apply), and binds the VM's address to its
-//     actor once it has one; before Boot and Restore.
+//     actor once it has one, answering only when herd-egress has acknowledged the binding (Bindings.Set); before Boot
+//     and Restore, so the guest cannot send before herd-egress knows its address.
 //   - Down unbinds and removes the TAP and the table, after the VM was verified gone, and answers gone only once all
 //     three are observed absent; the lease stays (a suspended VM restarts or restores on its link).
 //   - Release is Down and frees the lease (the VM is deleted).

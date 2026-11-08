@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,5 +156,46 @@ func TestUnboundAddressStillRefused(t *testing.T) {
 		if ev := e.flow(t, "127.0.0.2"); !strings.Contains(ev.Reason, unboundReason) || ev.Allowed {
 			t.Fatalf("flow %d from unbound 127.0.0.2: allowed %v, actor %+v, reason %q; want refused as bound to no actor", i, ev.Allowed, ev.Actor, ev.Reason)
 		}
+	}
+}
+
+// TestUnknownAddressReadsOnlyAChangedFile (bound-before-first-flow, DEFAUL-1622): the re-read before a refusal is
+// bounded: flows from an address the file does not hold read it again only if it changed since the last load, so an
+// unbound address costs a stat per flow, not a read.
+func TestUnknownAddressReadsOnlyAChangedFile(t *testing.T) {
+	guard, err := egress.NewGuard(egress.GuardConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := egress.New(egress.Config{Guard: guard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var src egress.Sources
+	path := filepath.Join(t.TempDir(), "egress-bindings.json")
+	f := &bindingsFile{path: path, g: g, src: &src}
+	f.reload(true)
+	stranger := netip.MustParseAddr("10.88.0.6")
+	for i := 0; i < 100; i++ {
+		f.unknown(stranger)
+	}
+	if f.reads != 1 {
+		t.Fatalf("100 flows from an unbound address with the file unchanged read it %d times, want only the first load", f.reads)
+	}
+	if err := os.WriteFile(path, []byte(`[{"space":"s","name":"box","uid":"u1","source":"10.88.0.2"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.unknown(stranger)
+	if a, ok := src.Actor(netip.MustParseAddr("10.88.0.2")); !ok || a.Name != "box" || f.reads != 2 {
+		t.Fatalf("after the file changed: 10.88.0.2 is %+v (%v), %d reads; want s/box after one more read", a, ok, f.reads)
+	}
+	if _, ok := src.Actor(stranger); ok {
+		t.Fatalf("%v is bound after the re-read", stranger)
+	}
+	for i := 0; i < 100; i++ {
+		f.unknown(stranger)
+	}
+	if f.reads != 2 {
+		t.Fatalf("flows from an unbound address read the unchanged file again: %d reads", f.reads)
 	}
 }

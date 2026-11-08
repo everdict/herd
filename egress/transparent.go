@@ -11,6 +11,11 @@ import (
 // Sources maps a VM's address on its TAP to the actor it runs (Ubuntu: one address per VM, anti-spoofed by the
 // VM's nftables table).
 type Sources struct {
+	// OnUnknown, if set, is called with a source bound to no actor before a flow from it is refused, so the bindings can be
+	// re-read first (herd-egress: a VM restored and bound since the last read, DEFAUL-1622); the flow is refused only if
+	// the source is still unbound after it. Set it before serving.
+	OnUnknown func(netip.Addr)
+
 	mu sync.RWMutex
 	m  map[netip.Addr]Actor
 }
@@ -44,7 +49,8 @@ func (s *Sources) Actor(src netip.Addr) (Actor, bool) {
 type OriginalDst func(net.Conn) (netip.AddrPort, error)
 
 // ServeTransparent accepts the connections nftables redirected from VMs' TAPs to ln and serves each through the
-// gateway as a flow of the actor its source address is bound to. A connection from an unbound source is refused.
+// gateway as a flow of the actor its source address is bound to. A connection from a source still unbound after
+// src.OnUnknown is refused.
 // origDst nil means SO_ORIGINAL_DST.
 func (g *Gateway) ServeTransparent(ctx context.Context, ln net.Listener, src *Sources, origDst OriginalDst) error {
 	if origDst == nil {
@@ -67,6 +73,10 @@ func (g *Gateway) ServeTransparent(ctx context.Context, ln net.Listener, src *So
 				return
 			}
 			a, ok := src.Actor(ra.Addr())
+			if !ok && src.OnUnknown != nil {
+				src.OnUnknown(ra.Addr())
+				a, ok = src.Actor(ra.Addr())
+			}
 			if !ok {
 				g.record(Actor{}, "tcp", ra.Addr().String(), 0, &RefusedError{Reason: "connection from an address bound to no actor"})
 				_ = c.Close()

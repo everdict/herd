@@ -10,16 +10,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/egress"
 	"github.com/everdict/herd/egress/nft"
+	"github.com/everdict/herd/egress/tapnet"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -130,7 +133,7 @@ func (e *Egress) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&e.Listen, "listen", ":15001", "transparent TCP listener nftables redirects to")
 	fs.StringVar(&e.DNSListen, "dns", ":15053", "synthetic DNS listener (UDP) nftables redirects port 53 to")
 	fs.StringVar(&e.DNSAnswer, "dns-answer", "198.18.0.1", "the address every A query is answered with; any address routed over the TAP works, since all TCP is redirected")
-	fs.StringVar(&e.Bindings, "bindings", "", "JSON bindings file (actor and its VM's TAP address)")
+	fs.StringVar(&e.Bindings, "bindings", "", "JSON bindings file (actor and its VM's TAP address); re-read when it changes, and each load acknowledged in <bindings>.loaded for herdlet")
 	fs.StringVar(&e.CACert, "ca-cert", "", "gateway CA certificate (PEM); with -ca-key")
 	fs.StringVar(&e.CAKey, "ca-key", "", "gateway CA EC key (PEM)")
 	fs.StringVar(&e.CAOut, "ca-out", "", "without -ca-cert: where to keep the CA certificate herdlet installs in guests (generated once; its key beside it as <ca-out>.key, so a restart keeps the CA guests trust)")
@@ -222,10 +225,10 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var src egress.Sources
+	bindings := &bindingsFile{path: e.Bindings, g: g, src: &src}
+	src.OnUnknown = bindings.unknown
 	reload := func() {
-		if err := loadBindings(e.Bindings, g, &src); err != nil {
-			log.Printf("herd-egress: bindings: %v", err)
-		}
+		bindings.reload(true)
 		if services != nil {
 			services.reload()
 		}
@@ -247,6 +250,18 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 		}
 	}()
 	go func() {
+		t := time.NewTicker(bindingsPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				bindings.reload(false)
+			}
+		}
+	}()
+	go func() {
 		if err := egress.ServeDNS(ctx, pc, egress.SyntheticDNS(answer)); err != nil {
 			log.Printf("herd-egress: dns: %v", err)
 		}
@@ -255,14 +270,104 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	return g.ServeTransparent(ctx, ln, &src, nil)
 }
 
-// loadBindings makes the gateway's bound actors and the source map equal the file.
-func loadBindings(path string, g *egress.Gateway, src *egress.Sources) error {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		b = []byte("[]")
-	} else if err != nil {
+// bindingsPoll is how often herd-egress looks whether the bindings file changed (a stat), so a binding herdlet writes
+// is loaded and acknowledged within it rather than at the next -interval (DEFAUL-1622).
+var bindingsPoll = 20 * time.Millisecond
+
+// bindingsFile is -bindings: the gateway's bound actors and the source map follow it, and each load is acknowledged
+// (tapnet.Acknowledge) to the herdlet waiting on it.
+type bindingsFile struct {
+	path string
+	g    *egress.Gateway
+	src  *egress.Sources
+
+	mu      sync.Mutex
+	loaded  bool
+	stat    os.FileInfo // of the file the last load read; nil when it was absent
+	last    []byte
+	acked   []byte
+	lastErr string
+	reads   int // the file's reads, so far
+}
+
+// load reads the file if force, or if it changed since the last load (by stat; herdlet renames a new file over it), and
+// acknowledges what it holds. A file that cannot be read or parsed changes nothing.
+func (f *bindingsFile) load(force bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !force && f.loaded {
+		st, err := os.Stat(f.path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if sameFile(f.stat, st) && bytes.Equal(f.acked, f.last) {
+			return nil
+		}
+	}
+	f.reads++
+	b, st, err := readStat(f.path)
+	if err != nil {
 		return err
 	}
+	if err := loadBindings(b, f.g, f.src); err != nil {
+		return err
+	}
+	f.loaded, f.stat, f.last = true, st, b
+	if f.acked == nil || !bytes.Equal(f.acked, b) {
+		if err := tapnet.Acknowledge(f.path, b); err != nil {
+			return fmt.Errorf("acknowledging: %w", err)
+		}
+		f.acked = b
+	}
+	return nil
+}
+
+// reload is load, logging a failure once until it changes.
+func (f *bindingsFile) reload(force bool) {
+	msg := ""
+	if err := f.load(force); err != nil {
+		msg = err.Error()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if msg != "" && msg != f.lastErr {
+		log.Printf("herd-egress: bindings: %s", msg)
+	}
+	f.lastErr = msg
+}
+
+// unknown is the source map's OnUnknown: a flow from an address bound to no actor re-reads the file first if it
+// changed since the last load, so a VM bound just before its first flow is served; an address the file does not hold
+// costs a stat and is refused.
+func (f *bindingsFile) unknown(netip.Addr) { f.reload(false) }
+
+// readStat reads path and stats the file it read; an absent file is no bindings, "[]".
+func readStat(path string) ([]byte, os.FileInfo, error) {
+	fd, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return []byte("[]"), nil, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+	defer fd.Close()
+	st, err := fd.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	b, err := io.ReadAll(fd)
+	return b, st, err
+}
+
+// sameFile reports whether a and b stat the same unchanged file (both nil: both absent).
+func sameFile(a, b os.FileInfo) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
+}
+
+// loadBindings makes the gateway's bound actors and the source map equal the bindings file's bytes b.
+func loadBindings(b []byte, g *egress.Gateway, src *egress.Sources) error {
 	var entries []bindingEntry
 	if err := json.Unmarshal(b, &entries); err != nil {
 		return err
