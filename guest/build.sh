@@ -70,9 +70,36 @@ BUSYBOX=$(pick BUSYBOX)
 CRUN=$(pick CRUN)
 CROSS_COMPILE=$(pick CROSS_COMPILE)
 export CROSS_COMPILE
+
+# The guest's time: every initramfs member's mtime and the kernel's build timestamp. herd-api rebuilds every golden
+# whose guest no worker runs (deploy.GuestIdentity, the digest of kernel and initrd.img), so the guest must be the same
+# bytes whenever one revision is built and whenever a release changes nothing it is built from (DEFAUL-1626). The
+# release commit's own time would make every release a new guest, so it is the time of the last commit that touched
+# what the guest is built from: guest/, go.mod, vendor/modules.txt and the packages of herd-guest and mkinitrd for
+# both architectures. SOURCE_DATE_EPOCH, if set, wins; set to each release's commit time it rebuilds every golden.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+	SOURCE_DATE_EPOCH=$(
+		cd "$here/.."
+		if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+			echo "build.sh: a shallow clone hides when the guest last changed: fetch its history or set SOURCE_DATE_EPOCH" >&2
+			exit 1
+		fi
+		deps() { GOOS=linux GOARCH=$1 go list -deps -f '{{if not .Standard}}{{.Dir}}{{end}}' ./cmd/herd-guest ./guest/initrd/mkinitrd; }
+		amd64=$(deps amd64)
+		arm64=$(deps arm64)
+		# Unquoted: one path per package directory.
+		git log -1 --format=%ct -- guest go.mod vendor/modules.txt $amd64 $arm64
+	)
+	if [ -z "$SOURCE_DATE_EPOCH" ]; then
+		echo "build.sh: no commit touched the guest's sources" >&2
+		exit 1
+	fi
+fi
+export SOURCE_DATE_EPOCH
 if [ -z "$HERD_GUEST" ]; then
 	HERD_GUEST=$OUT/herd-guest-$ARCH.bin
-	(cd "$here/.." && CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH go build -trimpath -o "$HERD_GUEST" ./cmd/herd-guest)
+	# -buildvcs=false: the revision, commit time and dirty bit would make every commit a new /init.
+	(cd "$here/.." && CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH go build -trimpath -buildvcs=false -o "$HERD_GUEST" ./cmd/herd-guest)
 fi
 : "${BUSYBOX:?BUSYBOX or BUSYBOX_$ARCH must name a static busybox for $ARCH}"
 : "${CRUN:?CRUN or CRUN_$ARCH must name a static crun for $ARCH}"
@@ -81,7 +108,10 @@ export HERD_GUEST BUSYBOX CRUN
 # The initramfs: herd-guest as /init, busybox and crun, assembled by guest/initrd (gen_init_cpio's list format).
 initrd() {
 	mkdir -p "$dist"
-	(cd "$here/.." && go run ./guest/initrd/mkinitrd "$here/initrd/initramfs.list") | gzip -9 >"$dist/initrd.img"
+	(cd "$here/.." && go run ./guest/initrd/mkinitrd "$SOURCE_DATE_EPOCH" "$here/initrd/initramfs.list") >"$dist/initrd.cpio"
+	# -n: no name or time in the gzip header.
+	gzip -9 -n <"$dist/initrd.cpio" >"$dist/initrd.img"
+	rm -f "$dist/initrd.cpio"
 }
 if [ -n "$INITRD" ]; then
 	initrd
@@ -96,6 +126,11 @@ if [ "$(git -C "$src" rev-parse HEAD)" != "$KERNEL_COMMIT" ]; then
 	exit 1
 fi
 
+# The kernel embeds when, by whom, on which host and how many times in this build directory it was built (uname -v,
+# /proc/version); fix them so it is the same bytes from the same source (Documentation/kbuild/reproducible-builds.rst).
+KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$SOURCE_DATE_EPOCH")
+KBUILD_BUILD_USER=herd KBUILD_BUILD_HOST=herd KBUILD_BUILD_VERSION=1
+export KBUILD_BUILD_TIMESTAMP KBUILD_BUILD_USER KBUILD_BUILD_HOST KBUILD_BUILD_VERSION
 kmake() { make -C "$src" O="$build" ARCH="$KARCH" "$@"; }
 
 kmake allnoconfig

@@ -1,8 +1,9 @@
 // Package initrd writes the herd guest's initramfs: a newc cpio archive of the members guest/initrd/initramfs.list
 // names, in the list's order. The list is in the kernel's gen_init_cpio format (dir, nod, file, slink); a file's
 // location may name an environment variable as ${NAME}, which build.sh points at the binaries built for the target
-// architecture. herd builds it in Go rather than with the kernel tree's gen_init_cpio so the assembly is the same
-// program wherever the guest is built, and testable where no kernel can be built.
+// architecture. herd builds it in Go rather than with the kernel tree's gen_init_cpio, which stamps a
+// file with its source's modification time and every other member with the time of the build, so the archive is
+// the same bytes wherever and whenever one revision is built (DEFAUL-1626), and testable where no kernel can be built.
 package initrd
 
 import (
@@ -10,11 +11,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // newc mode bits for the member types the list names.
@@ -40,10 +41,15 @@ type Member struct {
 
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// Write writes the archive list describes to w, as gen_init_cpio does: a regular file keeps its source's
-// modification time and every other member gets the current time.
-func Write(w io.Writer, list io.Reader, getenv func(string) (string, bool)) error {
-	now := uint32(time.Now().Unix())
+// Write writes the archive list describes to w. Every member gets the modification time mtime (seconds since the
+// epoch: build.sh passes SOURCE_DATE_EPOCH) and the mode and owner the list gives it, and inode numbers follow the
+// list's order, so the archive is a function of the list and the files' contents alone: neither when the guest was
+// built nor when its inputs were written or downloaded changes it (DEFAUL-1626).
+func Write(w io.Writer, list io.Reader, getenv func(string) (string, bool), mtime int64) error {
+	if mtime < 0 || mtime > math.MaxUint32 {
+		return fmt.Errorf("initrd: mtime %d does not fit a newc header", mtime)
+	}
+	t := uint32(mtime)
 	var ms []Member
 	sc := bufio.NewScanner(list)
 	for n := 1; sc.Scan(); n++ {
@@ -51,7 +57,7 @@ func Write(w io.Writer, list io.Reader, getenv func(string) (string, bool)) erro
 		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
 			continue
 		}
-		m, err := member(f, now, getenv)
+		m, err := member(f, t, getenv)
 		if err != nil {
 			return fmt.Errorf("initrd: line %d: %w", n, err)
 		}
@@ -79,7 +85,7 @@ func Write(w io.Writer, list io.Reader, getenv func(string) (string, bool)) erro
 	return nil
 }
 
-func member(f []string, now uint32, getenv func(string) (string, bool)) (Member, error) {
+func member(f []string, mtime uint32, getenv func(string) (string, bool)) (Member, error) {
 	want := map[string]int{"dir": 5, "nod": 8, "file": 6, "slink": 6}[f[0]]
 	if want == 0 {
 		return Member{}, fmt.Errorf("unknown type %q (dir, nod, file or slink)", f[0])
@@ -87,7 +93,7 @@ func member(f []string, now uint32, getenv func(string) (string, bool)) (Member,
 	if len(f) != want {
 		return Member{}, fmt.Errorf("%s takes %d fields, got %d", f[0], want-1, len(f)-1)
 	}
-	m := Member{Name: strings.TrimPrefix(f[1], "/"), Nlink: 1, MTime: now, DevMajor: 3, DevMinor: 1}
+	m := Member{Name: strings.TrimPrefix(f[1], "/"), Nlink: 1, MTime: mtime, DevMajor: 3, DevMinor: 1}
 	var err error
 	num := func(s string, base int) uint32 {
 		v, e := strconv.ParseUint(s, base, 32)
@@ -122,11 +128,6 @@ func member(f []string, now uint32, getenv func(string) (string, bool)) (Member,
 		if m.Data, e = os.ReadFile(loc); e != nil {
 			return Member{}, fmt.Errorf("%s: %w", f[1], e)
 		}
-		st, e := os.Stat(loc)
-		if e != nil {
-			return Member{}, fmt.Errorf("%s: %w", f[1], e)
-		}
-		m.MTime = uint32(st.ModTime().Unix())
 	}
 	return m, err
 }
