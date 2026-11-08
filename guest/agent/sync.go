@@ -7,6 +7,8 @@ import (
 	"os"
 
 	herdext "github.com/everdict/herd/api/herdext/v1"
+	"github.com/everdict/herd/guest/execrec"
+	"github.com/everdict/herd/guest/layer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -15,6 +17,8 @@ import (
 // and on every directory in SyncDirs (the volume share), which flushes exactly those filesystems and reports their
 // write-back errors. herdlet calls it before every snapshot. It answers when ctx ends even if a flush is still
 // blocked (an unanswering virtio-fs server), so the caller's deadline decides and the snapshot is not taken.
+// With LayerShare, it first saves each container's writable layer there (DEFAUL-1619), leaving out its exec records:
+// a cold boot runs none of the processes they name.
 func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.SyncResponse, error) {
 	dirs := append([]string(nil), g.SyncDirs...)
 	for _, c := range g.containers {
@@ -25,7 +29,13 @@ func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.Sync
 		flush = syncFS
 	}
 	done := make(chan error, 1)
-	go func() { done <- syncDirs(dirs, flush) }()
+	go func() {
+		if err := g.saveLayers(); err != nil {
+			done <- err
+			return
+		}
+		done <- syncDirs(dirs, flush)
+	}()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -35,6 +45,27 @@ func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.Sync
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
+}
+
+func (g *Guest) saveLayers() error {
+	if g.LayerShare == "" {
+		return nil
+	}
+	for _, c := range g.containers {
+		lt, ok := c.t.(LayerTarget)
+		if !ok || len(lt.Layers()) == 0 {
+			continue
+		}
+		// The records are under the root, so in its upper layer (or, for a Local target, its one directory).
+		var skip []string
+		for name := range lt.Layers() {
+			skip = append(skip, name+execrec.Dir)
+		}
+		if err := layer.Save(g.LayerShare, c.t.Name(), lt.Layers(), skip); err != nil {
+			return fmt.Errorf("saving container %q's writable layer: %w", c.t.Name(), err)
+		}
+	}
+	return nil
 }
 
 func syncDirs(dirs []string, flush func(*os.File) error) error {

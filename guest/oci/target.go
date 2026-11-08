@@ -25,6 +25,9 @@ type Target struct {
 	Process *Process
 	// Watch, if set, follows the container's main process.
 	Watch *Watch
+	// LayerDirs are the container's writable directories in the guest's memory (its overlay upper and its /tmp), by
+	// their names in its layer archive: Sync saves them for a snapshot (agent.LayerTarget).
+	LayerDirs map[string]string
 }
 
 func (t *Target) Name() string    { return t.ContainerName }
@@ -32,6 +35,8 @@ func (t *Target) Rootfs() string  { return t.RootfsDir }
 func (t *Target) Workdir() string { return t.Dir }
 
 func (t *Target) VolumeDirs() map[string]string { return t.Volumes }
+
+func (t *Target) Layers() map[string]string { return t.LayerDirs }
 
 // Owner is the uid and gid the container's processes run as.
 func (t *Target) Owner() (uid, gid int) { return int(t.User.UID), int(t.User.GID) }

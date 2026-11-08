@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/initd"
+	"github.com/everdict/herd/guest/layer"
 	"github.com/everdict/herd/guest/transport"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
@@ -148,8 +150,8 @@ func (v *VMM) Root(vm string) string {
 // targets are the guest's containers. A VM whose share holds a plan (herdlet's machines wrote it) gets one per
 // container of the plan, each with its volumes where guest/initd binds them and a root directory of its own outside
 // the share, as a real guest's containers have their rootfs in guest memory: a MEMORY restore under the VM's id
-// keeps it (and the exec records in it), a boot starts it empty. Any other VM has one container, "main", whose root
-// is the share itself.
+// keeps it (and the exec records in it), a boot starts it from the layer the snapshot's guest saved in the share
+// (package layer), or empty. Any other VM has one container, "main", whose root is the share itself.
 func (v *VMM) targets(id, root string, shim []string) ([]agent.Target, error) {
 	l := initd.Layout{ShareDir: root}
 	p, err := initd.ReadPlan(l)
@@ -163,10 +165,21 @@ func (v *VMM) targets(id, root string, shim []string) ([]agent.Target, error) {
 	var out []agent.Target
 	for _, c := range p.Containers {
 		r := filepath.Join(v.Dir, id, "containers", c.Name)
+		layers := map[string]string{"upper": r}
+		if _, err := os.Stat(r); errors.Is(err, fs.ErrNotExist) {
+			// A root this VM's memory does not hold yet (a boot, or the restore of another VM's snapshot) starts as
+			// the snapshot left the container: from the layer its guest saved, as guest/initd restores it, else empty.
+			if err := os.MkdirAll(r, 0o755); err != nil {
+				return nil, fmt.Errorf("fakeguest: %w", err)
+			}
+			if _, err := layer.Restore(root, c.Name, layers); err != nil {
+				return nil, fmt.Errorf("fakeguest: %w", err)
+			}
+		}
 		if err := os.MkdirAll(filepath.Join(r, "workspace"), 0o755); err != nil {
 			return nil, fmt.Errorf("fakeguest: %w", err)
 		}
-		out = append(out, &agent.Local{ContainerName: c.Name, Root: r, Dir: "/workspace", Volumes: c.Mounts(vols), Shim: shim})
+		out = append(out, &agent.Local{ContainerName: c.Name, Root: r, Dir: "/workspace", Volumes: c.Mounts(vols), LayerDirs: layers, Shim: shim})
 	}
 	return out, nil
 }
@@ -198,6 +211,10 @@ func (v *VMM) start(id string) error {
 	// The container is a host directory: nothing sits between it and the share, so Sync has nothing to flush, and a
 	// syncfs(2) of the host's disk on every snapshot would stall every other test's fsyncs.
 	g.SyncFS = func(*os.File) error { return nil }
+	if _, err := initd.ReadPlan(initd.Layout{ShareDir: root}); err == nil {
+		// As herd-guest does in a VM: Sync saves each container's root into the share, where the bundle finds it.
+		g.LayerShare = root
+	}
 	if v.SyncFS != nil {
 		g.SyncFS = v.SyncFS
 	}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/everdict/herd/guest/layer"
 	"github.com/everdict/herd/guest/oci"
 )
 
@@ -51,6 +52,14 @@ type Booted struct {
 	Process *oci.Process
 	// Watch follows the container's main process (nil if the runtime gave none).
 	Watch *oci.Watch
+	// Layers are the container's writable directories by their names in its layer archive (Layers).
+	Layers map[string]string
+}
+
+// Layers are a container's writable directories under its bundle dir, by their names in its layer archive (package
+// layer): the overlay's upper and the directory bound at /tmp.
+func Layers(dir string) map[string]string {
+	return map[string]string{"upper": filepath.Join(dir, "upper"), "tmp": filepath.Join(dir, "tmp")}
 }
 
 // Pseudo mounts the guest's own pseudo filesystems.
@@ -167,6 +176,13 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	if err := os.Chmod(tmp, 0o777|os.ModeSticky); err != nil {
 		return Booted{}, fmt.Errorf("initd: %w", err)
 	}
+	// A cold boot from a snapshot puts the container's writable layer back before the overlay is mounted over it.
+	layers := Layers(dir)
+	if ok, err := layer.Restore(l.ShareDir, c.Name, layers); err != nil {
+		return Booted{}, fmt.Errorf("initd: container %q: %w", c.Name, err)
+	} else if ok {
+		log.Printf("herd-guest: container %s: writable layer restored from the snapshot", c.Name)
+	}
 	const msRdonly = 0x1
 	if err := m.Mount(c.Image.Device, lower, c.Image.FSType, msRdonly, ""); err != nil {
 		return Booted{}, fmt.Errorf("initd: container %q: mount image %s: %w", c.Name, c.Image.Device, err)
@@ -209,7 +225,7 @@ func prepare(m Mounter, l Layout, c Container, vols map[string]string, n *Networ
 	if _, ok := mounted["/tmp"]; !ok {
 		mounted["/tmp"] = tmp
 	}
-	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user, Process: &spec.Process}, nil
+	return Booted{Name: c.Name, Rootfs: rootfs, Workdir: c.Workdir, Bundle: dir, Volumes: mounted, User: user, Process: &spec.Process, Layers: layers}, nil
 }
 
 // Mounts maps each of c's volume mount paths to the volume's directory in vols (from Volumes): every container that
@@ -267,7 +283,7 @@ func Boot(ctx context.Context, m Mounter, nl Netlinker, rt oci.Runtime, l Layout
 
 // Target is the started container as herd-guest's API serves it, with its volumes where the container sees them.
 func (b Booted) Target(rt oci.Runtime) *oci.Target {
-	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes, User: b.User, Process: b.Process, Watch: b.Watch}
+	return &oci.Target{ContainerName: b.Name, RootfsDir: b.Rootfs, Dir: b.Workdir, Runtime: rt, Volumes: b.Volumes, User: b.User, Process: b.Process, Watch: b.Watch, LayerDirs: b.Layers}
 }
 
 // BootErrorPath is where herd-guest leaves, relative to the share, why its boot failed, before it ends the VM: the

@@ -42,6 +42,14 @@ type VolumeTarget interface {
 	VolumeDirs() map[string]string
 }
 
+// LayerTarget is a Target whose writable layer lives in the guest's memory (a container's overlay upper and its /tmp):
+// Sync saves it into the share for the snapshot that follows (package layer).
+type LayerTarget interface {
+	Target
+	// Layers maps each layer's name in the archive to its directory in the guest; none: nothing to save.
+	Layers() map[string]string
+}
+
 // Local is a Target whose processes share the guest's namespaces; its "container" is a directory.
 type Local struct {
 	ContainerName string
@@ -49,6 +57,8 @@ type Local struct {
 	Dir           string
 	// Volumes, if set, are VolumeDirs: mount path in the container → directory.
 	Volumes map[string]string
+	// LayerDirs, if set, are Layers: archive name → directory.
+	LayerDirs map[string]string
 	// Shim is the command that runs the shim; the record directory is appended. Default: this executable with the
 	// argument "shim".
 	Shim []string
@@ -59,6 +69,8 @@ func (l *Local) Rootfs() string  { return l.Root }
 func (l *Local) Workdir() string { return l.Dir }
 
 func (l *Local) VolumeDirs() map[string]string { return l.Volumes }
+
+func (l *Local) Layers() map[string]string { return l.LayerDirs }
 
 // ProcessPath maps a path in the container to the path its processes see: for a local target, the same path under
 // Root, since nothing changes their root.

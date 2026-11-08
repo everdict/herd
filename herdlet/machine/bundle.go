@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/everdict/herd/guest/initd"
+	"github.com/everdict/herd/guest/layer"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/vmm"
 )
@@ -19,14 +20,17 @@ import (
 // A bundle is the snapshot object a herdlet writes to the snapshot store (ADR A-19): one tar holding first
 // bundleManifest (the VMM's snapshot record, the template with its image references and container spec) and then
 // then, for a MEMORY snapshot of a VMM that carries its snapshots (vmm.SnapshotCarrier), the VMM's snapshot files
-// under memory/<name> (Manifest.Memory), and the volume tree under volumes/<name>/. A VOLUMES bundle is everything a
-// move needs; a MEMORY bundle with its memory files is everything a restore on any host of its family needs (ADR
-// A-28). A MEMORY bundle without them (version 1, or a VMM that is no carrier) restores only where they were written.
+// under memory/<name> (Manifest.Memory), the volume tree under volumes/<name>/ and, from version 3, each container's
+// writable layer as its guest saved it under rootfs/<container>.tar (package layer), which a cold boot puts back. A
+// VOLUMES bundle is everything a move needs; a MEMORY bundle with its memory files is everything a restore on any
+// host of its family needs (ADR A-28). A MEMORY bundle without them (version 1, or a VMM that is no carrier) restores
+// only where they were written.
 const (
 	bundleManifest = "herd-bundle.json"
 	bundleMemory   = "memory"
 	bundleVolumes  = "volumes"
-	bundleVersion  = 2
+	bundleRootfs   = "rootfs"
+	bundleVersion  = 3
 )
 
 // Manifest is the bundle's first entry.
@@ -133,7 +137,47 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 			return fmt.Errorf("machine: bundle: volume %q: %w", v, err)
 		}
 	}
+	if err := writeLayers(tw, share); err != nil {
+		return fmt.Errorf("machine: bundle: %w", err)
+	}
 	return tw.Close()
+}
+
+// writeLayers writes each container's layer archive the guest saved in the share (layer.Dir, at its Sync before the
+// snapshot) as rootfs/<container>.tar. A share without them (a guest from before herd carried layers) writes none.
+func writeLayers(tw *tar.Writer, share string) error {
+	ents, err := os.ReadDir(filepath.Join(share, layer.Dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), layer.Ext) {
+			continue
+		}
+		f, err := os.Open(filepath.Join(share, layer.Dir, e.Name()))
+		if err != nil {
+			return err
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		h := &tar.Header{Name: bundleRootfs + "/" + e.Name(), Mode: 0o600, Size: fi.Size(), ModTime: fi.ModTime(), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
+		if err := tw.WriteHeader(h); err != nil {
+			f.Close()
+			return err
+		}
+		_, err = io.CopyN(tw, f, h.Size)
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("layer %s: %w", e.Name(), err)
+		}
+	}
+	return nil
 }
 
 // readManifest reads the bundle's first entry.
@@ -170,6 +214,12 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("machine: bundle: %w", err)
+		}
+		if name, ok := strings.CutPrefix(h.Name, bundleRootfs+"/"); ok {
+			if err := extractLayer(tr, root, name, h); err != nil {
+				return err
+			}
+			continue
 		}
 		rel, ok := strings.CutPrefix(h.Name, bundleVolumes+"/")
 		if !ok {
@@ -218,6 +268,29 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 			_ = root.Chtimes(rel, h.ModTime, h.ModTime)
 		}
 	}
+}
+
+// extractLayer writes a container's layer archive into the share at layer.Dir/<name>, where the guest's cold boot
+// reads it (layer.Restore); a MEMORY restore that runs on from the memory leaves it unread.
+func extractLayer(tr *tar.Reader, root *os.Root, name string, h *tar.Header) error {
+	if h.Typeflag != tar.TypeReg || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, layer.Ext) || name == layer.Ext {
+		return fmt.Errorf("%w: bundle entry %q is no container's layer archive", ErrOutsideShare, h.Name)
+	}
+	if err := root.MkdirAll(layer.Dir, 0o755); err != nil {
+		return wrapEscape(h.Name, err)
+	}
+	f, err := root.OpenFile(layer.Dir+"/"+name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return wrapEscape(h.Name, err)
+	}
+	if _, err := io.CopyN(f, tr, h.Size); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
+	}
+	return nil
 }
 
 func wrapEscape(name string, err error) error {

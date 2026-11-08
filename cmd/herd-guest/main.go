@@ -133,6 +133,7 @@ func serve(args []string) error {
 	defer g.Close()
 	if *local == "" {
 		g.SyncDirs = []string{initd.DefaultLayout.ShareDir}
+		g.LayerShare = initd.DefaultLayout.ShareDir
 	} else {
 		// A local target is no VM: its clock is the host's already, and the host's is not herd-guest's to set.
 		g.SetTime = func(time.Time) (time.Time, error) { return time.Now(), nil }
