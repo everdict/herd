@@ -10,7 +10,9 @@
 # BUSYBOX and CRUN (or BUSYBOX_<arch> and CRUN_<arch>, which win) are static binaries for the target architecture.
 # herd-guest is built from this checkout (CGO_ENABLED=0 GOOS=linux GOARCH=<arch>) unless HERD_GUEST(_<arch>) names
 # a binary. Needs git, make, flex, bison, bc, libelf headers and a C toolchain for the target (CROSS_COMPILE_<arch>
-# or CROSS_COMPILE when building for the other architecture).
+# or CROSS_COMPILE when building for the other architecture); --initrd needs only git, go and gzip. Two builds of one
+# revision are the same bytes, and so is a later revision that changes nothing the guest is built from (ADR A-44;
+# scripts/guest-repro.sh checks it).
 # Output: <out-dir>/herd-guest-<arch>/{kernel,initrd.img,config}.
 set -eu
 
