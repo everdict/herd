@@ -8,7 +8,8 @@
 //	herd-egress nft -id a1b2c3 -tap herd-a1b2c3 -host 10.88.0.1/30 -vm 10.88.0.2
 //
 // The bindings file is a JSON list of {"space","name","uid","source"} (source: the VM's TAP address); herdlet writes
-// it, and herd-egress re-reads it every -interval. macOS hosts serve the same gateway behind a userspace stack per VM
+// it, and herd-egress re-reads it when it changes (and every -interval), acknowledging each load in <bindings>.loaded,
+// which herdlet waits on before a VM it binds may send (ADR A-43). macOS hosts serve the same gateway behind a userspace stack per VM
 // (egress.Stack, egress/gvstack), which a macOS herdlet runs in-process (ADR A-21).
 package main
 
