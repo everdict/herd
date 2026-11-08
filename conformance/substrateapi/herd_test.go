@@ -303,7 +303,7 @@ func TestHerdConformanceCommand(t *testing.T) {
 	}
 	args := []string{"conformance", "--target", "herd-all-in-one-cli", "--endpoint", addrs.API, "--token-file", tf,
 		"--atespace", space, "--template", "agent", "--router", addrs.Router, "--probe", "env-exec",
-		"--volume-path", "/work/conformance.txt", "--expect-fidelity", "MEMORY", "--wait", "20s"}
+		"--volume-path", "/work/conformance.txt", "--rootfs-path", "/root/conformance-rootfs.txt", "--expect-fidelity", "MEMORY", "--wait", "20s"}
 	if code := deploy.Main("herd", args); code != 0 {
 		t.Fatalf("herd conformance exited %d", code)
 	}
