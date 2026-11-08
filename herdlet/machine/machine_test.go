@@ -194,7 +194,8 @@ func bundleWith(t *testing.T, entries ...imagetest.File) []byte {
 }
 
 // TestVolumesNeverLeaveTheShare is the volumes-in-share counterexample: a bundle whose volume tree escapes the share
-// through "..", through a symlink it planted, or by making the volume itself a symlink, is refused, nothing is
+// through "..", through a symlink it planted, or by making the volume itself a symlink, or whose layer archive is
+// no plain file of the share's layer directory (DEFAUL-1619), is refused, nothing is
 // written outside the share, and no VM is started.
 func TestVolumesNeverLeaveTheShare(t *testing.T) {
 	outside := t.TempDir()
@@ -203,6 +204,8 @@ func TestVolumesNeverLeaveTheShare(t *testing.T) {
 		"symlink-parent": {{Name: "volumes/data/", Type: tar.TypeDir}, {Name: "volumes/data/out", Type: tar.TypeSymlink, Link: outside},
 			{Name: "volumes/data/out/pwned", Body: "x"}},
 		"volume-is-symlink": {{Name: "volumes/data", Type: tar.TypeSymlink, Link: outside}},
+		"layer-dotdot":      {{Name: "rootfs/../../../pwned.tar", Body: "x"}},
+		"layer-not-a-file":  {{Name: "rootfs/main.tar", Type: tar.TypeSymlink, Link: outside}},
 	}
 	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	ateenv "github.com/everdict/herd/api/ateenv/v1alpha"
+	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/guest/agent"
 	"github.com/everdict/herd/guest/initd"
 	"github.com/everdict/herd/guest/oci"
@@ -83,20 +84,7 @@ func TestGuestBootsTheHerdletShare(t *testing.T) {
 // mount, an empty directory for each image) and serves its API on the targets herd-guest would serve.
 func guestOn(t *testing.T, m *Machines, id string) *agent.Guest {
 	t.Helper()
-	l := initd.Layout{ShareDir: m.ShareDir(id), RunDir: t.TempDir(), GuestBinary: "/init"}
-	_, booted, err := initd.Boot(context.Background(), noMounts{}, nil, &runs{}, l, ShareTag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var targets []agent.Target
-	for _, b := range booted {
-		targets = append(targets, b.Target(&runs{}))
-	}
-	g, err := agent.New(targets...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(g.Close)
+	g, _ := bootGuest(t, m, id)
 	return g
 }
 
@@ -165,4 +153,77 @@ func TestGuestFileWritesReachForks(t *testing.T) {
 			t.Errorf("fork %s reads %q, %v after both wrote; want its own write", id, got, err)
 		}
 	}
+}
+
+// TestRootfsWritesReachForks (DEFAUL-1619) is the fork of a running actor with herd-guest's boot in the loop: the
+// parent writes /root/marker into its container's writable layer (the overlay's upper, which noMounts leaves as a
+// directory of its own) and /tmp/walk-marker, its guest syncs as herdlet's flush has it do, and a tag is taken
+// without stopping it. Each fork's guest then boots cold on the share its restore laid out, as one from a VOLUMES
+// bundle does, and one from a MEMORY bundle beside its running parent, whose link it cannot have: it reads the files
+// only if the bundle carried the layer.
+func TestRootfsWritesReachForks(t *testing.T) {
+	for _, f := range []vmm.Fidelity{vmm.FidelityVolumes, vmm.FidelityMemory} {
+		t.Run(f.String(), func(t *testing.T) {
+			ctx := context.Background()
+			h := newHost(t, ubuntuCaps, registry())
+			if err := h.m.Boot(ctx, "parent", template()); err != nil {
+				t.Fatal(err)
+			}
+			g, booted := bootGuest(t, h.m, "parent")
+			upper := booted[0].Layers["upper"]
+			if err := os.MkdirAll(filepath.Join(upper, "root"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(upper, "root", "marker"), []byte("parent"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(booted[0].Layers["tmp"], "walk-marker"), []byte("tmp"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			g.LayerShare = h.m.ShareDir("parent")
+			g.SyncFS = func(*os.File) error { return nil }
+			if _, err := g.Sync(ctx, &herdext.SyncRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			var bundle bytes.Buffer
+			if _, err := h.m.Snapshot(ctx, "parent", f, false, &bundle); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{"fork-1", "fork-2"} {
+				if err := h.m.Restore(ctx, id, bytes.NewReader(bundle.Bytes())); err != nil {
+					t.Fatalf("Restore %s: %v", id, err)
+				}
+				_, fb := bootGuest(t, h.m, id)
+				for p, want := range map[string]string{
+					filepath.Join(fb[0].Layers["upper"], "root", "marker"): "parent",
+					filepath.Join(fb[0].Layers["tmp"], "walk-marker"):      "tmp",
+				} {
+					if b, err := os.ReadFile(p); err != nil || string(b) != want {
+						t.Errorf("%s from a %v bundle of the running parent: %s holds %q, %v; want %q", id, f, p, b, err, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// bootGuest runs herd-guest's boot on id's share, as its VM would after a boot or a cold restore, and serves its
+// containers.
+func bootGuest(t *testing.T, m *Machines, id string) (*agent.Guest, []initd.Booted) {
+	t.Helper()
+	l := initd.Layout{ShareDir: m.ShareDir(id), RunDir: t.TempDir(), GuestBinary: "/init"}
+	_, booted, err := initd.Boot(context.Background(), noMounts{}, nil, &runs{}, l, ShareTag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets []agent.Target
+	for _, b := range booted {
+		targets = append(targets, b.Target(&runs{}))
+	}
+	g, err := agent.New(targets...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.Close)
+	return g, booted
 }

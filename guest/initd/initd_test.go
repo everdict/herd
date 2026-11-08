@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/everdict/herd/guest/initd"
+	"github.com/everdict/herd/guest/layer"
 	"github.com/everdict/herd/guest/oci"
 )
 
@@ -201,5 +202,64 @@ func TestPlanValidation(t *testing.T) {
 		if _, err := initd.ParsePlan([]byte(plan)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// layerAtOverlay records, when each container's overlay is mounted, whether its upper already holds root/marker.
+type layerAtOverlay struct {
+	fakeMounter
+	held map[string]bool
+}
+
+func (f *layerAtOverlay) Mount(source, target, fstype string, flags uintptr, data string) error {
+	if fstype == "overlay" {
+		_, err := os.Stat(filepath.Join(filepath.Dir(target), "upper", "root", "marker"))
+		f.held[filepath.Base(filepath.Dir(target))] = err == nil
+	}
+	return f.fakeMounter.Mount(source, target, fstype, flags, data)
+}
+
+// TestBootRestoresTheWritableLayerBeforeTheOverlay (DEFAUL-1619): a share holding a container's layer archive (a
+// cold boot from a snapshot) has that container's upper and /tmp filled from it before its overlay is mounted, and
+// the target serves those directories as its layers, so the next snapshot saves them again. A container with no
+// archive starts empty.
+func TestBootRestoresTheWritableLayerBeforeTheOverlay(t *testing.T) {
+	l := layout(t)
+	upper, tmp := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(upper, "root"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upper, "root", "marker"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "walk-marker"), []byte("tmp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := layer.Save(l.ShareDir, "main", map[string]string{"upper": upper, "tmp": tmp}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.ShareDir, initd.PlanPath), []byte(planJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := &layerAtOverlay{held: map[string]bool{}}
+	rt := &fakeRuntime{t: t, share: l.ShareDir, run: l.RunDir}
+	rt.net = &fakeNet{events: &rt.events}
+	_, booted, err := initd.Boot(context.Background(), m, rt.net, rt, l, "herd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.held["main"] || m.held["sidecar"] {
+		t.Errorf("upper held root/marker at the overlay mount: %v; want main only", m.held)
+	}
+	dir := filepath.Join(l.RunDir, "containers", "main")
+	if b, err := os.ReadFile(filepath.Join(dir, "tmp", "walk-marker")); err != nil || string(b) != "tmp" {
+		t.Errorf("main's /tmp holds %q, %v; want the snapshot's", b, err)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "tmp")); err != nil || fi.Mode()&os.ModeSticky == 0 || fi.Mode().Perm() != 0o777 {
+		t.Errorf("main's /tmp after the restore: %v, %v; want sticky 0777", fi.Mode(), err)
+	}
+	got := booted[0].Target(rt).Layers()
+	if got["upper"] != filepath.Join(dir, "upper") || got["tmp"] != filepath.Join(dir, "tmp") || len(got) != 2 {
+		t.Errorf("main's target layers = %v", got)
 	}
 }
