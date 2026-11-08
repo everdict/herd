@@ -30,6 +30,7 @@ type Options struct {
 	Probe           string
 	ExpectFidelity  string
 	VolumePath      string
+	RootfsPath      string
 	MoveFrom        string
 	MoveTo          string
 	Prefix          string
@@ -70,6 +71,7 @@ func (o *Options) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&o.Probe, "probe", "http-get:/", "request sent through the router: http-get:<path>, sandbox-process or env-exec")
 	fs.StringVar(&o.ExpectFidelity, "expect-fidelity", "", "fidelity the target declared for the template's suspends: VOLUMES, ROOTFS or MEMORY (default: any up to the template's preferred_fidelity)")
 	fs.StringVar(&o.VolumePath, "volume-path", "", "a file path inside one of the template's volumes; with a probe that writes files, suspend, fork and move check the volume")
+	fs.StringVar(&o.RootfsPath, "rootfs-path", "", "fork-keeps-rootfs: a file path in the container's own filesystem, outside its volumes and /tmp (e.g. /root/conformance-rootfs.txt); with a probe that writes files, an actor from a tag of a running actor must read it")
 	fs.StringVar(&o.MoveFrom, "move-from", "", "worker selector k=v,... of the pool the move case starts on")
 	fs.StringVar(&o.MoveTo, "move-to", "", "worker selector k=v,... of the pool the move case resumes on")
 	fs.StringVar(&o.Prefix, "prefix", "", "prefix of every name the suite creates (default: cf-<random>)")
@@ -139,7 +141,7 @@ func (o *Options) Config() (Config, error) {
 	cfg := Config{Target: o.Target, Control: Endpoint{Addr: o.Endpoint, TLS: o.TLS, CAFile: o.CAFile, ServerName: o.ServerName}, Token: tok,
 		Router: Router{Endpoint: Endpoint{Addr: o.Router, TLS: o.RouterTLS, CAFile: o.CAFile, ServerName: o.RouterName,
 			CertFile: o.RouterCert, KeyFile: o.RouterKey}, Token: rtok},
-		Atespace: o.Atespace, Template: o.Template, Probe: p, VolumePath: o.VolumePath, Prefix: o.Prefix, Wait: o.Wait}
+		Atespace: o.Atespace, Template: o.Template, Probe: p, VolumePath: o.VolumePath, RootfsPath: o.RootfsPath, Prefix: o.Prefix, Wait: o.Wait}
 	if o.ExpectFidelity != "" {
 		f, ok := ateapi.SnapshotFidelity_value["SNAPSHOT_FIDELITY_"+strings.ToUpper(o.ExpectFidelity)]
 		if !ok || f == 0 {

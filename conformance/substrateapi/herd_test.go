@@ -164,7 +164,7 @@ func optional(cfg *substrateapi.Config, e *substrateapi.Echo, echoURL, listedURL
 func suiteConfig(target, api, router, tok string) substrateapi.Config {
 	return substrateapi.Config{Target: target, Control: substrateapi.Endpoint{Addr: api},
 		Router: substrateapi.Router{Endpoint: substrateapi.Endpoint{Addr: router}, Token: tok}, Token: tok,
-		Atespace: space, Template: "agent", Probe: substrateapi.EnvExec{}, VolumePath: "/work/conformance.txt",
+		Atespace: space, Template: "agent", Probe: substrateapi.EnvExec{}, VolumePath: "/work/conformance.txt", RootfsPath: "/root/conformance-rootfs.txt",
 		Wait: 20 * time.Second, Poll: 20 * time.Millisecond}
 }
 

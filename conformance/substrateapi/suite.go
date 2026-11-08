@@ -41,6 +41,10 @@ type Config struct {
 	// VolumePath is a file path inside one of the template's volumes. With a probe that can write files, the
 	// suspend, fork and move cases check that the volume carries what was written.
 	VolumePath string
+	// RootfsPath is a file path in the container's own filesystem, outside every volume and /tmp (e.g. /root/...).
+	// With a probe that writes files, fork-keeps-rootfs writes it in a running actor, tags that actor and reads it
+	// back from an actor made from the tag.
+	RootfsPath string
 	// MoveFrom and MoveTo are worker selectors of two different worker pools; with both set, the move case
 	// creates an actor on MoveFrom, suspends it and resumes it on MoveTo.
 	MoveFrom, MoveTo map[string]string
@@ -111,7 +115,7 @@ type Report struct {
 var Cases = []string{
 	"create-from-template", "resume", "request", "suspend", "resume-on-request", "fork-via-tag", "delete-verified",
 	"refuse-stale-version", "suspend-async", "refuse-unknown-actor", "list-workers", "golden-template", "list-tags",
-	"list-templates", "delete-template", "move",
+	"list-templates", "delete-template", "fork-keeps-rootfs", "move",
 	"egress-walk", "credential-header", "long-stream", "two-containers",
 }
 
@@ -313,6 +317,7 @@ func Run(ctx context.Context, cfg Config) Report {
 		{"list-tags", r.listTags},
 		{"list-templates", r.listTemplates},
 		{"delete-template", r.deleteTemplate},
+		{"fork-keeps-rootfs", r.forkKeepsRootfs},
 		{"move", r.move},
 		{"egress-walk", r.egressWalk},
 		{"credential-header", r.credentialHeader},
@@ -709,6 +714,66 @@ func (r *run) fork(ctx context.Context) (string, error) {
 		}
 	}
 	return fmt.Sprintf("tag of a %v snapshot; 2 forks ran independently; parent unaffected", ps.GetFidelity()), nil
+}
+
+// forkKeepsRootfs: a file written in a running actor's own filesystem (RootfsPath, outside its volumes and /tmp) is
+// read by an actor made from a tag of that running actor (DEFAUL-1619). A tag below MEMORY restores by a cold boot,
+// so the file is there only if the tag carried the container's writable layer: Substrate's ROOTFS.
+func (r *run) forkKeepsRootfs(ctx context.Context) (string, error) {
+	fp, ok := r.cfg.Probe.(FileProbe)
+	if !ok || r.cfg.RootfsPath == "" {
+		return "", notConfigured{"a probe that writes files and a rootfs path (--rootfs-path)"}
+	}
+	parent, tagName, fork := r.name("rootfs"), r.name("rootfs-tag"), r.name("rootfs-fork")
+	if _, err := r.newActor(ctx, parent, nil, ""); err != nil {
+		return "", err
+	}
+	if _, err := r.resumeRunning(ctx, parent); err != nil {
+		return "", err
+	}
+	if err := fp.WriteFile(ctx, r.cfg.Router, r.target(parent), r.cfg.RootfsPath, "rootfs-parent"); err != nil {
+		return "", fmt.Errorf("writing the parent's %s: %w", r.cfg.RootfsPath, err)
+	}
+	if _, err := r.c.CreateTag(ctx, &ateapi.Tag{
+		Metadata: &ateapi.ResourceMetadata{Atespace: r.cfg.Atespace, Name: tagName},
+		Scope:    ateapi.TagScope_TAG_SCOPE_ATESPACE, SourceActor: ref(r.cfg.Atespace, parent),
+	}); err != nil {
+		return "", gate("CreateTag of a running actor", err)
+	}
+	r.tags = append(r.tags, tagName)
+	if err := r.waitTag(ctx, tagName); err != nil {
+		return "", err
+	}
+	tag, err := r.c.GetTag(ctx, r.cfg.Atespace, tagName)
+	if err != nil {
+		return "", fmt.Errorf("GetTag %s: %w", tagName, err)
+	}
+	f := tag.GetStatus().GetSnapshot().GetFidelity()
+	if _, err := r.newActor(ctx, fork, nil, tagName); err != nil {
+		return "", err
+	}
+	if _, err := r.resumeRunning(ctx, fork); err != nil {
+		return "", err
+	}
+	if got, err := fp.ReadFile(ctx, r.cfg.Router, r.target(fork), r.cfg.RootfsPath); err != nil || got != "rootfs-parent" {
+		return "", fmt.Errorf("the actor from a tag at %v of the running parent reads %q, %v from %s; want the parent's %q", f, got, err, r.cfg.RootfsPath, "rootfs-parent")
+	}
+	if got, err := fp.ReadFile(ctx, r.cfg.Router, r.target(parent), r.cfg.RootfsPath); err != nil || got != "rootfs-parent" {
+		return "", fmt.Errorf("the parent reads %q, %v from %s after its tag; want %q", got, err, r.cfg.RootfsPath, "rootfs-parent")
+	}
+	for _, n := range []string{fork, parent} {
+		if _, err := r.c.DeleteActor(ctx, r.cfg.Atespace, n); err != nil {
+			return "", fmt.Errorf("DeleteActor %s: %w", n, err)
+		}
+		if err := r.waitGone(ctx, n); err != nil {
+			return "", err
+		}
+	}
+	if _, err := r.c.DeleteTag(ctx, r.cfg.Atespace, tagName); err != nil {
+		return "", fmt.Errorf("DeleteTag: %w", err)
+	}
+	r.tags = nil
+	return fmt.Sprintf("tag of the RUNNING parent at %v; the actor from it reads the parent's %s", f, r.cfg.RootfsPath), nil
 }
 
 func (r *run) running(ctx context.Context, name, when string) error {
