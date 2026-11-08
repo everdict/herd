@@ -115,8 +115,12 @@ var raceActor = tapnet.Binding{Space: "s", Name: "box", UID: "u1", Source: "127.
 
 // TestBindingWrittenJustBeforeFirstFlowIsServed (bound-before-first-flow, DEFAUL-1622): herdlet writes a restored VM's
 // binding and the guest connects at once, long before herd-egress's next -interval re-read. The flow is the actor's:
-// herd-egress re-reads the bindings before it refuses an address it does not know.
+// herd-egress re-reads the bindings before it refuses an address it does not know. Its watch of the file is an hour
+// here too, so only that re-read can serve the flow.
 func TestBindingWrittenJustBeforeFirstFlowIsServed(t *testing.T) {
+	poll := bindingsPoll
+	t.Cleanup(func() { bindingsPoll = poll }) // after herd-egress stopped
+	bindingsPoll = time.Hour
 	e := startEgress(t)
 	if err := os.WriteFile(e.bindings, []byte(`[{"space":"s","name":"box","uid":"u1","source":"127.0.0.1"}]`), 0o644); err != nil {
 		t.Fatal(err)

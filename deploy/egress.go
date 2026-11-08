@@ -249,8 +249,9 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 			}
 		}
 	}()
+	poll := bindingsPoll
 	go func() {
-		t := time.NewTicker(bindingsPoll)
+		t := time.NewTicker(poll)
 		defer t.Stop()
 		for {
 			select {
