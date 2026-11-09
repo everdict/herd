@@ -45,6 +45,10 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 	if sub, ok := ctx.Value(herdletKey{}).(string); ok && sub != r.Worker {
 		return status.Errorf(codes.PermissionDenied, "herdlet credential %q may not register worker %q", sub, r.Worker)
 	}
+	if want := s.cfg.SnapshotStore; want != "" && r.SnapshotStore != "" && r.SnapshotStore != want {
+		return status.Errorf(codes.FailedPrecondition, "herdlet %s keeps snapshots in %s, herd-api in %s, where it looks for them: "+
+			"the herdlet's join grant names another snapshot store than herd-api uses now; join that host again", r.Worker, r.SnapshotStore, want)
+	}
 	data, err := proto.Marshal(workerCapabilities(r))
 	if err != nil {
 		return err

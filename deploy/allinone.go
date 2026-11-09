@@ -160,6 +160,13 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		// The herdlet uses the store its join hands it, as every other host does.
 		h.Snapshots = ""
 	}
+	// A grant an earlier run left names the store herd-api handed out then; one that names another than now (-s3
+	// added, dropped or changed) is joined again (PLT-382).
+	granted, err := api.grantedStore()
+	if err != nil {
+		return err
+	}
+	h.granted = &granted
 	if err := h.preflight(); err != nil {
 		return err
 	}

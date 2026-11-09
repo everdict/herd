@@ -74,6 +74,9 @@ type Config struct {
 	// GoldenRebuilds is how many templates' golden snapshots Reconcile rebuilds at a time because the guest that built
 	// them no longer runs on any connected worker (DEFAUL-1606; default DefaultGoldenRebuilds, negative: none).
 	GoldenRebuilds int
+	// SnapshotStore names Snapshots as herdlets declare theirs (link.Register.SnapshotStore): a herdlet that declares
+	// another store is refused its link, since herd-api would find none of its snapshots (PLT-382). Empty: no check.
+	SnapshotStore string
 }
 
 // Server is herd-api.

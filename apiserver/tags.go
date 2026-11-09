@@ -66,6 +66,12 @@ func (s *Server) CreateTag(ctx context.Context, req *ateapi.CreateTagRequest) (*
 
 // createTag is CreateTag once the caller is authorized; scope is the tag's.
 func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.TagScope) (*ateapi.Tag, error) {
+	return s.createTagAt(ctx, in, scope, "")
+}
+
+// createTagAt is createTag with the key of the snapshot object a running source actor's snapshot is stored under
+// ("": a new one).
+func (s *Server) createTagAt(ctx context.Context, in *ateapi.Tag, scope ateapi.TagScope, key string) (*ateapi.Tag, error) {
 	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
 	if name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "metadata.name is required")
@@ -88,11 +94,13 @@ func (s *Server) createTag(ctx context.Context, in *ateapi.Tag, scope ateapi.Tag
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	nonce, err := store.NewUID()
-	if err != nil {
-		return nil, toStatus(err)
+	if key == "" {
+		nonce, err := store.NewUID()
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		key = snapshotKey("tags", space, name, nonce, 1)
 	}
-	key := snapshotKey("tags", space, name, nonce, 1)
 	var snap *link.SnapshotRef
 	var guest, how string
 	var size int64
