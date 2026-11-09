@@ -190,20 +190,21 @@ func KmsgLog(pid int) []string {
 	return kmsgLog("/dev/kmsg", pid)
 }
 
-// kmsgLog is KmsgLog over the device at path.
+// kmsgLog is KmsgLog over the device at path. It reads through the raw descriptor: an *os.File would register it with
+// Go's poller, and a poller read parks at the end of the buffer instead of answering EAGAIN (PLT-368).
 func kmsgLog(path string, pid int) []string {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer syscall.Close(fd)
 	var out []string
 	buf := make([]byte, 8192)
 	needle := fmt.Sprintf("[%d]", pid)
 	pidEq := fmt.Sprintf("pid=%d ", pid)
 	for len(out) < 10000 {
-		n, err := f.Read(buf)
-		if err != nil {
+		n, err := syscall.Read(fd, buf)
+		if err != nil || n <= 0 {
 			break // EAGAIN: the end of the buffer
 		}
 		rec := string(buf[:n])
