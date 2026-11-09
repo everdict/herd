@@ -365,7 +365,7 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 		fallthrough
 	case ateapi.ActorState_ACTOR_STATE_SUSPENDED:
 		// A running golden actor is snapshotted in place at the highest fidelity its worker keeps (capped by the
-		// template's preference); a suspended one has its snapshot copied.
+		// template's preference); a suspended one has its snapshot referenced (A-45).
 		_, err := s.createTag(ctx, &ateapi.Tag{Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: t.name}, SourceActor: ref},
 			ateapi.TagScope_TAG_SCOPE_PUBLISHED)
 		switch status.Code(err) {
