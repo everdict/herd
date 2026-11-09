@@ -7,6 +7,7 @@ import (
 	"io"
 	"regexp"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -257,4 +258,83 @@ func TestFailedReferenceReadDeletesNothing(t *testing.T) {
 		t.Fatalf("DeleteTag t1: %v", err)
 	}
 	wantObject(t, e, tkey, false, "the delete of the tag, its last holder, with every record read")
+}
+
+// meetingLists is a record store whose List of every tag, once armed, waits after its read, up to a bound, for a
+// second such read, so two releases that read the tags at once both read them before either writes.
+type meetingLists struct {
+	store.Store
+	armed atomic.Bool
+	mu    sync.Mutex
+	wait  chan struct{}
+	met   atomic.Int32
+}
+
+func (m *meetingLists) List(ctx context.Context, k store.Kind, space string) ([]store.Record, error) {
+	recs, err := m.Store.List(ctx, k, space)
+	if !m.armed.Load() || k != store.KindTag || space != "" {
+		return recs, err
+	}
+	m.mu.Lock()
+	if m.wait != nil {
+		close(m.wait)
+		m.wait = nil
+		m.met.Add(1)
+		m.mu.Unlock()
+		return recs, err
+	}
+	ch := make(chan struct{})
+	m.wait = ch
+	m.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(300 * time.Millisecond):
+		m.mu.Lock()
+		if m.wait == ch {
+			m.wait = nil
+		}
+		m.mu.Unlock()
+	}
+	return recs, err
+}
+
+// TestReleasesAtOnceLeaveNoObject (DEFAUL-1610): when the last two records that name an object go at once (two tags
+// of one suspended actor, deleted together after the actor), the object goes with them: refsMu makes the second
+// release read the records only after the first has written its own. Its counterexample is a release without the
+// lock: both read the tags before either is deleted, each sees the other still naming the object, and neither
+// deletes it.
+func TestReleasesAtOnceLeaveNoObject(t *testing.T) {
+	recs := &meetingLists{Store: memstore.New()}
+	prev := conformance.NewStore
+	conformance.NewStore = func(testing.TB) store.Store { return recs }
+	defer func() { conformance.NewStore = prev }()
+	e := conformance.Start(t, conformance.HerdletSpec{Name: "h1", Slots: 2})
+	ctx := ctxT(t)
+	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
+	mkActor(t, e, "a", "tpl", nil)
+	key := suspend(t, e, "a").GetUuid()
+	timedTag(t, e, "t1", "a")
+	timedTag(t, e, "t2", "a")
+	if _, err := e.Client.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: oref(e, "a")}); err != nil {
+		t.Fatalf("DeleteActor: %v", err)
+	}
+	wantObject(t, e, key, true, "the actor's delete, with two tags naming its object")
+
+	recs.armed.Store(true)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, name := range []string{"t1", "t2"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = e.Client.DeleteTag(ctx, &ateapi.DeleteTagRequest{Tag: oref(e, name)})
+		}()
+	}
+	wg.Wait()
+	recs.armed.Store(false)
+	if errs[0] != nil || errs[1] != nil {
+		t.Fatalf("DeleteTag t1: %v; DeleteTag t2: %v", errs[0], errs[1])
+	}
+	t.Logf("the two releases' reads of the tags met %d times", recs.met.Load())
+	wantObject(t, e, key, false, "the deletes of both tags at once")
 }
