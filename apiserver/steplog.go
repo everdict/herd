@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore"
 )
 
 // step makes one herdlet call of an actor's workflow and logs it before and after, with the actor and the outcome,
@@ -51,6 +52,16 @@ func logEnded(ar *actorRec, workflow string, err error) {
 	if o := ar.st.Owed; o != nil {
 		msg += fmt.Sprintf(", %s owed: %s", o.Op, o.Reason)
 	}
+	if err != nil {
+		msg += fmt.Sprintf(" (%v)", err)
+	}
+	log.Print(msg)
+}
+
+// logMoved logs what a snapshot step moved: the object's size, the object bytes herd-api read or wrote for it
+// (snapstore.Meter) and its seconds (DEFAUL-1610), and the error it ended with, if any.
+func logMoved(what string, object int64, m *snapstore.Meter, start time.Time, err error) {
+	msg := fmt.Sprintf("herd-api: %s: object_bytes=%d bytes_moved=%d seconds=%.3f", what, object, m.Bytes(), time.Since(start).Seconds())
 	if err != nil {
 		msg += fmt.Sprintf(" (%v)", err)
 	}

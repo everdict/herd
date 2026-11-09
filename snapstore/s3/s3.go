@@ -256,6 +256,7 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 		}
 		return snapstore.Object{}, fmt.Errorf("snapstore/s3: put %s: %w", key, err)
 	}
+	snapstore.Count(ctx, obj.Size)
 	return obj, nil
 }
 
@@ -639,7 +640,7 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 		defer resp.Body.Close()
 		return nil, statusError("open", key, resp)
 	}
-	return resp.Body, nil
+	return snapstore.CountReads(ctx, resp.Body), nil
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {

@@ -118,6 +118,7 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 	if _, _, err := s.writeDurable(ctx, p+".sha256", strings.NewReader(fmt.Sprintf("%s %d\n", digest, size))); err != nil {
 		return snapstore.Object{}, fmt.Errorf("snapstore/disk: put %s digest: %w", key, err)
 	}
+	snapstore.Count(ctx, size)
 	return snapstore.Object{Key: key, Digest: digest, Size: size}, nil
 }
 
@@ -185,7 +186,7 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("snapstore/disk: open %s: %w", key, err)
 	}
-	return f, nil
+	return snapstore.CountReads(ctx, f), nil
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {

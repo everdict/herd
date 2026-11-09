@@ -9,6 +9,7 @@ import (
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/store"
 	"github.com/everdict/herd/vmm"
 	"google.golang.org/grpc/codes"
@@ -25,22 +26,26 @@ func presenceName(p string) string {
 // takeSnapshot asks the actor's herdlet for a snapshot at f under key and verifies the object in the snapshot store
 // against the digest the herdlet answered (Prove: by the store's checksum of the bytes it holds where it keeps one,
 // as the herdlet's Put checked it, else by reading them). Only a verified object comes back as done; an answer
-// without one is unknown, since a snapshot may or may not exist.
-func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity, cause link.Cause) (*link.SnapshotRef, link.Result, string) {
+// without one is unknown, since a snapshot may or may not exist. The check is logged with the object's size, the
+// bytes it moved through herd-api and its seconds; a done snapshot comes back with its object's size.
+func (s *Server) takeSnapshot(ctx context.Context, ar *actorRec, key string, f vmm.Fidelity, cause link.Cause) (*link.SnapshotRef, int64, link.Result, string) {
 	o := s.step(ctx, ar, link.Work{Op: link.OpSnapshot, VM: vmID(ar), Fidelity: f, SnapshotKey: key, Cause: cause})
 	if o.Result != link.ResultDone {
-		return nil, o.Result, o.Reason
+		return nil, 0, o.Result, o.Reason
 	}
 	if o.Snapshot == nil || o.Snapshot.Key != key {
-		return nil, link.ResultUnknown, fmt.Sprintf("herdlet answered done but named no snapshot under %q", key)
+		return nil, 0, link.ResultUnknown, fmt.Sprintf("herdlet answered done but named no snapshot under %q", key)
 	}
-	obj, err := s.cfg.Snapshots.Prove(ctx, key, o.Snapshot.Digest)
+	mctx, moved := snapstore.WithMeter(ctx)
+	start := time.Now()
+	obj, err := s.cfg.Snapshots.Prove(mctx, key, o.Snapshot.Digest)
+	logMoved(fmt.Sprintf("actor %s/%s: snapshot check of %s", ar.rec.Space, ar.rec.Name, key), obj.Size, moved, start, err)
 	if err != nil {
-		return nil, link.ResultUnknown, fmt.Sprintf("%v: %v", errNotDurable, err)
+		return nil, 0, link.ResultUnknown, fmt.Sprintf("%v: %v", errNotDurable, err)
 	}
 	r := *o.Snapshot
 	r.Digest = obj.Digest
-	return &r, link.ResultDone, ""
+	return &r, obj.Size, link.ResultDone, ""
 }
 
 // SuspendActor snapshots the actor at the fidelity its worker declared (capped by the template's preference),
@@ -125,7 +130,7 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 	}
 	gen := len(ar.actor.Status.Snapshots) + 1
 	key := snapshotKey("actors", ar.rec.Space, ar.rec.Name, ar.rec.UID, gen)
-	snap, res, reason := s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), link.CauseSuspend)
+	snap, _, res, reason := s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), link.CauseSuspend)
 	switch res {
 	case link.ResultFailed:
 		// No snapshot was taken and the VM was left running.
@@ -305,8 +310,14 @@ func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 			return err
 		}
 	}
+	if len(ar.st.Keys) > 0 {
+		// Held until the record that stops naming the keys is written (dropObject): the record's delete below, or the
+		// save of what is still owed.
+		s.refsMu.Lock()
+		defer s.refsMu.Unlock()
+	}
 	for len(ar.st.Keys) > 0 {
-		if err := s.cfg.Snapshots.Delete(ctx, ar.st.Keys[0]); err != nil {
+		if err := s.dropObject(ctx, ar.st.Keys[0], ar.rec.Key); err != nil {
 			ar.owe(owedDelete, fmt.Sprintf("snapshot %s not verified deleted: %v", ar.st.Keys[0], err), time.Now())
 			if err := s.save(ctx, ar); err != nil {
 				return err

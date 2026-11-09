@@ -83,6 +83,11 @@ type Server struct {
 	locks   sync.Map // store.Key → *sync.Mutex: one workflow per actor (or template) at a time in this process
 	bg      sync.WaitGroup
 
+	// refsMu serializes the releases of snapshot objects (dropObject) with the records that name them: it is held
+	// from a release's read of the records until the releasing record is written, and from a tag's check of the
+	// object it references until the tag is recorded (A-45).
+	refsMu sync.Mutex
+
 	// rebuildMu serializes Reconcile's template loop, which alone begins golden rebuilds and bounds how many run.
 	rebuildMu    sync.Mutex
 	goldenMu     sync.Mutex

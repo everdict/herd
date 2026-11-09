@@ -209,6 +209,16 @@ func TestFailedReferenceReadDeletesNothing(t *testing.T) {
 	wantObject(t, e, akey, true, "an actor delete whose List failed")
 	recs.fail.Store(false)
 
+	// With the records read again, the actor's owed delete converges; the tag still names the object, which stays.
+	if _, err := e.Server.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := e.Client.GetActor(ctx, &ateapi.GetActorRequest{Actor: oref(e, "a")}); status.Code(err) != codes.NotFound {
+		t.Errorf("actor a after Reconcile: %v; want its delete converged", err)
+	}
+	wantObject(t, e, akey, true, "the actor's delete, with the tag naming its object")
+
+	// The tag is the object's last holder now, unless a record that cannot be parsed names it too.
 	bad := store.Key{Kind: store.KindTag, Space: e.Space, Name: "unreadable"}
 	if _, err := recs.Create(ctx, store.Record{Key: bad, State: []byte("{not json")}); err != nil {
 		t.Fatal(err)
@@ -223,17 +233,8 @@ func TestFailedReferenceReadDeletesNothing(t *testing.T) {
 	if err := recs.Delete(ctx, bad, r.UID, r.Version); err != nil {
 		t.Fatal(err)
 	}
-
-	// With every record read, the deletes go through and the objects with their last holder.
 	if _, err := e.Client.DeleteTag(ctx, &ateapi.DeleteTagRequest{Tag: oref(e, "t1")}); err != nil {
 		t.Fatalf("DeleteTag t1: %v", err)
 	}
-	if _, err := e.Server.Reconcile(ctx); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if _, err := e.Client.GetActor(ctx, &ateapi.GetActorRequest{Actor: oref(e, "a")}); status.Code(err) != codes.NotFound {
-		t.Errorf("actor a after Reconcile: %v; want its delete converged", err)
-	}
-	wantObject(t, e, akey, false, "the actor's delete converged")
-	wantObject(t, e, tkey, false, "the tag's delete and the actor's")
+	wantObject(t, e, tkey, false, "the delete of the tag, its last holder, with every record read")
 }

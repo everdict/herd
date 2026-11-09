@@ -376,40 +376,40 @@ func Run(t *testing.T, h Harness) {
 		data := []byte(strings.Repeat("snapshot bytes ", 1000))
 		n := int64(len(data))
 		ctx, m := snapstore.WithMeter(ctxT(t))
-		o, err := s.Put(ctx, "m/1", bytes.NewReader(data))
-		if err != nil {
-			t.Fatal(err)
+		moved := func(f func() error) int64 {
+			t.Helper()
+			before := m.Bytes()
+			if err := f(); err != nil {
+				t.Fatal(err)
+			}
+			return m.Bytes() - before
 		}
-		if got := m.Bytes(); got != n {
+		var o snapstore.Object
+		// A store that keeps no checksum reads what it stored back (Put's own check), and that read is counted too.
+		if got := moved(func() (err error) { o, err = s.Put(ctx, "m/1", bytes.NewReader(data)); return err }); got != n && got != 2*n {
 			t.Errorf("a Put of %d bytes counted %d", n, got)
 		}
-		if _, err := s.Stat(ctx, "m/1"); err != nil {
-			t.Fatal(err)
+		if got := moved(func() error { _, err := s.Stat(ctx, "m/1"); return err }); got != 0 {
+			t.Errorf("a Stat counted %d bytes; it moves none", got)
 		}
-		if got := m.Bytes(); got != n {
-			t.Errorf("a Stat counted %d bytes; it moves none", got-n)
+		if got := moved(func() error {
+			rc, err := s.Open(ctx, "m/1")
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			_, err = io.Copy(io.Discard, rc)
+			return err
+		}); got != n {
+			t.Errorf("an Open read through counted %d bytes, want %d", got, n)
 		}
-		rc, err := s.Open(ctx, "m/1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = io.Copy(io.Discard, rc)
-		rc.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := m.Bytes(); got != 2*n {
-			t.Errorf("an Open read through counted %d bytes, want %d", got-n, n)
-		}
-		if _, err := s.Verify(ctx, "m/1", o.Digest); err != nil {
-			t.Fatal(err)
-		}
-		if got := m.Bytes(); got != 3*n {
-			t.Errorf("a Verify, which reads the object, counted %d bytes, want %d", got-2*n, n)
+		if got := moved(func() error { _, err := s.Verify(ctx, "m/1", o.Digest); return err }); got != n {
+			t.Errorf("a Verify, which reads the object, counted %d bytes, want %d", got, n)
 		}
 		// A call on a context without the meter counts nothing on it.
-		if got := readAll(t, s, "m/1"); !bytes.Equal(got, data) || m.Bytes() != 3*n {
-			t.Errorf("a read on another context changed the meter to %d", m.Bytes())
+		before := m.Bytes()
+		if got := readAll(t, s, "m/1"); !bytes.Equal(got, data) || m.Bytes() != before {
+			t.Errorf("a read on another context counted %d bytes on the meter", m.Bytes()-before)
 		}
 	})
 
