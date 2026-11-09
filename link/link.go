@@ -77,6 +77,10 @@ type Register struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 	Capabilities Capabilities      `json:"capabilities"`
 	Capacity     Capacity          `json:"capacity"`
+	// Instance names the herdlet process: every link one process opens carries the same, and a restarted herdlet
+	// another, so herd-api can tell a reconnect (a link blip) from a restart, which leaves none of the old VMs (ADR
+	// A-19, PLT-371). Empty: a herdlet older than PLT-371, of which nothing is concluded.
+	Instance string `json:"instance,omitempty"`
 }
 
 // Capacity is how many actors the herdlet can hold and which templates it keeps warm VMs for.
@@ -184,6 +188,8 @@ type Outcome struct {
 	Reason   string       `json:"reason,omitempty"`
 	// Code, if set, is what kind of failure a failed outcome is (Code* constants), for herd-api to answer by.
 	Code string `json:"code,omitempty"`
+	// Instance is the Register.Instance of the link the outcome came on. The Hub sets it; it is not on the wire.
+	Instance string `json:"-"`
 }
 
 // CodeUnavailable: the work failed on something outside the host that can serve again later (an image registry

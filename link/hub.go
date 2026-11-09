@@ -34,6 +34,10 @@ type Hub struct {
 	// OnExit, if set, is called with each VM exit a herdlet reports, with the worker the link registered. It must not
 	// block on work it sends to the same herdlet: the link reads nothing else until it returns.
 	OnExit func(ctx context.Context, worker string, e Exited)
+	// OnLinked, if set, is called once a herdlet's link is up: its registration is the worker's link (Instance
+	// answers it), and any earlier link of the worker has been closed, its pending calls ended unknown. It must not
+	// block: the link reads nothing until it returns.
+	OnLinked func(ctx context.Context, r Register)
 
 	mu      sync.Mutex
 	workers map[string]*conn
@@ -47,6 +51,9 @@ type conn struct {
 	mu      sync.Mutex // guards pending and done
 	pending map[string]*pending
 	done    chan struct{}
+
+	// instance is reg.Instance, which no update changes.
+	instance string
 }
 
 // pending is a call waiting for its outcome.
@@ -77,7 +84,7 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 			return err
 		}
 	}
-	c := &conn{reg: *up.Register, stream: s, pending: map[string]*pending{}, done: make(chan struct{})}
+	c := &conn{reg: *up.Register, instance: up.Register.Instance, stream: s, pending: map[string]*pending{}, done: make(chan struct{})}
 	h.mu.Lock()
 	if old, ok := h.workers[c.reg.Worker]; ok {
 		// A reconnect replaces the old link; its pending calls end unknown.
@@ -85,6 +92,9 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 	}
 	h.workers[c.reg.Worker] = c
 	h.mu.Unlock()
+	if h.OnLinked != nil {
+		h.OnLinked(ctx, *up.Register)
+	}
 	defer func() {
 		h.mu.Lock()
 		if h.workers[c.reg.Worker] == c {
@@ -193,6 +203,17 @@ func (h *Hub) Workers() []Worker {
 	return out
 }
 
+// Instance is the Register.Instance of the worker's link, and whether the worker is connected.
+func (h *Hub) Instance(worker string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.workers[worker]
+	if !ok {
+		return "", false
+	}
+	return c.instance, true
+}
+
 // Call sends w to worker and waits for its outcome. It never fails open: a worker that is not connected, a link that
 // breaks, or no answer before the deadline all come back as ResultUnknown with the reason.
 func (h *Hub) Call(ctx context.Context, worker string, w Work) Outcome {
@@ -246,6 +267,7 @@ func (h *Hub) call(ctx context.Context, worker string, w Work, dl time.Time, siz
 	for {
 		select {
 		case o := <-p.out:
+			o.Instance = c.instance
 			return o
 		case <-c.done:
 			return unknown(fmt.Sprintf("herdlet %q: link closed before it answered %s", worker, w.Op))

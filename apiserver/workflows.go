@@ -336,7 +336,8 @@ func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	return nil
 }
 
-// Reconcile retries every owed workflow step once, then takes every template's unfinished golden snapshot build one
+// Reconcile settles every actor whose VM ended with an earlier herdlet process of its worker (crashRestarted),
+// retries every owed workflow step once, then takes every template's unfinished golden snapshot build one
 // pass further, and returns how many steps and builds are still owed. Each herdlet call it makes waits up to
 // ReconcileCallTimeout.
 func (s *Server) Reconcile(ctx context.Context) (int, error) {
@@ -350,6 +351,13 @@ func (s *Server) Reconcile(ctx context.Context) (int, error) {
 		ar, err := parseActor(r)
 		if err != nil {
 			return left, err
+		}
+		if s.leftByRestart(ar) {
+			// The VM ended with an earlier herdlet process; the settle at its successor's link-up normally got here
+			// first (PLT-371).
+			if err := s.crashRestarted(ctx, r.Key); err != nil {
+				log.Printf("herd-api: actor %s/%s: its herdlet restarted, but it was not settled: %v", r.Space, r.Name, err)
+			}
 		}
 		if ar.st.Owed == nil {
 			continue

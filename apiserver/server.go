@@ -125,6 +125,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}}
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
+	cfg.Hub.OnLinked = s.herdletLinked
 	return s, nil
 }
 

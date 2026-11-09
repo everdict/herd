@@ -49,6 +49,9 @@ type actorState struct {
 	Keys []string `json:"keys,omitempty"`
 	// Golden marks a template's golden actor: herd-api made it to build the template's golden snapshot.
 	Golden bool `json:"golden,omitempty"`
+	// Instance is the herdlet process (link.Register.Instance) that answered the last start of the actor's VM done:
+	// the process that holds it. Empty: not known (a herdlet older than PLT-371), and then no restart is concluded.
+	Instance string `json:"instance,omitempty"`
 }
 
 type actorRec struct {

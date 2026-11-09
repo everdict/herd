@@ -140,6 +140,7 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 			SandboxRuntime: &ateapi.ActorSandboxRuntime{SandboxClass: SandboxClass},
 		}
 		ar.st.Owed, ar.st.Restore = nil, nil
+		ar.st.Instance = o.Instance
 		return s.save(ctx, ar)
 	case link.ResultFailed:
 		ar.st.Worker, ar.st.Owed, ar.st.Restore = "", nil, nil

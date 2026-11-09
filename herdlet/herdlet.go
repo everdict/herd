@@ -6,6 +6,8 @@ package herdlet
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +75,9 @@ type Agent struct {
 	// hypervisor exited on its own, or (with Machines) in whose share herd-guest recorded that a container ended; zero
 	// means DefaultWatch, negative never. Only a VMM that is a vmm.ExitObserver is watched for hypervisor exits.
 	Watch time.Duration
+	// Instance names this herdlet process on the link (link.Register.Instance). Empty: Run makes a random one the
+	// first time, so every link this Agent opens names the same process, and a new process names another (PLT-371).
+	Instance string
 
 	vms sync.Map // VM id → vmLock
 	// leases are the deadlines of the work in flight, by work id.
@@ -80,6 +85,8 @@ type Agent struct {
 
 	runMu   sync.Mutex
 	running map[string]bool // VM ids (as herd-api names them) of the VMs this herdlet runs for actors
+
+	instanceOnce sync.Once
 }
 
 // vmLock serializes work on one VM: a delete waits for a boot still in flight instead of racing it.
@@ -118,10 +125,18 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		defer sendMu.Unlock()
 		return st.Send(b)
 	}
+	a.instanceOnce.Do(func() {
+		if a.Instance == "" {
+			b := make([]byte, 16)
+			_, _ = rand.Read(b)
+			a.Instance = hex.EncodeToString(b)
+		}
+	})
 	reg := link.Register{
 		Worker: a.Worker, Class: a.Class, Labels: a.Labels,
 		Capabilities: a.declare(caps),
 		Capacity:     link.Capacity{Slots: a.Slots, Warm: a.Warm},
+		Instance:     a.Instance,
 	}
 	if a.Pool != nil {
 		reg.Capacity.Warm = a.Pool.Counts()
