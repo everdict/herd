@@ -87,14 +87,19 @@ func TestMemorySnapshotMovesToAnotherNodeAfterTheFirstLostIt(t *testing.T) {
 	}
 	node2.host.mu.Lock()
 	calls := slices.Clone(node2.host.calls)
+	restored := node2.host.restored
 	node2.host.mu.Unlock()
 	if !slices.Contains(calls, epRestore) || slices.Contains(calls, epBoot) {
 		t.Errorf("node-2's Cloud Hypervisor was called %v; want a vm.restore and no vm.boot", calls)
 	}
 	for f, want := range map[string]string{"memory-ranges": "mem", "state.json": "{}"} {
-		if b, err := os.ReadFile(filepath.Join(node2.snaps, snap.ID, f)); err != nil || string(b) != want {
-			t.Errorf("node-2's copy of %s: %q, %v; want node-1's %q", f, b, err, want)
+		if got := restored[f]; got != want {
+			t.Errorf("node-2's restore read %s %q; want node-1's %q", f, got, want)
 		}
+	}
+	// The actor's resume used node-2's copy up (PLT-374): the bundle in the store holds the same files.
+	if left := snapshotDirs(t, node2.snaps); len(left) != 0 {
+		t.Errorf("node-2's vm-snapshots after the actor resumed: %v", left)
 	}
 	if b, err := os.ReadFile(filepath.Join(node2.m.ShareDir("a1"), "work", "note")); err != nil || string(b) != "kept" {
 		t.Errorf("volume on node-2: %q, %v", b, err)

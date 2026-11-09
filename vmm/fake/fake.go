@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/everdict/herd/vmm"
@@ -274,3 +275,39 @@ func (f *Fake) ImportSnapshot(ctx context.Context, s vmm.Snapshot, next func() (
 	f.store.put(s)
 	return nil
 }
+
+// IDs lists the snapshots the store holds.
+func (s *Store) IDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.snaps))
+	for id := range s.snaps {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+var _ vmm.SnapshotRemover = (*Fake)(nil)
+
+// LocalSnapshots lists the snapshots in the fake's store.
+func (f *Fake) LocalSnapshots(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("fake: snapshots: %w", err)
+	}
+	return f.store.IDs(), nil
+}
+
+// RemoveSnapshot forgets the snapshot id.
+func (f *Fake) RemoveSnapshot(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("fake: remove snapshot: %w", err)
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	delete(f.store.snaps, id)
+	return nil
+}
+
+// RemoveLeftovers has nothing to remove: a fake snapshot is published whole or not at all.
+func (f *Fake) RemoveLeftovers(ctx context.Context) error { return ctx.Err() }

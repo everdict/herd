@@ -80,6 +80,8 @@ type Machines struct {
 	// reference → digest); pinMu serializes the first resolve of one.
 	pins  map[string]map[string]string
 	pinMu map[string]*sync.Mutex
+	// snaps is the VMM snapshots this host keeps: in use by a restore, being removed, taken for an actor (snaps.go).
+	snaps snapUse
 }
 
 // New returns Machines for cfg.
@@ -91,7 +93,8 @@ func New(cfg Config) (*Machines, error) {
 		return nil, fmt.Errorf("machine: %w", err)
 	}
 	return &Machines{cfg: cfg, ids: map[string]string{}, tpl: map[string]link.Template{}, links: map[string]vmLink{},
-		images: map[string]map[string]image.Rootfs{}, pins: map[string]map[string]string{}, pinMu: map[string]*sync.Mutex{}}, nil
+		images: map[string]map[string]image.Rootfs{}, pins: map[string]map[string]string{}, pinMu: map[string]*sync.Mutex{},
+		snaps: snapUse{inUse: map[string]int{}, removing: map[string]chan struct{}{}, taken: map[string]string{}}}, nil
 }
 
 // VMM is the host's hypervisor.
@@ -350,7 +353,7 @@ func (m *Machines) Boot(ctx context.Context, id string, t link.Template) error {
 // (verified; the lease stays for Restart); if writing the bundle then fails, Restart boots it again from its share.
 // A MEMORY bundle records the VM's link, which its memory keeps, and carries the VMM's snapshot files when the VMM
 // is a vmm.SnapshotCarrier.
-func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop bool, w io.Writer) (vmm.Snapshot, error) {
+func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop bool, w io.Writer) (_ vmm.Snapshot, err error) {
 	vmID := m.resolve(id)
 	m.mu.Lock()
 	t, ok := m.tpl[vmID]
@@ -374,6 +377,12 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if err != nil {
 		return vmm.Snapshot{}, err
 	}
+	defer func() {
+		if err != nil {
+			// No bundle holds it and nothing will restore from it.
+			m.dropSnapshot(ctx, snap.ID)
+		}
+	}()
 	if !stop {
 		// The VM runs on from its pause, its clock behind by the pause. Logged and not refused: the snapshot is whole,
 		// and failing it would not set the clock either.
@@ -417,6 +426,7 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if err := writeBundle(w, man, filepath.Join(m.cfg.ShareDir, vmID)); err != nil {
 		return vmm.Snapshot{}, err
 	}
+	m.taken(snap.ID, id)
 	return snap, nil
 }
 
@@ -474,11 +484,28 @@ var ErrFamily = vmm.ErrRestoreFamilyMismatch
 // taken on where this host can give it (else it cold-boots), from the snapshot files the bundle carries (vmm.SnapshotCarrier) or, for a bundle without them, from the
 // VMM's own snapshot directory. A MEMORY bundle of another family is refused before anything on this host is touched.
 func (m *Machines) Restore(ctx context.Context, id string, r io.Reader) error {
+	_, err := m.RestoreSnapshot(ctx, id, r)
+	return err
+}
+
+// RestoreSnapshot is Restore, and answers the snapshot the bundle holds (when it could read it). The actor's resume
+// from its own snapshot uses the host's copy of it up: the copy is removed once the actor runs again (PLT-374).
+func (m *Machines) RestoreSnapshot(ctx context.Context, id string, r io.Reader) (vmm.Snapshot, error) {
 	tr := tar.NewReader(r)
 	man, err := readManifest(tr)
 	if err != nil {
-		return err
+		return vmm.Snapshot{}, err
 	}
+	done := m.useSnapshot(man.Snapshot.ID)
+	err = m.restore(ctx, id, tr, man)
+	done()
+	if err == nil && m.ownSnapshot(id, man.Snapshot) {
+		m.dropSnapshot(ctx, man.Snapshot.ID)
+	}
+	return man.Snapshot, err
+}
+
+func (m *Machines) restore(ctx context.Context, id string, tr *tar.Reader, man Manifest) error {
 	snap := man.Snapshot
 	vmID, cold := id, false
 	var want *initd.Network

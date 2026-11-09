@@ -38,6 +38,8 @@ type fakeHost struct {
 	starts         []string
 	cmdlines       []string // the payload command line of every accepted vm.create
 	nets           []string // the net devices of every accepted vm.create and vm.restore, "<endpoint> tap=<tap>,mac=<mac>"
+	// restored is what the last accepted vm.restore read of its snapshot (Copy mode reads it all then), by file name.
+	restored map[string]string
 	// herdletMemMax is the memory limit of the herdlet's own cgroup, which a process started with no ProcSpec.Cgroup
 	// is in; a MEMORY restore charges the guest memory to its process's cgroup, and past the limit the memcg OOM killer
 	// SIGKILLs it mid-call (PLT-214). Zero: no limit.
@@ -395,6 +397,12 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		c.h.mu.Lock()
 		c.h.recordNets(epRestore, cfg.Net)
+		c.h.restored = map[string]string{}
+		for _, name := range []string{"memory-ranges", "state.json"} {
+			if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+				c.h.restored[name] = string(b)
+			}
+		}
 		c.h.mu.Unlock()
 		c.config, c.state = &cfg, "paused"
 		if rc.Resume {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/everdict/herd/vmm"
 )
@@ -137,4 +138,91 @@ func writeFrom(path string, r io.Reader, size int64) error {
 		return err
 	}
 	return f.Close()
+}
+
+var _ vmm.SnapshotRemover = (*VMM)(nil)
+
+// LocalSnapshots lists the snapshots published in the snapshot directory: each directory named as a snapshot id that
+// holds herd's record. Partial and import directories are not published and not listed.
+func (v *VMM) LocalSnapshots(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("cloud-hypervisor: snapshots: %w", err)
+	}
+	ents, err := os.ReadDir(v.cfg.SnapshotDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cloud-hypervisor: snapshots: %w", err)
+	}
+	var ids []string
+	for _, e := range ents {
+		if !e.IsDir() || !idRE.MatchString(e.Name()) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(v.cfg.SnapshotDir, e.Name(), metaFile)); err == nil {
+			ids = append(ids, e.Name())
+		}
+	}
+	return ids, nil
+}
+
+// RemoveSnapshot removes the snapshot directory of id. Its record goes first, so a removal cut short leaves no
+// directory Restore or ImportSnapshot would take for the snapshot.
+func (v *VMM) RemoveSnapshot(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cloud-hypervisor: remove snapshot: %w", err)
+	}
+	if !idRE.MatchString(id) {
+		return fmt.Errorf("cloud-hypervisor: remove snapshot %q: not a snapshot id", id)
+	}
+	dir := filepath.Join(v.cfg.SnapshotDir, id)
+	if err := os.Remove(filepath.Join(dir, metaFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("cloud-hypervisor: remove snapshot %s: %w", id, err)
+	}
+	if err := v.removeAll(dir); err != nil {
+		return fmt.Errorf("cloud-hypervisor: remove snapshot %s: %w", id, err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("cloud-hypervisor: remove snapshot %s: still there (%v)", id, err)
+	}
+	return nil
+}
+
+// RemoveLeftovers removes the .partial- directories of snapshots Snapshot never published, the .import- directories
+// of imports that never finished, and snapshot directories without herd's record (a removal cut short).
+func (v *VMM) RemoveLeftovers(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cloud-hypervisor: leftovers: %w", err)
+	}
+	ents, err := os.ReadDir(v.cfg.SnapshotDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cloud-hypervisor: leftovers: %w", err)
+	}
+	var errs []error
+	for _, e := range ents {
+		name := e.Name()
+		p := filepath.Join(v.cfg.SnapshotDir, name)
+		switch {
+		case !e.IsDir():
+			continue
+		case strings.HasPrefix(name, ".partial-"), strings.HasPrefix(name, ".import-"):
+		case idRE.MatchString(name):
+			if _, err := os.Lstat(filepath.Join(p, metaFile)); !errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+		default:
+			continue
+		}
+		if err := v.removeAll(p); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("cloud-hypervisor: leftovers: %w", err)
+	}
+	return nil
 }

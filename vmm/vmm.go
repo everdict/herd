@@ -275,3 +275,16 @@ type SnapshotFile struct {
 	// Open reads the file (ExportSnapshot only).
 	Open func() (io.ReadCloser, error) `json:"-"`
 }
+
+// SnapshotRemover is a VMM that keeps the snapshots it takes and imports on its host until herdlet removes them
+// (PLT-374). herdlet removes only snapshots of a VMM that is also a SnapshotCarrier: the bundle in the snapshot store
+// then holds every file a restore needs, so the host's copy is never the only one.
+type SnapshotRemover interface {
+	// LocalSnapshots lists the ids of the snapshots published on this host.
+	LocalSnapshots(ctx context.Context) ([]string, error)
+	// RemoveSnapshot removes the snapshot id from this host and verifies it is gone; one that is not here is gone.
+	RemoveSnapshot(ctx context.Context, id string) error
+	// RemoveLeftovers removes what a Snapshot or ImportSnapshot that never finished left on this host (never
+	// published, so nothing restores from it). It is for a start, while neither runs.
+	RemoveLeftovers(ctx context.Context) error
+}
