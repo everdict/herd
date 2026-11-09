@@ -187,7 +187,12 @@ func (v *VMM) report(id string, in *instance, logs map[string]string) string {
 // KmsgLog reads the kernel's message buffer (/dev/kmsg, root only) and answers its last messages that name pid or
 // tell of an OOM kill, a segfault, a seccomp or audit record or a killed process; nil when it cannot be read.
 func KmsgLog(pid int) []string {
-	f, err := os.OpenFile("/dev/kmsg", os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return kmsgLog("/dev/kmsg", pid)
+}
+
+// kmsgLog is KmsgLog over the device at path.
+func kmsgLog(path string, pid int) []string {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil
 	}
