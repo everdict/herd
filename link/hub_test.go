@@ -152,3 +152,44 @@ func TestCallSizedStillEnds(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// TestOutcomeNamesItsLinksInstance (PLT-371): the hub tells herd-api which herdlet process a link is (OnLinked once
+// it is the worker's link, Instance) and stamps every outcome with it; a herdlet older than Register.Instance links
+// and answers as before, with no instance.
+func TestOutcomeNamesItsLinksInstance(t *testing.T) {
+	for _, inst := range []string{"process-1", ""} {
+		h := link.NewHub()
+		linked := make(chan link.Register, 1)
+		h.OnLinked = func(_ context.Context, r link.Register) {
+			if got, ok := h.Instance(r.Worker); !ok || got != inst {
+				t.Errorf("Instance(%q) = %q, %v while it links, want %q, true", r.Worker, got, ok, inst)
+			}
+			linked <- r
+		}
+		up, down := make(chan []byte, 16), make(chan []byte, 16)
+		go func() { _ = h.Serve(context.Background(), pipe{in: up, out: down}) }()
+		b, _ := json.Marshal(link.Up{Register: &link.Register{Worker: "w", Instance: inst}})
+		up <- b
+		if r := <-linked; r.Instance != inst {
+			t.Errorf("OnLinked got instance %q, want %q", r.Instance, inst)
+		}
+		go func() {
+			for b := range down {
+				var d link.Down
+				_ = json.Unmarshal(b, &d)
+				if d.Work != nil {
+					b, _ := json.Marshal(link.Up{Outcome: &link.Outcome{ID: d.Work.ID, Result: link.ResultDone}})
+					up <- b
+				}
+			}
+		}()
+		o := h.Call(context.Background(), "w", link.Work{Op: link.OpInspect, VM: "vm"})
+		if o.Result != link.ResultDone || o.Instance != inst {
+			t.Errorf("outcome %+v, want done from instance %q", o, inst)
+		}
+		if b, _ := json.Marshal(o); strings.Contains(string(b), "process-1") {
+			t.Errorf("the outcome's instance is on the wire: %s", b)
+		}
+		close(up)
+	}
+}
