@@ -78,8 +78,15 @@ type Agent struct {
 	// Instance names this herdlet process on the link (link.Register.Instance). Empty: Run makes a random one the
 	// first time, so every link this Agent opens names the same process, and a new process names another (PLT-371).
 	Instance string
+	// SnapshotSweep is how often the herdlet (with Machines) removes the VMM snapshots on its host that no snapshot
+	// object holds any more (SweepSnapshots); zero means DefaultSnapshotSweep, negative never.
+	SnapshotSweep time.Duration
+	// SnapshotRefs, if set, is the file the herdlet keeps its records of which snapshot objects hold which VMM
+	// snapshot in (SnapshotRefsPath), so that a restarted herdlet's SweepSnapshots keeps the copies still held.
+	SnapshotRefs string
 
-	vms sync.Map // VM id → vmLock
+	refs snapRefs
+	vms  sync.Map // VM id → vmLock
 	// leases are the deadlines of the work in flight, by work id.
 	leases sync.Map
 
@@ -162,6 +169,16 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		go func() {
 			defer wg.Done()
 			a.watchExits(xctx, send)
+		}()
+	}
+	if a.Machines != nil && a.Machines.RemovesSnapshots() && a.SnapshotSweep >= 0 {
+		// The sweep stops with the link (before wg.Wait, which waits for it).
+		sctx, stopSweep := context.WithCancel(ctx)
+		defer stopSweep()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.sweepSnapshots(sctx)
 		}()
 	}
 	if a.Pool != nil {

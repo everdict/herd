@@ -80,7 +80,10 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			return classify(err)
 		}
 		defer rc.Close()
-		if err := m.Restore(ctx, w.VM, rc); err != nil {
+		snap, err := m.RestoreSnapshot(ctx, w.VM, rc)
+		// An import kept the snapshot here even when the restore then failed: the object read holds it.
+		a.noteSnapshot(snap.ID, w.Snapshot.Key)
+		if err != nil {
 			return classify(err)
 		}
 		a.reopen(w.VM)
@@ -126,8 +129,13 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	}
 	obj, err := a.Snapshots.Put(ctx, w.SnapshotKey, f)
 	if err != nil {
+		// No object holds the snapshot, and herd-api records none: nothing restores from the host's copy.
+		if _, rerr := a.Machines.RemoveSnapshot(ctx, snap.ID); rerr != nil {
+			log.Printf("herdlet: VMM snapshot %s of a snapshot not stored: not removed: %v", snap.ID, rerr)
+		}
 		return classify(err)
 	}
+	a.noteSnapshot(snap.ID, obj.Key)
 	if a.Bundles != nil {
 		// A snapshot this node took (a template's golden) is restored here from its own copy (PLT-227).
 		if err := a.Bundles.Keep(f.Name(), obj.Digest); err != nil {
