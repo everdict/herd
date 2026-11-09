@@ -47,6 +47,7 @@ type Herdlet struct {
 	rewrite func(link.Work, link.Outcome) (link.Outcome, bool)
 	cancel  context.CancelFunc
 	done    chan struct{}
+	agent   *herdlet.Agent
 }
 
 // Rewrite makes the herdlet replace its answers (return false to stay silent); nil restores honest answers.
@@ -194,30 +195,68 @@ func (e *Env) AddHerdlet(t testing.TB, s HerdletSpec) *Herdlet {
 		h.VMM = fake.New(s.Caps, e.vms)
 		backend = h.VMM
 	}
-	a := &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: backend,
+	h.agent = &herdlet.Agent{Worker: s.Name, Class: apiserver.SandboxClass, Labels: s.Labels, Slots: s.Slots, VMM: backend,
 		Snapshots: e.Snapshots, Rewrite: h.answer, Guest: s.Guest}
 	if s.Configure != nil {
-		s.Configure(a)
+		s.Configure(h.agent)
 	}
+	e.Herdlets[s.Name] = h
+	e.run(t, ctx, h)
+	return h
+}
+
+// run dials herd-api with h's agent and waits until herd-api has its registration.
+func (e *Env) run(t testing.TB, ctx context.Context, h *Herdlet) {
+	t.Helper()
 	c, err := grpc.NewClient("passthrough:///"+e.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(auth.Bearer(e.TokenFor(t, s.Name, nil, true))))
+		grpc.WithPerRPCCredentials(auth.Bearer(e.TokenFor(t, h.Spec.Name, nil, true))))
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		defer close(h.done)
 		defer c.Close()
-		_ = a.Run(ctx, c)
+		_ = h.agent.Run(ctx, c)
 	}()
-	e.Herdlets[s.Name] = h
+	e.await(t, h.Spec.Name, true)
+}
+
+// await waits until the worker is (or is no longer) connected to herd-api.
+func (e *Env) await(t testing.TB, name string, connected bool) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !e.connected(s.Name) {
+	for e.connected(name) != connected {
 		if time.Now().After(deadline) {
-			t.Fatalf("herdlet %s did not register", s.Name)
+			t.Fatalf("herdlet %s: connected is not %v after 5s", name, connected)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// Reconnect ends the herdlet's link and dials again from the same herdlet process (a link blip): its VMs and what it
+// knows of them stay.
+func (e *Env) Reconnect(t testing.TB, name string) *Herdlet {
+	t.Helper()
+	h := e.Herdlets[name]
+	h.Disconnect()
+	e.await(t, name, false)
+	ctx, cancel := context.WithCancel(e.ctx)
+	h.cancel, h.done = cancel, make(chan struct{})
+	e.run(t, ctx, h)
 	return h
+}
+
+// Restart ends the herdlet's process and starts a new one under the same worker name and spec. The VMs end with the
+// old process (ADR A-19: a restarted herdlet does not adopt the VMs it left), so the new fake hypervisor holds none of
+// them; it shares the old one's snapshot records, as a host keeps its snapshot directory. A herdlet given a Backend
+// gets the same backend back, with whatever VMs it still holds.
+func (e *Env) Restart(t testing.TB, name string) *Herdlet {
+	t.Helper()
+	old := e.Herdlets[name]
+	old.Disconnect()
+	e.await(t, name, false)
+	s := old.Spec
+	return e.AddHerdlet(t, s)
 }
 
 func (e *Env) connected(name string) bool {
