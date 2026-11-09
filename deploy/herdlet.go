@@ -466,6 +466,12 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console
 	// locked is VOLUMES at once).
 	agent.OnActor, agent.Wake = host.OnActor, herdlet.WakeDetector{}.Run(ctx)
+	// The VM snapshots this host keeps are bounded (PLT-374): a start removes those no snapshot object holds, and what
+	// a snapshot cut short left.
+	agent.SnapshotRefs = herdlet.SnapshotRefsPath(h.StateDir)
+	if err := agent.SweepSnapshots(ctx, true); err != nil {
+		log.Printf("herdlet: VM snapshots not swept at start: %v", err)
+	}
 	var guests herdlet.GuestDialer = h.Guests
 	if m != nil {
 		guests = m
