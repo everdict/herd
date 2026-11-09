@@ -105,6 +105,8 @@ type instance struct {
 	api    *client
 	ch     Process
 	fs     []Process
+	// fsTag is the share each of fs serves, by index.
+	fsTag []string
 }
 
 func (in *instance) procs() []Process {
@@ -236,6 +238,7 @@ func (v *VMM) launch(ctx context.Context, spec vmm.Spec, in *instance) error {
 			return err
 		}
 		in.fs = append(in.fs, p)
+		in.fsTag = append(in.fsTag, s.Tag)
 		if err := waitFor(ctx, "virtiofsd socket "+sock, p, func() (bool, error) {
 			_, err := os.Stat(sock)
 			return err == nil, nil
@@ -571,6 +574,7 @@ func (v *VMM) instance(id string) (*instance, error) {
 			in.ch = p
 		} else {
 			in.fs = append(in.fs, p)
+			in.fsTag = append(in.fsTag, strings.TrimPrefix(strings.TrimSuffix(filepath.Base(pf), ".pid"), "virtiofsd-"))
 		}
 	}
 	return in, nil
@@ -604,8 +608,9 @@ func (v *VMM) Inspect(ctx context.Context, id string) (vmm.Presence, error) {
 
 var _ vmm.ExitObserver = (*VMM)(nil)
 
-// Exited answers whether the VM's cloud-hypervisor process has exited. The why is the process's exit status when this
-// herdlet started it, and the last lines of its log.
+// Exited answers whether the VM's cloud-hypervisor process has exited, or one of its virtiofsd processes has. The why
+// is the process's exit status when this herdlet started it, and the last lines of its log. A VM whose virtiofsd
+// exited is ended here (endForVirtiofsd).
 func (v *VMM) Exited(ctx context.Context, id string) (bool, string, error) {
 	if err := ctx.Err(); err != nil {
 		return false, "", fmt.Errorf("cloud-hypervisor: exited: %w", err)
@@ -624,19 +629,52 @@ func (v *VMM) Exited(ctx context.Context, id string) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("cloud-hypervisor: exited %s: %w", id, err)
 	}
-	if !exited {
-		return false, "", nil
+	if exited {
+		return true, exitWhy("cloud-hypervisor", in.ch, filepath.Join(in.dir, "cloud-hypervisor.log")), nil
 	}
-	why := fmt.Sprintf("cloud-hypervisor (pid %d) exited", in.ch.Pid())
-	if s, ok := in.ch.(interface{ ExitStatus() string }); ok {
+	for i, fs := range in.fs {
+		gone, err := fs.Exited()
+		if err != nil {
+			return false, "", fmt.Errorf("cloud-hypervisor: exited %s: %w", id, err)
+		}
+		if gone {
+			return true, v.endForVirtiofsd(ctx, id, in, i), nil
+		}
+	}
+	return false, "", nil
+}
+
+// endForVirtiofsd ends the VM whose virtiofsd in.fs[i] exited and answers why. Its share is gone for good: every
+// access to it blocks (PLT-372), and after a guest restart, whose disconnect is what makes virtiofsd exit, Cloud
+// Hypervisor v54 waits 60 s for a vhost-user connection that never comes, answering no API call (PLT-370). So the VM
+// is one that exited, and its cloud-hypervisor is sent SIGKILL rather than left to its timeout. Only the herdlet's
+// watch asks this, never while herd's own work on the VM (a delete, a suspend's stop) is in flight (herdlet.checkExit).
+func (v *VMM) endForVirtiofsd(ctx context.Context, id string, in *instance, i int) string {
+	why := exitWhy("virtiofsd of share "+strconv.Quote(in.fsTag[i]), in.fs[i], filepath.Join(in.dir, "virtiofsd-"+in.fsTag[i]+".log"))
+	pid := in.ch.Pid()
+	log.Printf("cloud-hypervisor: %s: %s: sending SIGKILL to cloud-hypervisor (pid %d)", id, why, pid)
+	_ = in.ch.Signal(syscall.SIGKILL)
+	if err := waitExited(ctx, []Process{in.ch}, v.cfg.ExitTimeout); err == nil {
+		if gone, _ := in.ch.Exited(); gone {
+			return fmt.Sprintf("%s; cloud-hypervisor (pid %d) was ended with SIGKILL", why, pid)
+		}
+	}
+	return fmt.Sprintf("%s; cloud-hypervisor (pid %d) was sent SIGKILL and is not yet seen exited", why, pid)
+}
+
+// exitWhy is what is known of how process p, named name, ended: its exit status when this herdlet started it, and the
+// last lines of its log.
+func exitWhy(name string, p Process, logPath string) string {
+	why := fmt.Sprintf("%s (pid %d) exited", name, p.Pid())
+	if s, ok := p.(interface{ ExitStatus() string }); ok {
 		if st := s.ExitStatus(); st != "" {
 			why += " (" + st + ")"
 		}
 	}
-	if tail := logTail(filepath.Join(in.dir, "cloud-hypervisor.log"), 3); tail != "" {
+	if tail := logTail(logPath, 3); tail != "" {
 		why += "; its log ends: " + tail
 	}
-	return true, why, nil
+	return why
 }
 
 // logTail is the last n non-empty lines of a log, at most 1 KiB, joined by " | "; empty when there is none.

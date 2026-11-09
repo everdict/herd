@@ -223,7 +223,8 @@ type VMM interface {
 }
 
 // ExitObserver is a VMM that can tell a VM it started that stopped running on its own (its hypervisor process exited:
-// the guest powered off, the VMM crashed, something killed it) from one that runs. herdlet watches the VMs it runs for
+// the guest powered off, the VMM crashed, something killed it; or a process the VM cannot run without, such as Cloud
+// Hypervisor's virtiofsd, exited, and the backend ended the VM) from one that runs. herdlet watches the VMs it runs for
 // actors with it, so herd-api learns of an exit nobody asked for.
 type ExitObserver interface {
 	// Exited answers true, with what is known of why, when the VM's hypervisor has exited or the VM is gone; false
