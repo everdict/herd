@@ -53,6 +53,9 @@ type Guest struct {
 	// SyncFS, if set, replaces syncfs(2) as Sync's flush of one directory's filesystem (a guest that is not a VM,
 	// whose files are already the host's, has nothing to flush and must not flush the host's disk).
 	SyncFS func(*os.File) error
+	// DropCaches, if set, replaces Sync's write of "2" to /proc/sys/vm/drop_caches after the flush (a guest that is
+	// not a VM must not drop the host's caches).
+	DropCaches func() error
 	// SetTime, if set, replaces clock_settime(2) as SetClock's step of the wall clock and answers the clock just before
 	// (a guest that is not a VM must not set the host's clock).
 	SetTime func(time.Time) (time.Time, error)
