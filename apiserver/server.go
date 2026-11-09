@@ -46,7 +46,8 @@ type Config struct {
 	Hub       *link.Hub
 	Authn     auth.Authenticator
 	Authz     auth.Authorizer
-	// CallTimeout bounds each call to a herdlet (default 30 s).
+	// CallTimeout bounds each call to a herdlet (default 30 s), and each snapshot store call of a workflow that moves no
+	// object bytes (a resume's Stat, a delete's Delete: storeCall).
 	CallTimeout time.Duration
 	// ReconcileCallTimeout bounds each call to a herdlet that Reconcile makes (default 4 × CallTimeout). A retry has
 	// no client waiting on it, and work that outlasts CallTimeout (a large snapshot, a loaded disk) would time out the
@@ -164,15 +165,28 @@ type moving struct{}
 // call sends w to the worker and waits its timeout plus the bytes it moves at RestoreBandwidth: the size of the object
 // a restore reads (moving), or the most a snapshot's herdlet reported its object has grown to (link.Progress).
 func (s *Server) call(ctx context.Context, worker string, w link.Work) link.Outcome {
-	timeout := s.cfg.CallTimeout
-	if ctx.Value(reconciling{}) != nil {
-		timeout = s.cfg.ReconcileCallTimeout
-	}
+	timeout := s.callTimeout(ctx)
 	known, _ := ctx.Value(moving{}).(int64)
 	grow := func(n int64) time.Duration {
 		return time.Duration(float64(max(known, n, 0)) / float64(s.cfg.RestoreBandwidth) * float64(time.Second))
 	}
 	return s.cfg.Hub.CallSized(ctx, worker, w, timeout, grow)
+}
+
+// callTimeout is the bound of one call that moves no snapshot bytes: CallTimeout, or ReconcileCallTimeout in
+// Reconcile.
+func (s *Server) callTimeout(ctx context.Context) time.Duration {
+	if ctx.Value(reconciling{}) != nil {
+		return s.cfg.ReconcileCallTimeout
+	}
+	return s.cfg.CallTimeout
+}
+
+// storeCall bounds one snapshot store call that moves no object bytes (a Stat, a Delete) as a herdlet call is bounded
+// (callTimeout). A store that stops answering (an S3 endpoint frozen) then fails the call within the bound, and the
+// workflow answers unknown, owed to Reconcile, instead of waiting for the store (PLT-375).
+func (s *Server) storeCall(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.callTimeout(ctx))
 }
 
 // principal authenticates the caller of ctx.

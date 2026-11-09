@@ -116,7 +116,7 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead, s3://bucket[/prefix]; joins hand herdlets the store (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
 	fs.StringVar(&a.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint, http(s)://host[:port] (default: AWS for -s3-region)")
 	fs.StringVar(&a.S3Region, "s3-region", "us-east-1", "S3 region requests are signed for")
-	fs.DurationVar(&a.CallTimeout, "call-timeout", 30*time.Second, "how long to wait for a herdlet's answer to work that moves no bytes (a snapshot or restore waits longer, by its size: -restore-bandwidth)")
+	fs.DurationVar(&a.CallTimeout, "call-timeout", 30*time.Second, "how long to wait for a herdlet's answer, or the snapshot store's, to work that moves no bytes (a snapshot or restore waits longer, by its size: -restore-bandwidth)")
 	fs.Float64Var(&a.RestoreBandwidthMiB, "restore-bandwidth", apiserver.DefaultRestoreBandwidth>>20, "MiB/s a herdlet is expected to move a snapshot object to or from the store at, at least: a restore's call waits -call-timeout plus the object's size at this rate, and a snapshot's call plus the size its herdlet reports")
 	fs.DurationVar(&a.Reconcile, "reconcile", 10*time.Second, "how often to retry owed workflow steps")
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")

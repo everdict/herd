@@ -15,7 +15,8 @@ import (
 // suspended actor records the actor's own object, and the object goes with the last record that names it. Every
 // actor and tag record is read first; a List that fails or a record that cannot be parsed deletes nothing. The caller
 // holds refsMu until the record that stops naming key is written, so two holders that go at once cannot each leave
-// the object to the other.
+// the object to the other. The store's Delete is bounded as a herdlet call is (storeCall): one that outlasts it deletes
+// nothing verified, and the holder's release stays owed.
 func (s *Server) dropObject(ctx context.Context, key string, holder store.Key) error {
 	other, err := s.namedBy(ctx, key, holder)
 	if err != nil {
@@ -25,7 +26,9 @@ func (s *Server) dropObject(ctx context.Context, key string, holder store.Key) e
 		log.Printf("herd-api: snapshot %s kept: %s %s/%s names it", key, other.Kind, other.Space, other.Name)
 		return nil
 	}
-	return s.cfg.Snapshots.Delete(ctx, key)
+	dctx, cancel := s.storeCall(ctx)
+	defer cancel()
+	return s.cfg.Snapshots.Delete(dctx, key)
 }
 
 // namedBy is the first record other than holder that names the snapshot object at key, or nil when none does.
