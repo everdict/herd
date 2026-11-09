@@ -86,8 +86,9 @@ type Env struct {
 	Client   *Client
 	Herdlets map[string]*Herdlet
 
-	vms *fake.Store
-	ctx context.Context
+	vms  *fake.Store
+	ctx  context.Context
+	hang *hangStore
 }
 
 // NewStore makes the record store each Env runs on; tests may swap it (Envs are not started in parallel).
@@ -125,10 +126,11 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	// The herdlet's snapshot call is bounded by the harness's call timeout; the store's fsyncs would make it depend
 	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
 	snaps.NoSync = true
-	e := &Env{Space: "space-1", Hub: link.NewHub(), Store: NewStore(t), Snapshots: snaps, Key: key,
-		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx}
+	hang := &hangStore{Store: snaps}
+	e := &Env{Space: "space-1", Hub: link.NewHub(), Store: NewStore(t), Snapshots: hang, Key: key,
+		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx, hang: hang}
 	e.Server, err = apiserver.New(apiserver.Config{
-		Store: e.Store, Snapshots: snaps, Hub: e.Hub, Authn: auth.StaticKey{Key: key}, Authz: auth.SpaceRoles{},
+		Store: e.Store, Snapshots: hang, Hub: e.Hub, Authn: auth.StaticKey{Key: key}, Authz: auth.SpaceRoles{},
 		CallTimeout:          CallTimeout,
 		ReconcileCallTimeout: ReconcileCallTimeout,
 		GoldenWarmup:         GoldenWarmup,
@@ -149,6 +151,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	go func() { defer close(served); _ = g.Serve(ln) }()
 	e.Client = NewClient(e.Addr, e.Token(t, map[string]auth.Role{e.Space: auth.RoleWrite}, false))
 	t.Cleanup(func() {
+		e.HangSnapshots(false)
 		for _, h := range e.Herdlets {
 			h.Disconnect()
 		}
