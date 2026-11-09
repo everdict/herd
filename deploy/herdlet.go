@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -35,8 +36,10 @@ import (
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/cloudhypervisor"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 // Herdlet is a herdlet's configuration (ADR A-19, A-20): `herdlet join <herd-api> --token <t>`, `herdlet run` (or
@@ -124,6 +127,10 @@ type Herdlet struct {
 	NewGateway func(egress.Config) (*egress.Gateway, error)
 	// Retry is how long the herdlet waits before it dials again after its link or tunnel broke (default 2 s).
 	Retry time.Duration
+
+	// granted, if set, is the snapshot store herd-api hands out at join now (nil inside: a directory): a grant in the
+	// state directory that names another is replaced by a new join (an all-in-one, where both are known, PLT-382).
+	granted **s3.Config
 }
 
 // HostFlags registers the flags every herdlet command shares: the host, its hypervisor and its VMs.
@@ -232,7 +239,11 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 		return State{}, fmt.Errorf("-worker: %w", err)
 	}
 	if s, err := readState(h.StateDir); err == nil && s.Grant.Worker == h.Worker && (h.API == "" || s.API == h.API) {
-		return s, nil
+		if h.granted == nil || sameStore(s.Grant.Snapshots, *h.granted) {
+			return s, nil
+		}
+		log.Printf("herdlet: the join grant in %s names snapshot store %s, herd-api hands out %s: joining again",
+			StatePath(h.StateDir), SnapshotStoreName(s.Grant.Snapshots), SnapshotStoreName(*h.granted))
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return State{}, err
 	}
@@ -469,6 +480,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	// The VM snapshots this host keeps are bounded (PLT-374): a start removes those no snapshot object holds, and what
 	// a snapshot cut short left.
 	agent.SnapshotRefs = herdlet.SnapshotRefsPath(h.StateDir)
+	agent.SnapshotStore = SnapshotStoreName(st.Grant.Snapshots)
 	if err := agent.SweepSnapshots(ctx, true); err != nil {
 		log.Printf("herdlet: VM snapshots not swept at start: %v", err)
 	}
@@ -530,8 +542,20 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		go host.Serve(ctx, ec)
 	}
 	log.Printf("herdlet %s: linking to herd-api at %s", st.Grant.Worker, st.API)
-	forever(ctx, retry, "link to "+st.API, func() error { return agent.Run(ctx, cc) })
+	var refused error
+	forever(ctx, retry, "link to "+st.API, func() error {
+		err := agent.Run(ctx, cc)
+		if status.Code(err) == codes.FailedPrecondition {
+			// herd-api refuses this host as it is (its snapshot store is not herd-api's): a retry cannot change that.
+			refused = err
+			cancel()
+		}
+		return err
+	})
 	<-done
+	if refused != nil {
+		return fmt.Errorf("%w (this host's join grant: %s; remove it and join again with a new join token)", refused, StatePath(h.StateDir))
+	}
 	return nil
 }
 
@@ -615,6 +639,22 @@ func (h *Herdlet) snapshots(g join.Grant) (snapstore.Store, error) {
 		dir = filepath.Join(h.StateDir, "snapshots")
 	}
 	return disk.New(dir)
+}
+
+// SnapshotStoreName names a join grant's snapshot store with no credential in it: its S3 bucket, or a directory.
+func SnapshotStoreName(g *s3.Config) string {
+	if g == nil {
+		return "a directory (herd-api without -s3)"
+	}
+	return fmt.Sprintf("s3://%s at %s", path.Join(g.Bucket, g.Prefix), g.Endpoint)
+}
+
+// sameStore: two grants' snapshot stores are the same store, reached with the same credentials.
+func sameStore(a, b *s3.Config) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // DefaultBundleCacheMiB is -bundle-cache's default.

@@ -78,6 +78,8 @@ type Agent struct {
 	// Instance names this herdlet process on the link (link.Register.Instance). Empty: Run makes a random one the
 	// first time, so every link this Agent opens names the same process, and a new process names another (PLT-371).
 	Instance string
+	// SnapshotStore names Snapshots on the link (link.Register.SnapshotStore); empty: not declared.
+	SnapshotStore string
 	// SnapshotSweep is how often the herdlet (with Machines) removes the VMM snapshots on its host that no snapshot
 	// object holds any more (SweepSnapshots); zero means DefaultSnapshotSweep, negative never.
 	SnapshotSweep time.Duration
@@ -141,9 +143,10 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	})
 	reg := link.Register{
 		Worker: a.Worker, Class: a.Class, Labels: a.Labels,
-		Capabilities: a.declare(caps),
-		Capacity:     link.Capacity{Slots: a.Slots, Warm: a.Warm},
-		Instance:     a.Instance,
+		Capabilities:  a.declare(caps),
+		Capacity:      link.Capacity{Slots: a.Slots, Warm: a.Warm},
+		Instance:      a.Instance,
+		SnapshotStore: a.SnapshotStore,
 	}
 	if a.Pool != nil {
 		reg.Capacity.Warm = a.Pool.Counts()

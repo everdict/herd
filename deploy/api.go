@@ -152,6 +152,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	srv, err := apiserver.New(apiserver.Config{
 		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, CallTimeout: a.CallTimeout,
 		RestoreBandwidth: int64(a.RestoreBandwidthMiB * (1 << 20)), GoldenWarmup: a.GoldenWarmup,
+		SnapshotStore: SnapshotStoreName(s3cfg),
 	})
 	if err != nil {
 		return err
@@ -286,9 +287,20 @@ func (a *API) snapshots() (snapstore.Store, *s3.Config, error) {
 		s, err := disk.New(a.Snapshots)
 		return s, nil, err
 	}
+	s, err := a.s3Store()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := s.Config()
+	log.Printf("herd-api: snapshots in s3://%s/%s at %s", cfg.Bucket, cfg.Prefix, cfg.Endpoint)
+	return s, &cfg, nil
+}
+
+// s3Store is the S3 store -s3 names, as a join hands it out (Config).
+func (a *API) s3Store() (*s3.Store, error) {
 	cfg, err := s3.ParseURL(a.S3)
 	if err != nil {
-		return nil, nil, fmt.Errorf("-s3: %w", err)
+		return nil, fmt.Errorf("-s3: %w", err)
 	}
 	c := a.S3Credentials
 	if c.AccessKeyID == "" && c.SecretAccessKey == "" {
@@ -299,9 +311,20 @@ func (a *API) snapshots() (snapstore.Store, *s3.Config, error) {
 	cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken = c.AccessKeyID, c.SecretAccessKey, c.SessionToken
 	s, err := s3.New(cfg, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("-s3: %w", err)
+		return nil, fmt.Errorf("-s3: %w", err)
 	}
-	cfg = s.Config()
-	log.Printf("herd-api: snapshots in s3://%s/%s at %s", cfg.Bucket, cfg.Prefix, cfg.Endpoint)
-	return s, &cfg, nil
+	return s, nil
+}
+
+// grantedStore is the snapshot store a join hands out: -s3's, nil for a directory.
+func (a *API) grantedStore() (*s3.Config, error) {
+	if a.S3 == "" {
+		return nil, nil
+	}
+	s, err := a.s3Store()
+	if err != nil {
+		return nil, err
+	}
+	cfg := s.Config()
+	return &cfg, nil
 }

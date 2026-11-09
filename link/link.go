@@ -81,6 +81,9 @@ type Register struct {
 	// another, so herd-api can tell a reconnect (a link blip) from a restart, which leaves none of the old VMs (ADR
 	// A-19, PLT-371). Empty: a herdlet older than PLT-371, of which nothing is concluded.
 	Instance string `json:"instance,omitempty"`
+	// SnapshotStore names the snapshot store the herdlet writes snapshots to, with no credential in it: herd-api
+	// refuses a link whose store is not its own, where it would look for them (PLT-382). Empty: not declared.
+	SnapshotStore string `json:"snapshotStore,omitempty"`
 }
 
 // Capacity is how many actors the herdlet can hold and which templates it keeps warm VMs for.

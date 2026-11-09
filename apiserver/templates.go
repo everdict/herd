@@ -184,6 +184,12 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 	if err := s.deleteGolden(ctx, space, r.UID, golden); err != nil {
 		return nil, err
 	}
+	if st, err := parseTemplateState(r); err == nil && st.Attempt != nil {
+		// A golden attempt herd-api stopped during may have left its object.
+		if err := s.cfg.Snapshots.Delete(ctx, st.Attempt.Key); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "golden snapshot not deleted yet: %v", err)
+		}
+	}
 	if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
 		return nil, toStatus(err)
 	}

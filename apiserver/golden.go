@@ -78,6 +78,16 @@ type templateState struct {
 	RebuildError string `json:"rebuildError,omitempty"`
 	// Retired are golden tags a rebuild replaced, deleted once nothing can still be restoring from them.
 	Retired []retiredGolden `json:"retired,omitempty"`
+	// Attempt is the golden snapshot herd-api asked for and has not seen end, recorded before the ask (PLT-382): a
+	// pass that finds it with no golden tag knows the attempt failed, though herd-api restarted before its answer.
+	Attempt *goldenAttempt `json:"attempt,omitempty"`
+}
+
+// goldenAttempt is one golden snapshot asked of a herdlet: the golden actor and tag it is for, and the snapshot
+// object it is stored under.
+type goldenAttempt struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 // goldenRebuild is a rebuild of a template's golden for the guests its workers run now (DEFAUL-1606).
@@ -322,6 +332,9 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 	tag, err := s.loadTag(ctx, space, t.name)
 	switch {
 	case err == nil:
+		if err := g.endAttempt(t.name); err != nil {
+			return 0, true, false, err
+		}
 		if tag.tag.GetStatus().GetActorTemplateUid() != uid || tag.tag.GetSourceActor().GetName() != t.name {
 			return 0, false, false, t.fail(ctx, reasonGoldenTagConflict, "golden tag belongs to another actor or template")
 		}
@@ -329,6 +342,12 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 		return 0, err != nil, false, err
 	case !errors.Is(err, store.ErrNotFound):
 		return 0, true, false, err
+	}
+	if st, err := parseTemplateState(g.rec); err != nil {
+		return 0, true, false, err
+	} else if a := st.Attempt; a != nil && a.Name == t.name {
+		// Asked before and never ended here: herd-api stopped while the herdlet's answer was in flight.
+		return 0, false, false, g.attemptFailed(ctx, t, "the golden snapshot herd-api asked for before it restarted got no answer")
 	}
 	ar, err := s.loadActor(ctx, space, t.name)
 	if errors.Is(err, store.ErrNotFound) {
@@ -365,16 +384,19 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 		fallthrough
 	case ateapi.ActorState_ACTOR_STATE_SUSPENDED:
 		// A running golden actor is snapshotted in place at the highest fidelity its worker keeps (capped by the
-		// template's preference); a suspended one has its snapshot referenced (A-45).
-		_, err := s.createTag(ctx, &ateapi.Tag{Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: t.name}, SourceActor: ref},
-			ateapi.TagScope_TAG_SCOPE_PUBLISHED)
+		// template's preference); a suspended one has its snapshot referenced (A-45). The attempt is recorded first,
+		// so that every attempt counts against the retries and leaves no object once it failed, whatever ends it.
+		key, err := g.beginAttempt(ctx, t.name)
+		if err != nil {
+			return 0, true, false, err
+		}
+		_, err = s.createTagAt(ctx, &ateapi.Tag{Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: t.name}, SourceActor: ref},
+			ateapi.TagScope_TAG_SCOPE_PUBLISHED, key)
 		switch status.Code(err) {
 		case codes.OK, codes.AlreadyExists:
 			return 0, true, true, nil
-		case codes.FailedPrecondition:
-			return 0, false, false, t.fail(ctx, reasonGoldenSnapshotFailed, status.Convert(err).Message())
 		}
-		return 0, true, false, fmt.Errorf("tagging golden actor: %w", err)
+		return 0, false, false, g.attemptFailed(ctx, t, status.Convert(err).Message())
 	case ateapi.ActorState_ACTOR_STATE_RESUMING, ateapi.ActorState_ACTOR_STATE_SUSPENDING, ateapi.ActorState_ACTOR_STATE_DELETING:
 		// An owed boot or suspend, or the delete of a failed build's golden actor before a retry: Reconcile settles
 		// the actor, and the next pass goes on from there.
@@ -389,6 +411,53 @@ func owedReason(ar *actorRec) string {
 		return o.Op + " owed: " + o.Reason
 	}
 	return "no step owed"
+}
+
+// beginAttempt records a golden snapshot attempt for the golden named name and returns its snapshot object's key.
+func (g *goldenBuild) beginAttempt(ctx context.Context, name string) (string, error) {
+	st, err := parseTemplateState(g.rec)
+	if err != nil {
+		return "", err
+	}
+	nonce, err := store.NewUID()
+	if err != nil {
+		return "", err
+	}
+	st.Attempt = &goldenAttempt{Name: name, Key: snapshotKey("tags", g.rec.Space, name, nonce, 1)}
+	if err := g.saveState(ctx, st); err != nil {
+		return "", err
+	}
+	return st.Attempt.Key, nil
+}
+
+// endAttempt forgets the attempt for the golden named name in g.rec, for the next write of the template to record.
+func (g *goldenBuild) endAttempt(name string) error {
+	st, err := parseTemplateState(g.rec)
+	if err != nil || st.Attempt == nil || st.Attempt.Name != name {
+		return err
+	}
+	st.Attempt = nil
+	g.rec.State, err = json.Marshal(st)
+	return err
+}
+
+// attemptFailed ends the recorded attempt with no golden tag: its snapshot object, if the herdlet wrote one, is
+// deleted (an error leaves the attempt recorded, and the next pass deletes it again), and the attempt is a failed
+// build of t, which retries it while it has retries left.
+func (g *goldenBuild) attemptFailed(ctx context.Context, t goldenTarget, msg string) error {
+	st, err := parseTemplateState(g.rec)
+	if err != nil {
+		return err
+	}
+	if a := st.Attempt; a != nil && a.Name == t.name {
+		if err := g.s.cfg.Snapshots.Delete(ctx, a.Key); err != nil {
+			return fmt.Errorf("deleting the snapshot of a failed golden attempt: %w", err)
+		}
+		if err := g.endAttempt(t.name); err != nil {
+			return err
+		}
+	}
+	return t.fail(ctx, reasonGoldenSnapshotFailed, msg)
 }
 
 // saveTag deletes the golden actor and only then records the tag, so a retry finds the tag again if either fails.
