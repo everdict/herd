@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 
 	herdext "github.com/everdict/herd/api/herdext/v1"
@@ -19,6 +20,9 @@ import (
 // blocked (an unanswering virtio-fs server), so the caller's deadline decides and the snapshot is not taken.
 // With LayerShare, it first saves each container's writable layer there (DEFAUL-1619), leaving out its exec records:
 // a cold boot runs none of the processes they name.
+// After a successful flush it drops the guest's dentries and inodes (ADR A-52): a snapshot then holds no cached
+// virtio-fs entry that the virtiofsd started at restore would have to re-find by path. The drop is not a durability
+// step, so its failure is logged and the Sync still succeeds; like the flush, it answers ctx.
 func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.SyncResponse, error) {
 	dirs := append([]string(nil), g.SyncDirs...)
 	for _, c := range g.containers {
@@ -28,13 +32,24 @@ func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.Sync
 	if flush == nil {
 		flush = syncFS
 	}
+	drop := g.DropCaches
+	if drop == nil {
+		drop = dropCaches
+	}
 	done := make(chan error, 1)
 	go func() {
 		if err := g.saveLayers(); err != nil {
 			done <- err
 			return
 		}
-		done <- syncDirs(dirs, flush)
+		if err := syncDirs(dirs, flush); err != nil {
+			done <- err
+			return
+		}
+		if err := drop(); err != nil {
+			log.Printf("herd-guest: sync: dropping the dentry and inode caches: %v", err)
+		}
+		done <- nil
 	}()
 	select {
 	case err := <-done:

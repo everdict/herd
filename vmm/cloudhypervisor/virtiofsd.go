@@ -4,9 +4,10 @@ import "strings"
 
 // VirtiofsdArgs are the arguments herd starts virtiofsd with for one share: extra (the operator's -virtiofsd-args)
 // come last. It is what launch passes and what `herdlet doctor` checks the given virtiofsd accepts, so the two cannot
-// drift apart. --migration-mode needs virtiofsd >= 1.11 (Ubuntu 24.04's 1.10 rejects it).
+// drift apart. --migration-mode needs virtiofsd >= 1.11 (Ubuntu 24.04's 1.10 rejects it). --cache=auto is the
+// only measured mode in which a JVM starts from jars on /w (ADR A-52); under never and metadata it fails to mmap them.
 func VirtiofsdArgs(socket, sharedDir string, readOnly bool, extra []string) []string {
-	args := []string{"--socket-path=" + socket, "--shared-dir=" + sharedDir, "--cache=never",
+	args := []string{"--socket-path=" + socket, "--shared-dir=" + sharedDir, "--cache=auto",
 		// Snapshots with virtio-fs: virtiofsd re-finds open files by path on restore (R0 spike).
 		"--migration-mode=find-paths"}
 	if readOnly {

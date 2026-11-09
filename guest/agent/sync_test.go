@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"syscall"
@@ -124,5 +125,72 @@ func TestSyncSavesEachContainersLayer(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(up, "everdict", "exec")); !os.IsNotExist(err) {
 		t.Errorf("the exec records were saved: %v", err)
+	}
+}
+
+// TestSyncDropsCachesAfterTheFlush (PLT-379): once every directory is flushed, Sync drops the guest's dentries and
+// inodes, so a restored guest looks every file up again at the virtiofsd started with it (ADR A-52). A flush that
+// fails drops nothing, and a drop that fails does not fail the Sync: it is not a durability step.
+func TestSyncDropsCachesAfterTheFlush(t *testing.T) {
+	g, err := agent.New(newTarget(t, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	g.SyncDirs = []string{t.TempDir()}
+	var mu sync.Mutex
+	var steps []string
+	step := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		steps = append(steps, s)
+	}
+	g.SyncFS = func(*os.File) error { step("flush"); return nil }
+	g.DropCaches = func() error { step("drop"); return nil }
+	if _, err := g.Sync(context.Background(), &herdext.SyncRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"flush", "flush", "drop"}; !slices.Equal(steps, want) {
+		t.Fatalf("Sync ran %q, want %q: the drop once, after every flush", steps, want)
+	}
+
+	steps = nil
+	g.SyncFS = func(*os.File) error { step("flush"); return syscall.EIO }
+	if _, err := g.Sync(context.Background(), &herdext.SyncRequest{}); status.Code(err) != codes.Internal {
+		t.Fatalf("Sync with a failing flush = %v, want Internal", err)
+	}
+	if slices.Contains(steps, "drop") {
+		t.Fatalf("Sync with a failing flush ran %q: it dropped the caches", steps)
+	}
+
+	steps = nil
+	g.SyncFS = func(*os.File) error { step("flush"); return nil }
+	g.DropCaches = func() error { step("drop"); return syscall.EACCES }
+	if _, err := g.Sync(context.Background(), &herdext.SyncRequest{}); err != nil {
+		t.Fatalf("Sync with a failing drop = %v, want success", err)
+	}
+	if !slices.Contains(steps, "drop") {
+		t.Fatalf("Sync ran %q, want the drop tried", steps)
+	}
+}
+
+// TestSyncAnswersWhileTheDropRuns: a drop still running when the caller gives up does not hold the call past its
+// deadline, like a blocked flush.
+func TestSyncAnswersWhileTheDropRuns(t *testing.T) {
+	g, err := agent.New(newTarget(t, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	release := make(chan struct{})
+	defer close(release)
+	g.SyncFS = func(*os.File) error { return nil }
+	g.DropCaches = func() error { <-release; return nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = g.Sync(ctx, &herdext.SyncRequest{})
+	if status.Code(err) != codes.DeadlineExceeded || time.Since(start) > 2*time.Second {
+		t.Fatalf("Sync with a blocked drop = %v after %v, want DeadlineExceeded at the deadline", err, time.Since(start))
 	}
 }

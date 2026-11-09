@@ -211,6 +211,8 @@ func (v *VMM) start(id string) error {
 	// The container is a host directory: nothing sits between it and the share, so Sync has nothing to flush, and a
 	// syncfs(2) of the host's disk on every snapshot would stall every other test's fsyncs.
 	g.SyncFS = func(*os.File) error { return nil }
+	// Nor are its caches its own: dropping them would drop the host's.
+	g.DropCaches = func() error { return nil }
 	if _, err := initd.ReadPlan(initd.Layout{ShareDir: root}); err == nil {
 		// As herd-guest does in a VM: Sync saves each container's root into the share, where the bundle finds it.
 		g.LayerShare = root
