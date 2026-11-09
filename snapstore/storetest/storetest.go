@@ -371,6 +371,48 @@ func Run(t *testing.T, h Harness) {
 		}
 	})
 
+	t.Run("MeterCountsObjectBytes", func(t *testing.T) {
+		s := h.Open(t)
+		data := []byte(strings.Repeat("snapshot bytes ", 1000))
+		n := int64(len(data))
+		ctx, m := snapstore.WithMeter(ctxT(t))
+		o, err := s.Put(ctx, "m/1", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Bytes(); got != n {
+			t.Errorf("a Put of %d bytes counted %d", n, got)
+		}
+		if _, err := s.Stat(ctx, "m/1"); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Bytes(); got != n {
+			t.Errorf("a Stat counted %d bytes; it moves none", got-n)
+		}
+		rc, err := s.Open(ctx, "m/1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.Copy(io.Discard, rc)
+		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Bytes(); got != 2*n {
+			t.Errorf("an Open read through counted %d bytes, want %d", got-n, n)
+		}
+		if _, err := s.Verify(ctx, "m/1", o.Digest); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Bytes(); got != 3*n {
+			t.Errorf("a Verify, which reads the object, counted %d bytes, want %d", got-2*n, n)
+		}
+		// A call on a context without the meter counts nothing on it.
+		if got := readAll(t, s, "m/1"); !bytes.Equal(got, data) || m.Bytes() != 3*n {
+			t.Errorf("a read on another context changed the meter to %d", m.Bytes())
+		}
+	})
+
 	t.Run("FailedOrUnknownWriteNeverAnswersSuccess", func(t *testing.T) {
 		if h.Fault == nil {
 			t.Skip("the harness cannot fail writes")

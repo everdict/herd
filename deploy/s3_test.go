@@ -1,11 +1,15 @@
 package deploy_test
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"log"
 	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -297,11 +301,17 @@ func TestJoinedHostsForkAndMoveAtMemoryThroughS3(t *testing.T) {
 }
 
 // TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI (DEFAUL-1610): with snapshots in S3, herd-api proves a suspend's
-// object by the endpoint's checksum (a HEAD) rather than reading it, and a tag of the suspended actor is a copy inside
-// the bucket proved the same way: neither moves a byte of the snapshot through herd-api. Its counterexample is
-// herd-api before DEFAUL-1610, which read the whole object to verify a suspend (2m43s live) and, for the tag, read it
-// again, streamed it out and back and read the copy (13 minutes on a built box).
+// object by the endpoint's checksum (a HEAD) rather than reading it, and a tag of the suspended actor records the
+// actor's own sealed object after one HEAD (A-45): neither moves a byte of the snapshot through herd-api, the tag
+// copies nothing in the bucket either, and herd-api logs each with bytes_moved=0. Its counterexamples are herd-api
+// before DEFAUL-1610, which read the whole object to verify a suspend (2m43s live) and, for the tag, read it again,
+// streamed it out and back and read the copy (13 minutes on a built box), and A-39's copy inside the bucket, which an
+// endpoint that encrypts its objects (MinIO with SSE-KMS) carries out by decrypting and re-encrypting every byte.
 func TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI(t *testing.T) {
+	var logs syncBuffer
+	out := log.Writer()
+	log.SetOutput(io.MultiWriter(&logs, out))
+	t.Cleanup(func() { log.SetOutput(out) })
 	srv, _, addr, key, tok := s3HerdAPI(t)
 	h := herdletOn(t, "node-1", nil)
 	h.API, h.Token, h.Labels = addr, tok, "host=node-1"
@@ -342,12 +352,36 @@ func TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI(t *testing.T) {
 		t.Fatalf("CreateTag of the suspended actor: %v", err)
 	}
 	if s, r := srv.Served()-served, srv.Received()-received; s != 0 || r != 0 {
-		t.Errorf("the tag moved %d snapshot bytes out of the bucket and %d into it through herd-api; want a copy inside the bucket", s, r)
+		t.Errorf("the tag moved %d snapshot bytes out of the bucket and %d into it through herd-api; want none", s, r)
 	}
-	if copies, _ := srv.Copies(); copies != 1 {
-		t.Errorf("%d CopyObject calls, want 1", copies)
+	if copies, parts := srv.Copies(); copies != 0 || parts != 0 {
+		t.Errorf("%d CopyObject and %d UploadPartCopy calls; want none: the tag references the actor's snapshot", copies, parts)
 	}
-	if tag.GetStatus().GetSnapshot() == nil || len(srv.Keys()) != 2 {
-		t.Errorf("the tag records snapshot %v and the bucket holds %v; want the actor's object and its copy", tag.GetStatus().GetSnapshot(), srv.Keys())
+	snaps := sr.GetActor().GetStatus().GetSnapshots()
+	if got := tag.GetStatus().GetSnapshot().GetUuid(); len(snaps) == 0 || got != snaps[len(snaps)-1].GetUuid() || len(srv.Keys()) != 1 {
+		t.Errorf("the tag records snapshot %q and the bucket holds %v; want the actor's one object, referenced", got, srv.Keys())
 	}
+	for _, what := range []string{"actor " + space + "/a1: snapshot check", "tag " + space + "/t1 "} {
+		if !regexp.MustCompile(regexp.QuoteMeta(what) + `.*object_bytes=[1-9]\d* bytes_moved=0 seconds=[0-9.]+`).MatchString(logs.String()) {
+			t.Errorf("herd-api logged no %q line with object_bytes, bytes_moved=0 and seconds", what)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer the log writes to while a test reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
