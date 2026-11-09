@@ -104,8 +104,9 @@ func timedTag(t *testing.T, e *conformance.Env, tag, actor string) (*ateapi.Tag,
 // object after one Stat, so for a 32 MiB snapshot it moves no byte through herd-api and answers in well under 2 s; the
 // object outlives its source's delete, a fork restores from it, and it goes with the last record that names it,
 // whichever of the tag and the actor goes last. herd-api logs the suspend's check and the tag with object_bytes,
-// bytes_moved and seconds. Its counterexample is the copy (A-39): on the disk store the tag read the object and wrote
-// it again under a key of its own, and nothing logged what it moved.
+// bytes_moved and seconds. An object that is gone or holds other bytes than the actor recorded makes no tag (the copy
+// refused those too, by its digest check). Its counterexample is the copy (A-39): on the disk store the tag read the
+// object and wrote it again under a key of its own, and nothing logged what it moved.
 func TestTagReferencesTheSnapshot(t *testing.T) {
 	logs := captureLog(t)
 	e := conformance.Start(t, conformance.HerdletSpec{Name: "h1", Slots: 4})
@@ -168,6 +169,24 @@ func TestTagReferencesTheSnapshot(t *testing.T) {
 		t.Fatalf("DeleteActor src2: %v", err)
 	}
 	wantObject(t, e, key2, false, "the delete of the actor, its last holder")
+
+	// The Stat must find the object with the digest the actor recorded: bytes other than those, or none, make no tag.
+	mkActor(t, e, "src3", "tpl", nil)
+	key3 := suspend(t, e, "src3").GetUuid()
+	if _, err := e.Snapshots.Put(ctx, key3, bytes.NewReader([]byte("other bytes"))); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.Client.CreateTag(ctx, &ateapi.CreateTagRequest{Tag: &ateapi.Tag{
+		Metadata: &ateapi.ResourceMetadata{Atespace: e.Space, Name: "t3"}, SourceActor: oref(e, "src3"),
+	}})
+	wantCode(t, "CreateTag of an actor whose object holds other bytes than it recorded", err, codes.Unavailable)
+	if err := e.Snapshots.Delete(ctx, key3); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Client.CreateTag(ctx, &ateapi.CreateTagRequest{Tag: &ateapi.Tag{
+		Metadata: &ateapi.ResourceMetadata{Atespace: e.Space, Name: "t3"}, SourceActor: oref(e, "src3"),
+	}})
+	wantCode(t, "CreateTag of an actor whose object is gone", err, codes.Unavailable)
 }
 
 // failingLists is a record store whose List can be made to fail.
