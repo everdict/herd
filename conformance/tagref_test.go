@@ -120,8 +120,9 @@ func TestTagReferencesTheSnapshot(t *testing.T) {
 	if obj, err := e.Snapshots.Stat(ctx, key); err != nil || obj.Size != tagSnapshotSize {
 		t.Fatalf("the suspend's object = %+v, %v; want %d bytes", obj, err, tagSnapshotSize)
 	}
-	if m, ok := measuredLine(t, logs, "actor "+e.Space+"/src: snapshot check"); !ok || m.object != tagSnapshotSize {
-		t.Errorf("the suspend's check logged %+v (found %v); want object_bytes=%d, bytes_moved and seconds", m, ok, tagSnapshotSize)
+	if m, ok := measuredLine(t, logs, "actor "+e.Space+"/src: snapshot check"); !ok || m.object != tagSnapshotSize || m.moved != tagSnapshotSize {
+		// The disk store keeps no checksum: its Prove reads the object, and the meter counts that read.
+		t.Errorf("the suspend's check logged %+v (found %v); want object_bytes=bytes_moved=%d and seconds", m, ok, tagSnapshotSize)
 	}
 	tag, took := timedTag(t, e, "t1", "src")
 	if got := tag.GetStatus().GetSnapshot().GetUuid(); got != key {
