@@ -17,8 +17,18 @@ type Flusher interface {
 	Flush(ctx context.Context, vmID string) error
 }
 
-// DefaultFlushTimeout bounds a flush when Config.FlushTimeout is zero.
-const DefaultFlushTimeout = 20 * time.Second
+// A flush is bounded, when Config.FlushTimeout is zero, by FlushBase plus the VM's memory at FlushFloorRate
+// (FlushTimeoutFor): the flush saves each container's writable layer, which lives in the guest's tmpfs, so the VM's
+// memory bounds the work (PLT-378). 6 GiB: 116 s; 512 MiB: 28 s.
+const (
+	FlushBase      = 20 * time.Second
+	FlushFloorRate = 64 << 20 // bytes per second
+)
+
+// FlushTimeoutFor is the bound of a flush of a VM with memoryMiB of memory when Config.FlushTimeout is zero.
+func FlushTimeoutFor(memoryMiB int) time.Duration {
+	return FlushBase + time.Duration(int64(memoryMiB)<<20*int64(time.Second)/FlushFloorRate)
+}
 
 // DialRetry is how long GuestFlush waits between dials of a guest that does not answer yet.
 const DialRetry = 20 * time.Millisecond

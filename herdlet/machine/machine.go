@@ -51,7 +51,7 @@ type Config struct {
 	// Guests, if set, is how DialGuest reaches a guest.
 	Guests GuestDialer
 	// Flush, if set, asks the guest to flush before every snapshot (GuestFlush); a flush that fails or does not
-	// answer within FlushTimeout (default DefaultFlushTimeout) fails the snapshot.
+	// answer within FlushTimeout (default FlushTimeoutFor the VM's memory) fails the snapshot.
 	Flush        Flusher
 	FlushTimeout time.Duration
 	// Clock, if set, hands the guest the host's wall clock (GuestClock) whenever it runs on from a snapshot's memory: a
@@ -366,7 +366,7 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 		return vmm.Snapshot{}, err
 	}
 	start := time.Now()
-	if err := m.flush(ctx, vmID); err != nil {
+	if err := m.flush(ctx, vmID, m.spec(vmID, t, nil).MemoryMiB); err != nil {
 		// Not %w: the guest's answer is no outcome of the VMM's, and no snapshot was taken.
 		return vmm.Snapshot{}, fmt.Errorf("machine: snapshot %s: flushing the guest: %v", id, err)
 	}
@@ -430,14 +430,26 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	return snap, nil
 }
 
-// flush has the guest write back what it buffered, within the flush timeout.
-func (m *Machines) flush(ctx context.Context, vmID string) error {
+// Memory is how many bytes of memory the actor's VM has; false when this host runs no VM of id.
+func (m *Machines) Memory(id string) (int64, bool) {
+	vmID := m.resolve(id)
+	m.mu.Lock()
+	t, ok := m.tpl[vmID]
+	m.mu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	return int64(m.spec(vmID, t, nil).MemoryMiB) << 20, true
+}
+
+// flush has the guest write back what it buffered, within the flush timeout for a VM of memoryMiB.
+func (m *Machines) flush(ctx context.Context, vmID string, memoryMiB int) error {
 	if m.cfg.Flush == nil {
 		return nil
 	}
 	d := m.cfg.FlushTimeout
 	if d <= 0 {
-		d = DefaultFlushTimeout
+		d = FlushTimeoutFor(memoryMiB)
 	}
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()

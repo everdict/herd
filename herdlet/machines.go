@@ -119,6 +119,12 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	// herd-api waits for the bundle by its size (link.Progress): it learns the size as the bundle grows, and in full
 	// before the upload.
 	pw := &progressWriter{ctx: ctx, w: f, last: time.Now()}
+	// The guest's flush comes first and reports nothing; it saves the containers' writable layers, which the VM's
+	// memory bounds, into the bundle. herd-api learns that size now, so its call waits for the flush's bound
+	// (machine.FlushTimeoutFor) and does not end it at its call timeout (PLT-378).
+	if n, ok := a.Machines.Memory(w.VM); ok {
+		progress(ctx, n)
+	}
 	snap, err := a.Machines.Snapshot(ctx, w.VM, w.Fidelity, stop, pw)
 	if err != nil {
 		return classify(err)
