@@ -46,6 +46,9 @@ type fakeHost struct {
 	herdletMemMax int64
 	charged       map[string]int64    // bytes charged per cgroup, "" the herdlet's
 	startCgroups  map[string][]string // the cgroup of every process started, by binary
+	// vhostUserWait is how long a VMM whose guest restarted waits for its vhost-user back-ends before it exits
+	// (Cloud Hypervisor v54: 60 s); zero means 60 s.
+	vhostUserWait time.Duration
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -111,6 +114,8 @@ type fakeProc struct {
 	once   sync.Once
 	done   chan struct{}
 	stop   func()
+	// ch is the fake VMM a "ch" process serves.
+	ch *fakeCH
 }
 
 func (p *fakeProc) Pid() int { return p.pid }
@@ -173,6 +178,7 @@ func (h *fakeHost) Start(ps ProcSpec) (Process, error) {
 		}
 		p.kind = "ch"
 		ch := &fakeCH{h: h, proc: p, state: "none"}
+		p.ch = ch
 		srv := &http.Server{Handler: ch}
 		go func() { _ = srv.Serve(l) }()
 		p.stop = func() { _ = srv.Close(); _ = os.Remove(sock) }
@@ -237,6 +243,12 @@ func (c *fakeCH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.h.mu.Lock()
 	hang, unreachable, delay, ignore, die := c.h.hang[ep], c.h.unreachable[ep], c.h.delay[ep], c.h.ignoreShutdown, c.h.die[ep]
 	c.h.mu.Unlock()
+	c.mu.Lock()
+	if c.state == "rebooting" {
+		// The VMM thread waits for vhost-user back-ends: no API call is answered (vm.pause blocks, PLT-370).
+		hang = true
+	}
+	c.mu.Unlock()
 	switch {
 	case die != "":
 		if die != silentDeath {
@@ -532,3 +544,52 @@ func checkHostPaths(c *vmConfig) error {
 
 // silentDeath as a die fault makes the fake VMM exit mid-call writing nothing, as a process killed by a signal.
 const silentDeath = "(silent)"
+
+// restart is the guest restarting (a reboot, or herd-guest ending a boot it cannot finish), as measured on Cloud
+// Hypervisor v54 with virtiofsd 1.13 (PLT-370): the VMM resets the VM, each virtio-fs back-end sees its client go and
+// shuts down ("Client disconnected, shutting down"), and the VMM waits for a vhost-user connection that never comes,
+// answering no API call, until it exits after vhostUserWait with "Timed out waiting for vhost-user connection".
+func (c *fakeCH) restart() {
+	c.mu.Lock()
+	c.state = "rebooting"
+	c.mu.Unlock()
+	h := c.h
+	dir := filepath.Dir(c.proc.marker)
+	h.mu.Lock()
+	var fs []*fakeProc
+	for _, p := range h.procs {
+		if p.kind == "fs" && filepath.Dir(p.marker) == dir {
+			fs = append(fs, p)
+			p.status = "exit status 0"
+		}
+	}
+	wait := h.vhostUserWait
+	h.mu.Unlock()
+	for _, p := range fs {
+		appendLog(p.log, "[INFO  virtiofsd] Client disconnected, shutting down")
+		p.exit()
+	}
+	if wait == 0 {
+		wait = 60 * time.Second
+	}
+	t := time.AfterFunc(wait, func() {
+		appendLog(c.proc.log, "Error booting VM: Timed out waiting for vhost-user connection")
+		h.mu.Lock()
+		c.proc.status = "exit status 1"
+		h.mu.Unlock()
+		c.proc.exit()
+	})
+	go func() {
+		<-c.proc.done
+		t.Stop()
+	}()
+}
+
+func appendLog(path, line string) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(line + "\n")
+	_ = f.Close()
+}
