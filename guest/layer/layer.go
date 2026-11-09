@@ -37,6 +37,12 @@ const xattrPrefix = "SCHILY.xattr."
 // Write archives each directory of dirs (archive name → directory) into w. An entry whose name (<name>/<path>) is
 // in skip, or below one, is left out with everything under it. Sockets are left out; nothing listens on one after
 // a boot.
+//
+// The directories are live (a container keeps running while its layer is saved), so a file the walk listed may be
+// gone when Write reaches it, as Postgres removes postmaster.pid while it starts (PLT-380). ENOENT where Write reads
+// a directory, an entry's information, a symlink's target, its extended attributes or a file's body means that file
+// is not part of the layer, and Write goes on; any other error fails it. A regular file is opened before its header
+// is written, so one that vanishes is left out whole and never leaves a header without its body.
 func Write(w io.Writer, dirs map[string]string, skip []string) error {
 	tw := tar.NewWriter(w)
 	names := make([]string, 0, len(dirs))
@@ -48,6 +54,9 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 		top := dirs[n]
 		err := filepath.WalkDir(top, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
+				if p != top && vanished(err) {
+					return nil
+				}
 				return err
 			}
 			rel, err := filepath.Rel(top, p)
@@ -62,6 +71,9 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 				return nil
 			}
 			fi, err := d.Info()
+			if vanished(err) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -70,9 +82,20 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 			}
 			var link string
 			if fi.Mode()&fs.ModeSymlink != 0 {
-				if link, err = os.Readlink(p); err != nil {
+				if link, err = os.Readlink(p); vanished(err) {
+					return nil
+				} else if err != nil {
 					return err
 				}
+			}
+			var f *os.File
+			if fi.Mode().IsRegular() {
+				if f, err = os.Open(p); vanished(err) {
+					return nil
+				} else if err != nil {
+					return err
+				}
+				defer f.Close()
 			}
 			h, err := tar.FileInfoHeader(fi, link)
 			if err != nil {
@@ -83,6 +106,9 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 				h.Name += "/"
 			}
 			xa, err := listXattrs(p)
+			if vanished(err) {
+				return nil
+			}
 			if err != nil {
 				return fmt.Errorf("extended attributes of %s: %w", p, err)
 			}
@@ -95,12 +121,7 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 			if err := tw.WriteHeader(h); err != nil {
 				return err
 			}
-			if fi.Mode().IsRegular() {
-				f, err := os.Open(p)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
+			if f != nil {
 				if _, err := io.CopyN(tw, f, h.Size); err != nil {
 					return fmt.Errorf("%s: %w", p, err)
 				}
@@ -113,6 +134,9 @@ func Write(w io.Writer, dirs map[string]string, skip []string) error {
 	}
 	return tw.Close()
 }
+
+// vanished reports whether err says the file is gone (ENOENT).
+func vanished(err error) bool { return errors.Is(err, fs.ErrNotExist) }
 
 func skipped(name string, skip []string) bool {
 	for _, s := range skip {
