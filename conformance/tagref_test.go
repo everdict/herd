@@ -56,6 +56,34 @@ func padSnapshots(t *testing.T, e *conformance.Env, h *conformance.Herdlet, size
 	})
 }
 
+// suspendPadded suspends an actor whose snapshot padSnapshots pads and answers its snapshot's key. Writing the padding
+// is part of the herdlet's snapshot call, which a loaded host can make outlast the harness's CallTimeout; the suspend
+// is then owed, and Reconcile (ReconcileCallTimeout) settles it, as it would for a slow herdlet.
+func suspendPadded(t *testing.T, e *conformance.Env, name string) string {
+	t.Helper()
+	_, err := e.Client.SuspendActor(ctxT(t), &ateapi.SuspendActorRequest{Actor: oref(e, name)})
+	for i := 0; status.Code(err) == codes.Unavailable && i < 5; i++ {
+		t.Logf("suspend of %s owed (%v); reconciling", name, err)
+		if _, err := e.Server.Reconcile(ctxT(t)); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if a, owed := getActor(t, e, name); a.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+			err = status.Errorf(codes.Unavailable, "%v, owed %q", a.GetStatus().GetState(), owed)
+			continue
+		}
+		err = nil
+	}
+	if err != nil {
+		t.Fatalf("SuspendActor %s: %v", name, err)
+	}
+	a, _ := getActor(t, e, name)
+	snaps := a.GetStatus().GetSnapshots()
+	if len(snaps) == 0 {
+		t.Fatalf("suspended actor %s has no snapshot", name)
+	}
+	return snaps[len(snaps)-1].GetUuid()
+}
+
 // measured is one of herd-api's measured log lines: object_bytes, bytes_moved and seconds.
 type measured struct {
 	object, moved int64
@@ -117,7 +145,7 @@ func TestTagReferencesTheSnapshot(t *testing.T) {
 
 	// The tag outlives its source actor; the object goes with the tag.
 	mkActor(t, e, "src", "tpl", nil)
-	key := suspend(t, e, "src").GetUuid()
+	key := suspendPadded(t, e, "src")
 	if obj, err := e.Snapshots.Stat(ctx, key); err != nil || obj.Size != tagSnapshotSize {
 		t.Fatalf("the suspend's object = %+v, %v; want %d bytes", obj, err, tagSnapshotSize)
 	}
@@ -156,7 +184,7 @@ func TestTagReferencesTheSnapshot(t *testing.T) {
 
 	// The other order: the tag goes first and the actor keeps the object; it goes with the actor.
 	mkActor(t, e, "src2", "tpl", nil)
-	key2 := suspend(t, e, "src2").GetUuid()
+	key2 := suspendPadded(t, e, "src2")
 	if tag, _ := timedTag(t, e, "t2", "src2"); tag.GetStatus().GetSnapshot().GetUuid() != key2 {
 		t.Errorf("the tag records snapshot %q; want the actor's own object %q", tag.GetStatus().GetSnapshot().GetUuid(), key2)
 	}
@@ -174,7 +202,7 @@ func TestTagReferencesTheSnapshot(t *testing.T) {
 
 	// The Stat must find the object with the digest the actor recorded: bytes other than those, or none, make no tag.
 	mkActor(t, e, "src3", "tpl", nil)
-	key3 := suspend(t, e, "src3").GetUuid()
+	key3 := suspendPadded(t, e, "src3")
 	if _, err := e.Snapshots.Put(ctx, key3, bytes.NewReader([]byte("other bytes"))); err != nil {
 		t.Fatal(err)
 	}
