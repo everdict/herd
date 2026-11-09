@@ -81,7 +81,9 @@ type Env struct {
 	Hub       *link.Hub
 	Store     store.Store
 	Snapshots snapstore.Store
-	Key       []byte
+	// SnapshotDir is the directory the snapshot store keeps its objects in.
+	SnapshotDir string
+	Key         []byte
 	// Client may write in Space.
 	Client   *Client
 	Herdlets map[string]*Herdlet
@@ -89,6 +91,7 @@ type Env struct {
 	vms  *fake.Store
 	ctx  context.Context
 	hang *hangStore
+	api  *apiProcess
 }
 
 // NewStore makes the record store each Env runs on; tests may swap it (Envs are not started in parallel).
@@ -119,7 +122,8 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
 	}
-	snaps, err := disk.New(t.TempDir())
+	snapDir := t.TempDir()
+	snaps, err := disk.New(snapDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,28 +131,14 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
 	snaps.NoSync = true
 	hang := &hangStore{Store: snaps}
-	e := &Env{Space: "space-1", Hub: link.NewHub(), Store: NewStore(t), Snapshots: hang, Key: key,
+	e := &Env{Space: "space-1", Store: NewStore(t), Snapshots: hang, SnapshotDir: snapDir, Key: key,
 		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx, hang: hang}
-	e.Server, err = apiserver.New(apiserver.Config{
-		Store: e.Store, Snapshots: hang, Hub: e.Hub, Authn: auth.StaticKey{Key: key}, Authz: auth.SpaceRoles{},
-		CallTimeout:          CallTimeout,
-		ReconcileCallTimeout: ReconcileCallTimeout,
-		GoldenWarmup:         GoldenWarmup,
-		GoldenRetryBackoff:   GoldenRetryBackoff,
-		GoldenRebuilds:       GoldenRebuilds,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := grpc.NewServer()
-	e.Server.Register(g)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.Addr = ln.Addr().String()
-	served := make(chan struct{})
-	go func() { defer close(served); _ = g.Serve(ln) }()
+	e.serve(t, ln)
 	e.Client = NewClient(e.Addr, e.Token(t, map[string]auth.Role{e.Space: auth.RoleWrite}, false))
 	t.Cleanup(func() {
 		e.HangSnapshots(false)
@@ -159,8 +149,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 		e.Server.Wait()
 		e.Client.Close()
 		cancel()
-		g.Stop()
-		<-served
+		e.api.stop()
 		_ = e.Store.Close()
 	})
 	for _, s := range herdlets {
