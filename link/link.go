@@ -141,13 +141,15 @@ type Work struct {
 	Cause Cause `json:"cause,omitempty"`
 	// DeadlineUnixMilli bounds the work; past it the herdlet answers unknown.
 	DeadlineUnixMilli int64 `json:"deadlineUnixMilli,omitempty"`
-	// PullAuth is a boot's one-shot registry logins for the template's images (CreateActorTemplateRequest's
-	// image_pull_auth, a docker config's auths as JSON), sent only for the boot of a template's golden actor. The
-	// herdlet's pulls for that boot log in with it ahead of the node's -registry-auth; it is never written down.
+	// PullAuth is a boot's one-shot registry logins for the template's images (the image_pull_auth of
+	// CreateActorTemplateRequest or CreateActorRequest, a docker config's auths as JSON), sent only for the boot of a
+	// template's golden actor and for the cold boot of the create that gave it (PLT-405). The herdlet's pulls for that
+	// boot log in with it ahead of the node's -registry-auth; it is never written down.
 	PullAuth Secret `json:"pullAuth,omitempty"`
-	// PlainHosts are a boot's one-shot plain-HTTP registry hosts (CreateActorTemplateRequest's
-	// image_plain_http_hosts, DEFAUL-1600), sent only with the boot of a template's golden actor: the herdlet's pulls
-	// for that boot speak plain HTTP to them, registries and token realms alike, besides its -insecure-registry.
+	// PlainHosts are a boot's one-shot plain-HTTP registry hosts (the image_plain_http_hosts of
+	// CreateActorTemplateRequest, DEFAUL-1600, or of CreateActorRequest, PLT-405), sent only with the boots PullAuth
+	// is: the herdlet's pulls for that boot speak plain HTTP to them, registries and token realms alike, besides its
+	// -insecure-registry.
 	PlainHosts []string `json:"plainHosts,omitempty"`
 }
 

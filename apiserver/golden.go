@@ -351,10 +351,10 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 	}
 	ar, err := s.loadActor(ctx, space, t.name)
 	if errors.Is(err, store.ErrNotFound) {
-		_, err := s.createActor(ctx, &ateapi.Actor{
+		_, err := s.createActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
 			Metadata:      &ateapi.ResourceMetadata{Atespace: space, Name: t.name},
 			ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: g.rec.Name},
-		}, true)
+		}}, true)
 		switch status.Code(err) {
 		case codes.OK, codes.AlreadyExists:
 			return 0, true, true, nil
@@ -602,7 +602,7 @@ func (s *Server) deleteGolden(ctx context.Context, space, uid string, names []st
 }
 
 // goldenPull is what a template's create gave for its golden build's pull only: its image_pull_auth (PLT-330) and
-// its image_plain_http_hosts (DEFAUL-1600).
+// its image_plain_http_hosts (DEFAUL-1600); also what a CreateActorRequest gave for its cold boot (PLT-405).
 type goldenPull struct {
 	auth  link.Secret
 	plain []string

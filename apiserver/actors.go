@@ -119,6 +119,10 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 		// image_plain_http_hosts, if it came with them.
 		p := s.pull(ar.st.TemplateUID)
 		w.PullAuth, w.PlainHosts = p.auth, p.plain
+	} else if ar.st.Restore == nil {
+		// A cold boot of a create is that create's one pull (PLT-405): its own image_pull_auth and
+		// image_plain_http_hosts, if it came with them. ar.pull is never stored, so no later boot has them.
+		w.PullAuth, w.PlainHosts = ar.pull.auth, ar.pull.plain
 	}
 	if ar.st.Restore != nil {
 		w.Op, w.Snapshot = link.OpRestore, ar.st.Restore
@@ -192,13 +196,14 @@ func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest
 	if err := s.authorize(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite); err != nil {
 		return nil, err
 	}
-	return s.createActor(ctx, in, false)
+	return s.createActor(ctx, req, false)
 }
 
 // createActor is CreateActor once the caller is authorized. Without source_tag the actor restores from its template's
 // golden tag when the template has one, and boots cold otherwise; golden marks the template's own golden actor,
 // which always boots cold, on the worker keeping the highest fidelity.
-func (s *Server) createActor(ctx context.Context, in *ateapi.Actor, golden bool) (*ateapi.Actor, error) {
+func (s *Server) createActor(ctx context.Context, req *ateapi.CreateActorRequest, golden bool) (*ateapi.Actor, error) {
+	in := req.GetActor()
 	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
 	if name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "metadata.name is required")
@@ -207,13 +212,23 @@ func (s *Server) createActor(ctx context.Context, in *ateapi.Actor, golden bool)
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	// The create's own pull grant (PLT-405), checked as a template's is, for its boot if it boots cold.
+	pullAuth, err := checkLogins(req.GetImagePullAuth(), tpl)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := checkHosts(req.GetImagePlainHttpHosts())
+	if err != nil {
+		return nil, err
+	}
 	ar := &actorRec{
 		rec: store.Record{Key: actorKey(space, name)},
 		actor: &ateapi.Actor{
 			ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: tplRec.Name}, WorkerSelector: in.GetWorkerSelector(),
 			SourceTag: in.GetSourceTag(), Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RESUMING},
 		},
-		st: actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID, Golden: golden},
+		st:   actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID, Golden: golden},
+		pull: goldenPull{auth: pullAuth, plain: plain},
 	}
 	fromGolden := false
 	if gt := tpl.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(); in.GetSourceTag() == nil && gt != nil && !golden {

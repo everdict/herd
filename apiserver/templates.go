@@ -201,11 +201,17 @@ func (s *Server) DeleteActorTemplate(ctx context.Context, req *ateapi.DeleteActo
 // login for the registry of at least one of the template's images, for a template that builds a golden snapshot
 // (the one pull it is for). An error never quotes it.
 func checkPullAuth(a string, t *ateapi.ActorTemplate) (link.Secret, error) {
+	if a != "" && !goldenEnabled(t) {
+		return "", status.Errorf(codes.InvalidArgument, "image_pull_auth is for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
+	}
+	return checkLogins(a, t)
+}
+
+// checkLogins checks an image_pull_auth, a template's or a CreateActorRequest's (PLT-405): a docker config's auths
+// holding a login for the registry of at least one of the template's images. An error never quotes it.
+func checkLogins(a string, t *ateapi.ActorTemplate) (link.Secret, error) {
 	if a == "" {
 		return "", nil
-	}
-	if !goldenEnabled(t) {
-		return "", status.Errorf(codes.InvalidArgument, "image_pull_auth is for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
 	}
 	logins, err := registry.ParseLogins([]byte(a), "image_pull_auth")
 	if err != nil {
@@ -230,11 +236,16 @@ func checkPullAuth(a string, t *ateapi.ActorTemplate) (link.Secret, error) {
 // names, as herdlet -insecure-registry takes them, for a template that builds a golden snapshot (the one pull they
 // are for).
 func checkPlainHosts(hosts []string, t *ateapi.ActorTemplate) ([]string, error) {
+	if len(hosts) > 0 && !goldenEnabled(t) {
+		return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts are for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
+	}
+	return checkHosts(hosts)
+}
+
+// checkHosts checks an image_plain_http_hosts, a template's or a CreateActorRequest's (PLT-405).
+func checkHosts(hosts []string) ([]string, error) {
 	if len(hosts) == 0 {
 		return nil, nil
-	}
-	if !goldenEnabled(t) {
-		return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts are for the pull of the golden snapshot build, and golden_snapshot_config.mode is DISABLED")
 	}
 	if len(hosts) > maxPlainHosts {
 		return nil, status.Errorf(codes.InvalidArgument, "image_plain_http_hosts names %d hosts, at most %d", len(hosts), maxPlainHosts)

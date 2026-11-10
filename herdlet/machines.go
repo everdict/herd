@@ -37,15 +37,16 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			}
 		}
 		if w.PullAuth != "" {
-			// The golden build's one-shot logins (image_pull_auth): this boot's pulls only, ahead of -registry-auth.
+			// The boot's one-shot logins (image_pull_auth of a template's golden build or of a create that boots cold,
+			// PLT-405): this boot's pulls only, ahead of -registry-auth.
 			logins, err := registry.ParseLogins([]byte(w.PullAuth), "image_pull_auth")
 			if err != nil {
 				return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
 			}
-			ctx = registry.WithLogins(ctx, logins, "the template's image_pull_auth")
+			ctx = registry.WithLogins(ctx, logins, "the boot's image_pull_auth")
 		}
 		if len(w.PlainHosts) > 0 {
-			// The golden build's one-shot plain-HTTP hosts (image_plain_http_hosts): this boot's pulls only.
+			// The boot's one-shot plain-HTTP hosts (image_plain_http_hosts): this boot's pulls only.
 			ctx = registry.WithPlainHosts(ctx, w.PlainHosts)
 		}
 		if err := m.Boot(ctx, w.VM, *w.Spec); err != nil {

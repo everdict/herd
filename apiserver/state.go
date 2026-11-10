@@ -58,6 +58,9 @@ type actorRec struct {
 	rec   store.Record
 	actor *ateapi.Actor
 	st    actorState
+	// pull is a create's one-shot pull grant for its cold boot (PLT-405): in this create's memory only, never
+	// encoded, so an actor loaded from the store has none.
+	pull goldenPull
 }
 
 func actorKey(space, name string) store.Key {
