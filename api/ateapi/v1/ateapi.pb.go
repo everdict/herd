@@ -4617,16 +4617,6 @@ func (x *ListActorTemplatesResponse) GetNextPageToken() string {
 	return ""
 }
 
-// Worker is a schedulable worker pod.
-//
-// Global-scoped: metadata.atespace is always empty. metadata.name is assigned
-// by the control plane and is opaque to clients — never parse it or derive it
-// from anything else; read pod identity from the named fields below.
-//
-// labels and epoch are the only mutable fields; every other field is
-// either immutable after creation or output-only. UpdateWorker replaces the whole resource, so
-// an immutable field that a request changes — including by omitting it, which
-// would clear it — is rejected with INVALID_ARGUMENT.
 type DeleteActorTemplateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// +k8s:required
@@ -4736,9 +4726,26 @@ type CreateActorRequest struct {
 	// The actor to create.
 	//
 	// +k8s:required
-	Actor         *Actor `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Actor *Actor `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	// herd addition (PLT-405): a one-shot registry credential for the actor's
+	// images, in image_pull_auth's format on CreateActorTemplateRequest and
+	// checked the same way, used only if this create boots the actor cold (no
+	// golden snapshot, or one no worker can restore, such as a MEMORY snapshot
+	// of another restore family) and taking precedence over the node's own
+	// registry login for the hosts it names. It is held in herd-api's memory for
+	// that boot only, passed to the herdlet that boots it, never stored, never
+	// logged, never returned and never used by a later boot of the actor.
+	//
+	// +k8s:optional
+	ImagePullAuth string `protobuf:"bytes,1000,opt,name=image_pull_auth,json=imagePullAuth,proto3" json:"image_pull_auth,omitempty"`
+	// herd addition (PLT-405): the plain-HTTP registry hosts of that cold
+	// boot's pull, as image_plain_http_hosts on CreateActorTemplateRequest, and
+	// one-shot like image_pull_auth above.
+	//
+	// +k8s:optional
+	ImagePlainHttpHosts []string `protobuf:"bytes,1001,rep,name=image_plain_http_hosts,json=imagePlainHttpHosts,proto3" json:"image_plain_http_hosts,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CreateActorRequest) Reset() {
@@ -4774,6 +4781,20 @@ func (*CreateActorRequest) Descriptor() ([]byte, []int) {
 func (x *CreateActorRequest) GetActor() *Actor {
 	if x != nil {
 		return x.Actor
+	}
+	return nil
+}
+
+func (x *CreateActorRequest) GetImagePullAuth() string {
+	if x != nil {
+		return x.ImagePullAuth
+	}
+	return ""
+}
+
+func (x *CreateActorRequest) GetImagePlainHttpHosts() []string {
+	if x != nil {
+		return x.ImagePlainHttpHosts
 	}
 	return nil
 }
@@ -5561,16 +5582,6 @@ func (x *ListTagsResponse) GetNextPageToken() string {
 	return ""
 }
 
-// Worker is a schedulable worker pod.
-//
-// Global-scoped: metadata.atespace is always empty. metadata.name is assigned
-// by the control plane and is opaque to clients — never parse it or derive it
-// from anything else; read pod identity from the named fields below.
-//
-// labels and epoch are the only mutable fields; every other field is
-// either immutable after creation or output-only. UpdateWorker replaces the whole resource, so
-// an immutable field that a request changes — including by omitting it, which
-// would clear it — is rejected with INVALID_ARGUMENT.
 // Request to tag the external snapshot a suspended Actor holds.
 //
 // The tag captures whichever snapshot the Actor holds when the call runs. An
@@ -7239,9 +7250,11 @@ const file_ateapi_v1_ateapi_proto_rawDesc = "" +
 	"\x0eactor_template\x18\x01 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\ractorTemplate\x12<\n" +
 	"\aoptions\x18\x02 \x01(\v2\".substrate.ateapi.v1.DeleteOptionsR\aoptions\"G\n" +
 	"\x0fGetActorRequest\x124\n" +
-	"\x05actor\x18\x01 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\x05actor\"F\n" +
+	"\x05actor\x18\x01 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\x05actor\"\xa5\x01\n" +
 	"\x12CreateActorRequest\x120\n" +
-	"\x05actor\x18\x01 \x01(\v2\x1a.substrate.ateapi.v1.ActorR\x05actor\"F\n" +
+	"\x05actor\x18\x01 \x01(\v2\x1a.substrate.ateapi.v1.ActorR\x05actor\x12'\n" +
+	"\x0fimage_pull_auth\x18\xe8\a \x01(\tR\rimagePullAuth\x124\n" +
+	"\x16image_plain_http_hosts\x18\xe9\a \x03(\tR\x13imagePlainHttpHosts\"F\n" +
 	"\x12UpdateActorRequest\x120\n" +
 	"\x05actor\x18\x01 \x01(\v2\x1a.substrate.ateapi.v1.ActorR\x05actor\"\x8a\x01\n" +
 	"\x13SuspendActorRequest\x124\n" +

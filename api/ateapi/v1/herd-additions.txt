@@ -29,3 +29,24 @@ message CreateActorTemplateRequest {
   // +k8s:optional
   repeated string image_plain_http_hosts = 1001;
 }
+
+message CreateActorRequest {
+  // herd addition (PLT-405): a one-shot registry credential for the actor's
+  // images, in image_pull_auth's format on CreateActorTemplateRequest and
+  // checked the same way, used only if this create boots the actor cold (no
+  // golden snapshot, or one no worker can restore, such as a MEMORY snapshot
+  // of another restore family) and taking precedence over the node's own
+  // registry login for the hosts it names. It is held in herd-api's memory for
+  // that boot only, passed to the herdlet that boots it, never stored, never
+  // logged, never returned and never used by a later boot of the actor.
+  //
+  // +k8s:optional
+  string image_pull_auth = 1000;
+
+  // herd addition (PLT-405): the plain-HTTP registry hosts of that cold
+  // boot's pull, as image_plain_http_hosts on CreateActorTemplateRequest, and
+  // one-shot like image_pull_auth above.
+  //
+  // +k8s:optional
+  repeated string image_plain_http_hosts = 1001;
+}
