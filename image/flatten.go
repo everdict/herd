@@ -24,6 +24,82 @@ const (
 	opaqueMarker   = ".wh..wh..opq"
 )
 
+// node is one path of the tree being built: its entry, or nil for a parent no entry has named, and its children by
+// name. Removing a path drops its node, and every path under it with it, without looking at the rest of the tree.
+type node struct {
+	e    *entry
+	kids map[string]*node
+}
+
+// find is the node at name, or nil.
+func (n *node) find(name string) *node {
+	for _, el := range strings.Split(name, "/") {
+		if n = n.kids[el]; n == nil {
+			return nil
+		}
+	}
+	return n
+}
+
+// make is the node at name, adding it and its parents.
+func (n *node) make(name string) *node {
+	for _, el := range strings.Split(name, "/") {
+		k := n.kids[el]
+		if k == nil {
+			if n.kids == nil {
+				n.kids = map[string]*node{}
+			}
+			k = &node{}
+			n.kids[el] = k
+		}
+		n = k
+	}
+	return n
+}
+
+// remove drops name and everything under it.
+func (n *node) remove(name string) {
+	dir, base := path.Split(name)
+	if dir != "" {
+		if n = n.find(strings.TrimSuffix(dir, "/")); n == nil {
+			return
+		}
+	}
+	delete(n.kids, base)
+}
+
+// opaque drops every entry under n from a layer below li.
+func (n *node) opaque(li int) {
+	for _, c := range n.kids {
+		if c.e != nil && c.e.layer < li {
+			c.e = nil
+		}
+		c.opaque(li)
+	}
+}
+
+// collect puts every entry under n, at path p, into tree, a parent no entry named becoming a plain directory when
+// there is an entry under it, and reports whether it put any.
+func (n *node) collect(p string, tree map[string]*entry) bool {
+	found := false
+	for k, c := range n.kids {
+		cp := k
+		if p != "" {
+			cp = p + "/" + k
+		}
+		if c.collect(cp, tree) && c.e == nil {
+			tree[cp] = &entry{hdr: tar.Header{Typeflag: tar.TypeDir, Name: cp, Mode: 0o755, Format: tar.FormatPAX}}
+		}
+		if c.e != nil {
+			tree[cp] = c.e
+		}
+		if tree[cp] != nil {
+			found = true
+		}
+	}
+	return found
+}
+
 // cleanName turns a tar entry name into a relative, clean path, or refuses it: absolute names lose their leading
 // slash, and a name with a ".." element is a bad layer (it would escape the tree).
 func cleanName(name string) (string, error) {
@@ -51,7 +127,9 @@ func Flatten(layers []io.Reader, w io.Writer, tmpDir string) error {
 	}
 	defer os.Remove(spool.Name())
 	defer spool.Close()
-	tree := map[string]*entry{}
+	root := &node{}
+	// linksTo holds, by target, the paths of hard links that may still point at it.
+	linksTo := map[string]map[string]struct{}{}
 	var off int64
 	for li, l := range layers {
 		tr := tar.NewReader(l)
@@ -74,14 +152,16 @@ func Flatten(layers []io.Reader, w io.Writer, tmpDir string) error {
 			dir = strings.TrimSuffix(dir, "/")
 			switch {
 			case base == opaqueMarker:
-				for p, e := range tree {
-					if e.layer < li && under(p, dir) {
-						delete(tree, p)
-					}
+				d := root
+				if dir != "" {
+					d = root.find(dir)
+				}
+				if d != nil {
+					d.opaque(li)
 				}
 				continue
 			case strings.HasPrefix(base, whiteoutPrefix):
-				removeTree(tree, path.Join(dir, strings.TrimPrefix(base, whiteoutPrefix)))
+				root.remove(path.Join(dir, strings.TrimPrefix(base, whiteoutPrefix)))
 				continue
 			}
 			e := &entry{hdr: *h, layer: li}
@@ -105,37 +185,39 @@ func Flatten(layers []io.Reader, w io.Writer, tmpDir string) error {
 					return fmt.Errorf("%w: hard link %q → %q", ErrBadLayer, h.Name, h.Linkname)
 				}
 				e.hdr.Linkname, e.hdr.Size = target, 0
+				if linksTo[target] == nil {
+					linksTo[target] = map[string]struct{}{}
+				}
+				linksTo[target][name] = struct{}{}
 			case tar.TypeDir, tar.TypeSymlink, tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
 				e.hdr.Size = 0
 			default:
 				continue
 			}
-			if old, ok := tree[name]; ok && old.hdr.Typeflag == tar.TypeDir && e.hdr.Typeflag == tar.TypeDir {
+			n := root.make(name)
+			if old := n.e; old != nil && old.hdr.Typeflag == tar.TypeDir && e.hdr.Typeflag == tar.TypeDir {
 				// A directory entry over a directory changes its metadata and keeps its children.
-				tree[name] = e
+				n.e = e
 				continue
 			}
-			if old, ok := tree[name]; ok && old.hdr.Typeflag == tar.TypeReg {
+			if old := n.e; old != nil && old.hdr.Typeflag == tar.TypeReg {
 				// Hard links to the replaced file keep its old contents, as they would on a layered filesystem.
-				for _, l := range tree {
-					if l.hdr.Typeflag == tar.TypeLink && l.hdr.Linkname == name {
-						l.hdr.Typeflag, l.hdr.Linkname, l.hdr.Size, l.off = tar.TypeReg, "", old.hdr.Size, old.off
-						l.hdr.Mode, l.hdr.Uid, l.hdr.Gid = old.hdr.Mode, old.hdr.Uid, old.hdr.Gid
+				for lp := range linksTo[name] {
+					if ln := root.find(lp); ln != nil && ln.e != nil {
+						if l := ln.e; l.hdr.Typeflag == tar.TypeLink && l.hdr.Linkname == name {
+							l.hdr.Typeflag, l.hdr.Linkname, l.hdr.Size, l.off = tar.TypeReg, "", old.hdr.Size, old.off
+							l.hdr.Mode, l.hdr.Uid, l.hdr.Gid = old.hdr.Mode, old.hdr.Uid, old.hdr.Gid
+						}
 					}
 				}
+				delete(linksTo, name)
 			}
-			removeTree(tree, name)
-			tree[name] = e
+			n.e, n.kids = e, nil
 		}
 	}
 	// Implicit parents become plain directories.
-	for p := range tree {
-		for d := path.Dir(p); d != "."; d = path.Dir(d) {
-			if _, ok := tree[d]; !ok {
-				tree[d] = &entry{hdr: tar.Header{Typeflag: tar.TypeDir, Name: d, Mode: 0o755, Format: tar.FormatPAX}}
-			}
-		}
-	}
+	tree := map[string]*entry{}
+	root.collect("", tree)
 	var names, links []string
 	for p, e := range tree {
 		if e.hdr.Typeflag == tar.TypeLink {
@@ -169,19 +251,6 @@ func Flatten(layers []io.Reader, w io.Writer, tmpDir string) error {
 		return fmt.Errorf("image: flatten: %w", err)
 	}
 	return nil
-}
-
-func under(p, dir string) bool {
-	return dir == "" || strings.HasPrefix(p, dir+"/")
-}
-
-func removeTree(tree map[string]*entry, name string) {
-	delete(tree, name)
-	for p := range tree {
-		if strings.HasPrefix(p, name+"/") {
-			delete(tree, p)
-		}
-	}
 }
 
 func xattrsOnly(pax map[string]string) map[string]string {
