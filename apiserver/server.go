@@ -39,6 +39,10 @@ const SandboxClass = "microvm"
 // OwedHeader is the response trailer (gRPC metadata) that carries an actor's owed operation and its reason ("<op>: <reason>").
 const OwedHeader = "herd-owed"
 
+// StoreIDHeader is the response metadata (gRPC header, and trailer: an error answer has no header of its own) that
+// names the record store herd-api answers from on every Control and Capabilities call (StoreID, PLT-458).
+const StoreIDHeader = "herd-store-id"
+
 // Config wires a Server.
 type Config struct {
 	Store     store.Store
@@ -101,6 +105,9 @@ type Server struct {
 	// only, never stored (PLT-330).
 	pulls  map[string]goldenPull
 	closed bool
+
+	// storeID names cfg.Store (StoreID).
+	storeID string
 }
 
 // New returns a server. It registers itself as the hub's registration sink.
@@ -126,12 +133,43 @@ func New(cfg Config) (*Server, error) {
 	if cfg.GoldenRebuilds == 0 {
 		cfg.GoldenRebuilds = DefaultGoldenRebuilds
 	}
-	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}}
+	id, err := storeIdentity(context.Background(), cfg.Store)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}, storeID: id}
+	cfg.Hub.StoreID = id
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
 	cfg.Hub.OnLinked = s.herdletLinked
 	return s, nil
 }
+
+// storeIdentity is the id of st: the uid of its identity record (store.StoreKey), which the first herd-api to use the
+// store creates and no one changes. A store older than PLT-458 gets its id from the first herd-api that runs on it.
+func storeIdentity(ctx context.Context, st store.Store) (string, error) {
+	for {
+		r, err := st.Get(ctx, store.StoreKey)
+		if err == nil {
+			return r.UID, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return "", fmt.Errorf("apiserver: reading the store's id: %w", err)
+		}
+		r, err = st.Create(ctx, store.Record{Key: store.StoreKey})
+		if err == nil {
+			return r.UID, nil
+		}
+		if !errors.Is(err, store.ErrExists) {
+			return "", fmt.Errorf("apiserver: naming the store: %w", err)
+		}
+	}
+}
+
+// StoreID names the record store this herd-api answers from: a uuid made with the store and never changed (PLT-458).
+// Every API answer carries it (StoreIDHeader) and every herdlet's link learns it (link.Registered.StoreID), so a caller
+// can tell an answer from another store — where every actor it knows is NOT_FOUND — from an answer about its actors.
+func (s *Server) StoreID() string { return s.storeID }
 
 // Wait blocks until asynchronous workflows started by this server have finished.
 func (s *Server) Wait() { s.bg.Wait() }

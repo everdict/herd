@@ -24,9 +24,15 @@ const (
 	KindEgressPolicy  Kind = "EgressPolicy"
 	KindWorker        Kind = "Worker"
 	KindSpace         Kind = "Space"
+	// KindStore holds the store's own identity: one record (StoreKey), whose UID names the store (PLT-458).
+	KindStore Kind = "Store"
 )
 
-// Key names one record. Space is empty for global kinds (Worker, Space).
+// StoreKey is the key of the record that names the store: herd-api creates it on the store's first use, and its UID,
+// which never changes, is the store's id.
+var StoreKey = Key{Kind: KindStore, Name: "identity"}
+
+// Key names one record. Space is empty for global kinds (Worker, Space, Store).
 type Key struct {
 	Kind  Kind
 	Space string

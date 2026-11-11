@@ -105,6 +105,9 @@ type Capacity struct {
 // Registered acknowledges Register.
 type Registered struct {
 	Worker string `json:"worker"`
+	// StoreID names herd-api's record store (apiserver.Server.StoreID, PLT-458): the store whose records name the VMs
+	// the herdlet starts on this link. Empty: a herd-api older than PLT-458.
+	StoreID string `json:"storeId,omitempty"`
 }
 
 // Op is a piece of work.

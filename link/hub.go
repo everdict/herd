@@ -38,6 +38,8 @@ type Hub struct {
 	// answers it), and any earlier link of the worker has been closed, its pending calls ended unknown. It must not
 	// block: the link reads nothing until it returns.
 	OnLinked func(ctx context.Context, r Register)
+	// StoreID names herd-api's record store; every herdlet's Registered carries it (PLT-458).
+	StoreID string
 
 	mu      sync.Mutex
 	workers map[string]*conn
@@ -103,7 +105,7 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		h.mu.Unlock()
 		c.close()
 	}()
-	if err := c.send(Down{Registered: &Registered{Worker: c.reg.Worker}}); err != nil {
+	if err := c.send(Down{Registered: &Registered{Worker: c.reg.Worker, StoreID: h.StoreID}}); err != nil {
 		return err
 	}
 	for {

@@ -157,6 +157,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("herd-api: record store %s, store id %s", a.Store, srv.StoreID())
 	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {

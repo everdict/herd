@@ -7,6 +7,7 @@ import (
 	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/link"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // The service descriptors are written by hand (ADR 0001, A-12): protoc-gen-go-grpc is not available where herd is
@@ -55,6 +56,12 @@ func unary[S any, Req any, PReq interface{ *Req }, Resp any](svc, name string, h
 			return nil, err
 		}
 		s := srv.(S)
+		if n, ok := srv.(interface{ StoreID() string }); ok {
+			// Every answer names the store it comes from, an error too (PLT-458).
+			md := metadata.Pairs(StoreIDHeader, n.StoreID())
+			_ = grpc.SetHeader(ctx, md)
+			_ = grpc.SetTrailer(ctx, md)
+		}
 		if ic == nil {
 			return h(s, ctx, in)
 		}

@@ -193,3 +193,27 @@ func TestOutcomeNamesItsLinksInstance(t *testing.T) {
 		close(up)
 	}
 }
+
+// TestRegisteredNamesTheStore (PLT-458): the hub's answer to a registration names herd-api's record store, so the
+// herdlet knows under which store's records it starts VMs on this link.
+func TestRegisteredNamesTheStore(t *testing.T) {
+	h := link.NewHub()
+	h.StoreID = "0b3e5a52-7d2c-4c1e-9a55-2f0e8d1c6b7a"
+	up, down := make(chan []byte, 4), make(chan []byte, 4)
+	go func() { _ = h.Serve(context.Background(), pipe{in: up, out: down}) }()
+	defer close(up)
+	b, _ := json.Marshal(link.Up{Register: &link.Register{Worker: "w"}})
+	up <- b
+	select {
+	case b := <-down:
+		var d link.Down
+		if err := json.Unmarshal(b, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Registered == nil || d.Registered.StoreID != h.StoreID {
+			t.Fatalf("first Down = %+v, want Registered naming store %s", d, h.StoreID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no Registered within 5 s")
+	}
+}
