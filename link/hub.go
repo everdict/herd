@@ -87,6 +87,11 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		}
 	}
 	c := &conn{reg: *up.Register, instance: up.Register.Instance, stream: s, pending: map[string]*pending{}, done: make(chan struct{})}
+	// Registered goes before any work can (the link is not the worker's until below): the herdlet knows the store of
+	// every VM it starts on this link (Registered.StoreID).
+	if err := c.send(Down{Registered: &Registered{Worker: c.reg.Worker, StoreID: h.StoreID}}); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	if old, ok := h.workers[c.reg.Worker]; ok {
 		// A reconnect replaces the old link; its pending calls end unknown.
@@ -105,9 +110,6 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		h.mu.Unlock()
 		c.close()
 	}()
-	if err := c.send(Down{Registered: &Registered{Worker: c.reg.Worker, StoreID: h.StoreID}}); err != nil {
-		return err
-	}
 	for {
 		b, err := s.Recv()
 		if errors.Is(err, io.EOF) {

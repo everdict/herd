@@ -99,10 +99,112 @@ func (s *Server) herdletLinked(ctx context.Context, r link.Register) {
 	s.bg.Add(1)
 	go func() {
 		defer s.bg.Done()
-		if err := s.settleRestart(context.WithoutCancel(ctx), r.Worker); err != nil {
+		ctx := context.WithoutCancel(ctx)
+		if err := s.settleRestart(ctx, r.Worker); err != nil {
 			log.Printf("herd-api: herdlet %s linked, but its actors were not settled: %v (Reconcile tries again)", r.Worker, err)
 		}
+		if r.Held == nil {
+			// A herdlet older than PLT-459 names no VMs: only the restart rule above settles its actors.
+			return
+		}
+		if err := s.settleHeld(ctx, r.Worker, *r.Held); err != nil {
+			log.Printf("herd-api: herdlet %s linked, but its VMs were not compared with the records: %v", r.Worker, err)
+		}
 	}()
+}
+
+// reasonVMMissing is the crash reason of an actor whose VM its herdlet does not hold (PLT-459).
+const reasonVMMissing = "vm-missing"
+
+// settleHeld compares the VMs the herdlet of worker registered it holds with the records (PLT-459). A record on
+// worker that holds a VM (heldVM) the herdlet does not name is CRASHED once the herdlet answers that VM gone
+// (settleMissing). A VM it names that no record on worker names is stopped, if it was started under this herd-api's
+// store; one started under another store is only reported, since this herd-api's records say nothing about it.
+func (s *Server) settleHeld(ctx context.Context, worker string, held link.Held) error {
+	recs, err := s.cfg.Store.List(ctx, store.KindActor, "")
+	if err != nil {
+		return err
+	}
+	holds := map[string]string{}
+	for _, v := range held.VMs {
+		holds[v.VM] = v.StoreID
+	}
+	named := map[string]bool{}
+	var missing []store.Key
+	for _, r := range recs {
+		ar, err := parseActor(r)
+		if err != nil {
+			return err
+		}
+		if ar.st.Worker != worker {
+			continue
+		}
+		named[vmID(ar)] = true
+		if _, ok := holds[vmID(ar)]; !ok && heldVM(ar) {
+			missing = append(missing, r.Key)
+		}
+	}
+	for _, k := range missing {
+		if err := s.settleMissing(ctx, k, worker, holds); err != nil {
+			log.Printf("herd-api: actor %s/%s: herdlet %s holds no VM of it, but it was not settled: %v", k.Space, k.Name, worker, err)
+		}
+	}
+	for _, v := range held.VMs {
+		if named[v.VM] {
+			continue
+		}
+		if v.StoreID == "" || v.StoreID != s.storeID {
+			log.Printf("herd-api: herdlet %s holds VM %s, which no actor record names; it was started under store %q, "+
+				"not this herd-api's %s, so it is left running", worker, v.VM, v.StoreID, s.storeID)
+			continue
+		}
+		log.Printf("herd-api: herdlet %s holds VM %s, which no actor record names: stopping it", worker, v.VM)
+		o := s.call(ctx, worker, link.Work{Op: link.OpDelete, VM: v.VM, Cause: link.CauseDelete})
+		log.Printf("herd-api: herdlet %s: delete of VM %s, which no actor record names: %s", worker, v.VM, outcomeText(o))
+	}
+	return nil
+}
+
+// heldVM is whether the actor's record says its worker holds a VM that only a running VM can settle: RUNNING with
+// nothing owed, or SUSPENDING with the snapshot owed (none is durable, and none can be taken of a VM that is gone).
+// Any other workflow settles itself: an owed release or delete finds the VM gone, an owed boot or resume starts it.
+func heldVM(ar *actorRec) bool {
+	st := ar.actor.Status.GetState()
+	return st == ateapi.ActorState_ACTOR_STATE_RUNNING && ar.st.Owed == nil ||
+		st == ateapi.ActorState_ACTOR_STATE_SUSPENDING && ar.st.Owed != nil && ar.st.Owed.Op == owedSuspend
+}
+
+// settleMissing moves the actor to CRASHED if its record still holds a VM on worker (heldVM) that the herdlet's
+// registration did not name, and the herdlet answers that VM gone. The answer is asked under the actor's lock, after
+// the registration: a VM started after the list was made is present, and a present or unknown answer changes nothing.
+func (s *Server) settleMissing(ctx context.Context, k store.Key, worker string, holds map[string]string) error {
+	unlock := s.lock(k)
+	defer unlock()
+	ar, err := s.loadActor(ctx, k.Space, k.Name)
+	if err != nil {
+		return err
+	}
+	if _, ok := holds[vmID(ar)]; ok || ar.st.Worker != worker || !heldVM(ar) {
+		return nil
+	}
+	o := s.step(ctx, ar, link.Work{Op: link.OpInspect, VM: vmID(ar)})
+	if o.Result != link.ResultDone || o.Presence != link.PresenceGone {
+		log.Printf("herd-api: actor %s/%s: herdlet %s did not name VM %s as held, but answers it %s; left as it is",
+			k.Space, k.Name, worker, vmID(ar), presenceName(o.Presence))
+		return nil
+	}
+	st := ar.actor.Status.GetState()
+	msg := fmt.Sprintf("%s: the herdlet of worker %s linked holding no VM %s while the actor was %s, and answers it gone",
+		reasonVMMissing, worker, vmID(ar), strings.TrimPrefix(st.String(), "ACTOR_STATE_"))
+	ar.setState(ateapi.ActorState_ACTOR_STATE_CRASHED)
+	ar.st.Owed = nil
+	ar.actor.Status.Crash = &ateapi.ActorCrash{Message: msg, CrashTime: timestamppb.Now()}
+	ar.actor.Status.WorkerAssignment, ar.actor.Status.AssignedNode = nil, ""
+	if err := s.save(ctx, ar); err != nil {
+		return err
+	}
+	log.Printf("herd-api: actor %s/%s %v -> CRASHED: %s", k.Space, k.Name, st, msg)
+	return nil
 }
 
 // settleRestart crashes each actor on worker whose VM a herdlet process other than the connected one holds
@@ -152,10 +254,7 @@ func (s *Server) crashRestarted(ctx context.Context, k store.Key) error {
 		return nil
 	}
 	st := ar.actor.Status.GetState()
-	switch {
-	case st == ateapi.ActorState_ACTOR_STATE_RUNNING && ar.st.Owed == nil:
-	case st == ateapi.ActorState_ACTOR_STATE_SUSPENDING && ar.st.Owed != nil && ar.st.Owed.Op == owedSuspend:
-	default:
+	if !heldVM(ar) {
 		return nil
 	}
 	cur, _ := s.cfg.Hub.Instance(ar.st.Worker)

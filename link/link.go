@@ -84,6 +84,24 @@ type Register struct {
 	// SnapshotStore names the snapshot store the herdlet writes snapshots to, with no credential in it: herd-api
 	// refuses a link whose store is not its own, where it would look for them (PLT-382). Empty: not declared.
 	SnapshotStore string `json:"snapshotStore,omitempty"`
+	// Held names the VMs the herdlet holds for actors as it registers (PLT-459): herd-api settles each record on the
+	// worker that holds a VM the list does not name (once the herdlet answers it gone), and stops each VM on the list
+	// that no record names. Nil: a herdlet older than PLT-459, whose VMs are not reconciled this way.
+	Held *Held `json:"held,omitempty"`
+}
+
+// Held is the VMs a herdlet holds for actors: each VM a boot or restore started and no delete or inspect has found
+// gone since.
+type Held struct {
+	VMs []HeldVM `json:"vms"`
+}
+
+// HeldVM is one VM a herdlet holds, and the record store (Registered.StoreID) of the link whose work started it: a
+// herd-api stops a VM no record names only when the VM was started under its own store, so one running on another
+// store (PLT-458) stops nothing. Empty: started on a link that named no store.
+type HeldVM struct {
+	VM      string `json:"vm"`
+	StoreID string `json:"storeId,omitempty"`
 }
 
 // Capacity is what the herdlet can hold and which templates it keeps warm VMs for. Slots is a count ceiling (0: none,

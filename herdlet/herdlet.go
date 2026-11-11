@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -98,6 +99,10 @@ type Agent struct {
 
 	runMu   sync.Mutex
 	running map[string]bool // VM ids (as herd-api names them) of the VMs this herdlet runs for actors
+	// holding maps the VMs this herdlet holds for actors (link.Register.Held) to the store of the link whose work started
+	// each; linkStore is the store the current link named (link.Registered.StoreID).
+	holding   map[string]string
+	linkStore string
 
 	instanceOnce sync.Once
 }
@@ -151,6 +156,7 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		Capacity:      a.capacity(a.Warm),
 		Instance:      a.Instance,
 		SnapshotStore: a.SnapshotStore,
+		Held:          a.heldVMs(),
 	}
 	if a.Pool != nil {
 		reg.Capacity.Warm = a.Pool.Counts()
@@ -213,6 +219,13 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		var d link.Down
 		if err := json.Unmarshal(b, &d); err != nil {
 			return fmt.Errorf("herdlet: decode: %w", err)
+		}
+		if d.Registered != nil {
+			// It comes before any work on this link (link.Hub.Serve).
+			a.runMu.Lock()
+			a.linkStore = d.Registered.StoreID
+			a.runMu.Unlock()
+			continue
 		}
 		if d.Extend != nil {
 			a.extend(*d.Extend)
@@ -282,6 +295,13 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		return classify(err)
 	}
 	defer release()
+	o := a.carry(ctx, w)
+	a.track(w, o)
+	return o
+}
+
+// carry does w. The caller holds the VM's lock.
+func (a *Agent) carry(ctx context.Context, w link.Work) link.Outcome {
 	if w.Actor != nil && a.OnActor != nil && (w.Op == link.OpBoot || w.Op == link.OpRestore) {
 		a.OnActor(w.VM, *w.Actor)
 	}
@@ -340,6 +360,34 @@ func (a *Agent) do(ctx context.Context, w link.Work) link.Outcome {
 		return o
 	}
 	return link.Outcome{Result: link.ResultFailed, Reason: fmt.Sprintf("unknown op %q", w.Op)}
+}
+
+// track keeps the VMs the herdlet holds (link.Register.Held): a boot or restore done starts holding one, under the
+// current link's store; a delete or inspect that found it gone ends it. The caller holds the VM's lock.
+func (a *Agent) track(w link.Work, o link.Outcome) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	switch {
+	case (w.Op == link.OpBoot || w.Op == link.OpRestore) && o.Result == link.ResultDone:
+		if a.holding == nil {
+			a.holding = map[string]string{}
+		}
+		a.holding[w.VM] = a.linkStore
+	case o.Presence == link.PresenceGone:
+		delete(a.holding, w.VM)
+	}
+}
+
+// heldVMs is what the herdlet registers it holds.
+func (a *Agent) heldVMs() *link.Held {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	h := &link.Held{VMs: []link.HeldVM{}}
+	for vm, st := range a.holding {
+		h.VMs = append(h.VMs, link.HeldVM{VM: vm, StoreID: st})
+	}
+	sort.Slice(h.VMs, func(i, j int) bool { return h.VMs[i].VM < h.VMs[j].VM })
+	return h
 }
 
 // cut ends the VM's tunnel streams with the reason the cause names, and refuses new ones. The VM is no longer
