@@ -28,13 +28,17 @@ import (
 
 // Agent is one herdlet.
 type Agent struct {
-	Worker    string
-	Class     string
-	Labels    map[string]string
-	Slots     int
-	Warm      map[string]int
-	VMM       vmm.VMM
-	Snapshots snapstore.Store
+	Worker string
+	Class  string
+	Labels map[string]string
+	Slots  int
+	// MilliCPU and MemoryMiB are what this host can allocate to VMs, and OverheadMiB a VM's memory beyond its guest's
+	// (PLT-452); reported in the capacity. 0 = not known.
+	MilliCPU, MemoryMiB int64
+	OverheadMiB         int
+	Warm                map[string]int
+	VMM                 vmm.VMM
+	Snapshots           snapstore.Store
 	// Bundles, if set, is this node's copy of the snapshot objects it wrote or fetched (PLT-227): a restore of one it
 	// holds reads no store, and one it does not hold is read from the store once and kept.
 	Bundles *bundlecache.Cache
@@ -144,7 +148,7 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	reg := link.Register{
 		Worker: a.Worker, Class: a.Class, Labels: a.Labels,
 		Capabilities:  a.declare(caps),
-		Capacity:      link.Capacity{Slots: a.Slots, Warm: a.Warm},
+		Capacity:      a.capacity(a.Warm),
 		Instance:      a.Instance,
 		SnapshotStore: a.SnapshotStore,
 	}
@@ -186,7 +190,8 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 	}
 	if a.Pool != nil {
 		a.Pool.Changed = func(warm map[string]int) {
-			_ = send(link.Up{Capacity: &link.Capacity{Slots: a.Slots, Warm: warm}})
+			c := a.capacity(warm)
+			_ = send(link.Up{Capacity: &c})
 		}
 		// The pool stops with the link (before wg.Wait, which waits for it).
 		pctx, stopPool := context.WithCancel(ctx)
@@ -244,6 +249,14 @@ func classify(err error) link.Outcome {
 		return link.Outcome{Result: link.ResultFailed, Reason: err.Error(), Code: link.CodeUnavailable}
 	}
 	return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
+}
+
+// capacity is what the herdlet reports it holds (PLT-452): its slot ceiling, what it can allocate, and how it sizes a
+// VM whose template sets no limits.
+func (a *Agent) capacity(warm map[string]int) link.Capacity {
+	d := a.spec("")
+	return link.Capacity{Slots: a.Slots, Warm: warm, MilliCPU: a.MilliCPU, MemoryMiB: a.MemoryMiB,
+		DefaultVCPUs: d.VCPUs, DefaultMemoryMiB: d.MemoryMiB, OverheadMiB: a.OverheadMiB}
 }
 
 func (a *Agent) spec(id string) vmm.Spec {

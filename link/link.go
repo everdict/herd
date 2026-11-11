@@ -86,9 +86,18 @@ type Register struct {
 	SnapshotStore string `json:"snapshotStore,omitempty"`
 }
 
-// Capacity is how many actors the herdlet can hold and which templates it keeps warm VMs for.
+// Capacity is what the herdlet can hold and which templates it keeps warm VMs for. Slots is a count ceiling (0: none,
+// where cpu and memory are reported). MilliCPU and MemoryMiB are what it can allocate to VMs after its operator's
+// reserve, and DefaultVCPUs, DefaultMemoryMiB and OverheadMiB how it sizes a VM: a template's limits, else the default,
+// plus the overhead its VM cgroup may hold beyond the guest's memory — so herd-api sizes an actor as it boots
+// (PLT-452). A herdlet older than PLT-452 reports none of them, and is placed by Slots.
 type Capacity struct {
-	Slots int `json:"slots"`
+	Slots            int   `json:"slots"`
+	MilliCPU         int64 `json:"milliCPU,omitempty"`
+	MemoryMiB        int64 `json:"memoryMiB,omitempty"`
+	DefaultVCPUs     int   `json:"defaultVCPUs,omitempty"`
+	DefaultMemoryMiB int   `json:"defaultMemoryMiB,omitempty"`
+	OverheadMiB      int   `json:"overheadMiB,omitempty"`
 	// Warm maps an actor template uid to the warm VMs the herdlet holds for it.
 	Warm map[string]int `json:"warm,omitempty"`
 }

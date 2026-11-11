@@ -51,7 +51,7 @@ credential injection), `herd-guest` (the in-VM agent).
 | `internal/cmd/protosubset` | Cuts the subset out of the upstream proto |
 | `cmd/herd-api`, `apiserver` | herd-api: the Control subset, the Capabilities extension, workflows, `Reconcile` |
 | `link`, `herdlet` | The herdlet's outbound link (three-valued outcomes) and the herdlet agent on a `vmm.VMM` |
-| `sched` | Placement by slots, class, labels, warm VMs and restore family |
+| `sched` | Placement by cpu and memory (slots for an older herdlet), class, labels, warm VMs and restore family |
 | `store` | Records with uid+version preconditions: `memstore`, `boltstore` (bbolt, all-in-one), `storetest` (the contract) |
 | `snapstore` | Snapshot objects with digests: `snapstore/disk` |
 | `auth` | Authn and per-space authz interfaces; static-key HS256 JWTs |

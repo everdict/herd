@@ -62,7 +62,12 @@ type Herdlet struct {
 	// store (-bundle-cache, PLT-227): a restore of one it holds reads no S3 bytes. 0 keeps none.
 	BundleCacheMiB int
 	Slots          int
-	Labels         string
+	// ReserveCPU (millicores) and ReserveMemoryMiB are what the host keeps for itself, and CPUOvercommit how many vCPUs
+	// a core carries: what remains is what the herdlet reports it can allocate to VMs (PLT-452).
+	ReserveCPU       int64
+	ReserveMemoryMiB int64
+	CPUOvercommit    float64
+	Labels           string
 	// Router overrides the herd-router tunnel address a join handed out.
 	Router   string
 	JoinOnly bool
@@ -137,7 +142,10 @@ type Herdlet struct {
 func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.StringVar(&h.Worker, "worker", defaultWorker(), "worker name (a DNS label; default: this host's name)")
 	fs.StringVar(&h.Labels, "labels", "", "worker labels, k=v,k=v")
-	fs.IntVar(&h.Slots, "slots", 4, "actors this host holds")
+	fs.IntVar(&h.Slots, "slots", 0, "actors this host holds at most (0: no count ceiling; its cpu and memory decide)")
+	fs.Int64Var(&h.ReserveCPU, "reserve-cpu", 1000, "millicores of this host kept from VMs")
+	fs.Int64Var(&h.ReserveMemoryMiB, "reserve-memory", 2048, "MiB of this host's memory kept from VMs")
+	fs.Float64Var(&h.CPUOvercommit, "cpu-overcommit", 1, "vCPUs a core carries when counting what VMs may take")
 	fs.StringVar(&h.StateDir, "state", "/var/lib/herdlet", "state directory: join grant, VMs, shares, image cache")
 	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's, for a herd-api without -s3 (default: <state>/snapshots; ignored when the join handed out an S3 store)")
 	fs.IntVar(&h.BundleCacheMiB, "bundle-cache", DefaultBundleCacheMiB, "MiB of snapshot bundles kept in <state>/bundles when snapshots are in S3, least recently used evicted first: a restore of a bundle this node wrote or read before (a template's golden) reads it from there, not from S3 (0: none)")
@@ -448,9 +456,11 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if h.Slots < 1 {
-		return fmt.Errorf("-slots %d", h.Slots)
+	milliCPU, memoryMiB, err := h.allocatable(hostResources())
+	if err != nil {
+		return err
 	}
+	log.Printf("herdlet: allocatable %dm cpu, %d MiB memory, slot ceiling %d", milliCPU, memoryMiB, h.Slots)
 	snaps, err := h.snapshots(st.Grant)
 	if err != nil {
 		return err
@@ -471,7 +481,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	} else {
 		log.Printf("herdlet: guest build %s", guest)
 	}
-	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, VMM: host.VMM,
+	agent := &herdlet.Agent{Worker: st.Grant.Worker, Class: apiserver.SandboxClass, Labels: labels, Slots: h.Slots, MilliCPU: milliCPU, MemoryMiB: memoryMiB, OverheadMiB: h.VMMemoryOverheadMiB, VMM: host.VMM,
 		Snapshots: snaps, Bundles: bundles, HypervisorVersion: host.Version, Machines: m, EgressAllowPrefixes: h.EgressAllow, Guest: guest,
 		Boot: vmm.Spec{Kernel: h.Kernel, Initrd: h.Initrd, Cmdline: h.Cmdline, VCPUs: h.VCPUs, MemoryMiB: h.MemoryMiB}}
 	// Capabilities are re-read every 30 s and on each wake, and a change is pushed to herd-api (a Mac whose console

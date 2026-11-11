@@ -127,7 +127,7 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 const CompatSchema = "herd-v1"
 
 // substrateWorker is Substrate's view of a worker record: what its herdlet declared (c), and, while it is connected
-// to this herd-api, its class, labels, slots and the slots held on it (live).
+// to this herd-api, its class, labels, its slot ceiling and cpu and memory, and what is held of them (live).
 func substrateWorker(r store.Record, c *herdext.WorkerCapabilities, live *sched.Worker) *ateapi.Worker {
 	var attrs []*ateapi.AttributeEntry
 	for _, kv := range [][2]string{
@@ -147,8 +147,10 @@ func substrateWorker(r store.Record, c *herdext.WorkerCapabilities, live *sched.
 	w := &ateapi.Worker{Metadata: meta(r), Status: st}
 	if live != nil {
 		st.State = ateapi.WorkerState_WORKER_STATE_ACTIVE
-		st.Capacity = &ateapi.WorkerResources{Actors: int32(live.Slots)}
-		st.Allocated = &ateapi.WorkerResources{Actors: int32(live.Used)}
+		// cpu and memory as the herdlet reported them and as herd-api's actors on it are sized (PLT-452); actors is the
+		// slot ceiling (0: none) and the actors held.
+		st.Capacity = &ateapi.WorkerResources{Actors: int32(live.Slots), CpuMillicores: live.MilliCPU, MemoryBytes: live.MemoryMiB << 20}
+		st.Allocated = &ateapi.WorkerResources{Actors: int32(live.Used), CpuMillicores: live.UsedMilliCPU, MemoryBytes: live.UsedMemoryMiB << 20}
 		w.Labels = live.Labels
 		if live.Class != "" {
 			class = live.Class

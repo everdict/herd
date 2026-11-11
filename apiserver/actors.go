@@ -20,31 +20,67 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// workers is the scheduler's view: connected herdlets with the slots herd-api holds on each.
+// workers is the scheduler's view: connected herdlets with the actors herd-api holds on each, and what those actors
+// and the herdlet's warm VMs take of its cpu and memory, each at its template's limits as that herdlet boots it
+// (PLT-452).
 func (s *Server) workers(ctx context.Context) ([]sched.Worker, error) {
 	recs, err := s.cfg.Store.List(ctx, store.KindActor, "")
 	if err != nil {
 		return nil, err
 	}
-	used := map[string]int{}
+	tpls, err := s.cfg.Store.List(ctx, store.KindActorTemplate, "")
+	if err != nil {
+		return nil, err
+	}
+	limits := map[string]sched.Request{}
+	for _, r := range tpls {
+		t, err := decode(r, &ateapi.ActorTemplate{})
+		if err != nil {
+			return nil, err
+		}
+		limits[r.UID] = templateLimits(t)
+	}
+	held := map[string][]sched.Request{}
 	for _, r := range recs {
 		ar, err := parseActor(r)
 		if err != nil {
 			return nil, err
 		}
 		if ar.st.Worker != "" {
-			used[ar.st.Worker]++
+			// A template gone from the store counts at the worker's default size.
+			held[ar.st.Worker] = append(held[ar.st.Worker], limits[ar.st.TemplateUID])
 		}
 	}
 	var out []sched.Worker
 	for _, w := range s.cfg.Hub.Workers() {
-		out = append(out, sched.Worker{
+		c := w.Capacity
+		sw := sched.Worker{
 			Name: w.Worker, Class: w.Class, Labels: w.Labels, Connected: w.Connected,
-			Slots: w.Capacity.Slots, Used: used[w.Worker], Warm: w.Capacity.Warm,
+			Slots: c.Slots, Used: len(held[w.Worker]), Warm: c.Warm,
+			MilliCPU: c.MilliCPU, MemoryMiB: c.MemoryMiB,
+			DefaultMilliCPU: int64(c.DefaultVCPUs) * 1000, DefaultMemoryMiB: int64(c.DefaultMemoryMiB), OverheadMiB: int64(c.OverheadMiB),
 			SuspendMaxFidelity: w.Capabilities.SuspendMaxFidelity, RestoreFamily: w.Capabilities.RestoreFamily,
-		})
+		}
+		take := func(r sched.Request, n int) {
+			cpu, mem := sw.Need(r)
+			sw.UsedMilliCPU += cpu * int64(n)
+			sw.UsedMemoryMiB += mem * int64(n)
+		}
+		for _, r := range held[w.Worker] {
+			take(r, 1)
+		}
+		for uid, n := range c.Warm {
+			take(limits[uid], n)
+		}
+		out = append(out, sw)
 	}
 	return out, nil
+}
+
+// templateLimits is a template's cpu and memory limits as a placement request; 0 where it sets none.
+func templateLimits(t *ateapi.ActorTemplate) sched.Request {
+	l := t.GetResources().GetLimits()
+	return sched.Request{MilliCPU: l.GetCpuMillicores(), MemoryMiB: l.GetMemoryBytes() >> 20}
 }
 
 func (s *Server) workerCaps(name string) (link.Capabilities, bool) {
@@ -81,9 +117,10 @@ func (s *Server) place(ctx context.Context, ar *actorRec, tpl *ateapi.ActorTempl
 	if err != nil {
 		return err
 	}
+	lim := templateLimits(tpl)
 	w, err := sched.Place(ws, sched.Request{
 		Class: SandboxClass, Template: ar.st.TemplateUID, Selector: selectorOf(tpl, ar.actor), Snapshot: schedSnapshot(ar.st.Restore),
-		PreferFidelity: ar.st.Golden,
+		PreferFidelity: ar.st.Golden, MilliCPU: lim.MilliCPU, MemoryMiB: lim.MemoryMiB,
 	})
 	if err != nil {
 		return err
