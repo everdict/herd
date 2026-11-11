@@ -107,6 +107,9 @@ var GoldenRetryBackoff time.Duration
 // GoldenRebuilds is herd-api's apiserver.Config.GoldenRebuilds in the harness (tests may set it).
 var GoldenRebuilds int
 
+// SweepGrace is herd-api's apiserver.Config.SweepGrace in the harness (tests may set it).
+var SweepGrace time.Duration
+
 // CallTimeout is how long herd-api waits for a herdlet in the harness.
 const CallTimeout = 400 * time.Millisecond
 

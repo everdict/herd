@@ -145,7 +145,7 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	a.noteSnapshot(snap.ID, obj.Key)
 	if a.Bundles != nil {
 		// A snapshot this node took (a template's golden) is restored here from its own copy (PLT-227).
-		if err := a.Bundles.Keep(f.Name(), obj.Digest); err != nil {
+		if err := a.Bundles.KeepAs(f.Name(), obj.Key, obj.Digest); err != nil {
 			log.Printf("herdlet: snapshot %s: not kept in the bundle cache: %v", obj.Key, err)
 		}
 	}

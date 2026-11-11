@@ -8,12 +8,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -95,6 +98,7 @@ func (c *Cache) Open(ctx context.Context, st snapstore.Store, key, digest string
 	}
 	for {
 		if f, err := c.hit(p); err == nil {
+			c.note(p, key)
 			return f, nil
 		}
 		c.mu.Lock()
@@ -329,11 +333,19 @@ func (c *Cache) evict(fresh string) {
 	var objs []obj
 	var total int64
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), ".") || !e.Type().IsRegular() {
+		if !e.Type().IsRegular() {
 			continue
 		}
 		fi, err := e.Info()
 		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			// A bundle being written or fetched here takes disk too, and is not the cache's to evict (A-58).
+			total += fi.Size()
+			continue
+		}
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		objs = append(objs, obj{filepath.Join(c.dir, e.Name()), fi.Size(), fi.ModTime()})
@@ -348,6 +360,7 @@ func (c *Cache) evict(fresh string) {
 			continue
 		}
 		if err := os.Remove(o.path); err == nil || errors.Is(err, fs.ErrNotExist) {
+			_ = os.Remove(keysPath(o.path))
 			total -= o.size
 		}
 	}
@@ -369,4 +382,118 @@ func (c ctxReader) Read(p []byte) (int, error) {
 		c.last.Store(time.Now().UnixNano())
 	}
 	return n, err
+}
+
+// keysPrefix names the record beside a kept object of the store keys it was kept for: .keys-<sha256 hex>.
+const keysPrefix = ".keys-"
+
+func keysPath(p string) string { return filepath.Join(filepath.Dir(p), keysPrefix+filepath.Base(p)) }
+
+// readKeys is the store keys recorded for the object at p (nil: none recorded).
+func readKeys(p string) ([]string, error) {
+	b, err := os.ReadFile(keysPath(p))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return nil, fmt.Errorf("bundlecache: %s: %w", keysPath(p), err)
+	}
+	return keys, nil
+}
+
+// note records that the object at p was kept or read for the store key key, so Sweep can tell when no object of the
+// store holds it any more. A record that cannot be written leaves the object to the bound.
+func (c *Cache) note(p, key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	keys, err := readKeys(p)
+	if err != nil || slices.Contains(keys, key) {
+		return
+	}
+	if _, err := os.Stat(p); err != nil {
+		return // evicted meanwhile
+	}
+	b, err := json.Marshal(append(keys, key))
+	if err != nil {
+		return
+	}
+	tmp := keysPath(p) + ".new"
+	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+		_ = os.Rename(tmp, keysPath(p))
+	}
+}
+
+// KeepAs is Keep of a bundle that the store holds under key, recorded so Sweep removes it once that object is gone.
+func (c *Cache) KeepAs(src, key, digest string) error {
+	if err := c.Keep(src, digest); err != nil {
+		return err
+	}
+	if p, err := c.path(digest); err == nil {
+		c.note(p, key)
+	}
+	return nil
+}
+
+// Sweep removes each kept object every store key of which answers not found: herd-api deleted the snapshot object with
+// the last record naming it (A-45) or swept it (A-58), so nothing restores from this copy any more (A-58). An object
+// whose store does not answer for a key, or kept before the cache recorded keys, stays, and the bound evicts it in
+// its turn. It answers how many objects it removed. The check is a HEAD per key, the cost the herdlet's VM snapshot
+// sweep already pays per snapshot; done at eviction instead it would keep a dead bundle until the cache is full and
+// then evict live ones first, since a dead bundle is often a recent one.
+func (c *Cache) Sweep(ctx context.Context, st snapstore.Store) (int, error) {
+	ents, err := os.ReadDir(c.dir)
+	if err != nil {
+		return 0, fmt.Errorf("bundlecache: %w", err)
+	}
+	removed := 0
+	for _, e := range ents {
+		name := e.Name()
+		if hx, ok := strings.CutPrefix(name, keysPrefix); ok && !strings.HasSuffix(name, ".new") {
+			// A record whose object the bound evicted.
+			if _, err := os.Stat(filepath.Join(c.dir, hx)); errors.Is(err, fs.ErrNotExist) {
+				_ = os.Remove(filepath.Join(c.dir, name))
+			}
+			continue
+		}
+		if strings.HasPrefix(name, ".") || !e.Type().IsRegular() {
+			continue
+		}
+		p := filepath.Join(c.dir, name)
+		keys, err := readKeys(p)
+		if err != nil || len(keys) == 0 {
+			continue
+		}
+		if !allGone(ctx, st, keys) {
+			continue
+		}
+		c.mu.Lock()
+		now, err := readKeys(p)
+		if err == nil && slices.Equal(now, keys) {
+			err = os.Remove(p)
+			if err == nil || errors.Is(err, fs.ErrNotExist) {
+				_ = os.Remove(keysPath(p))
+				removed++
+				log.Printf("bundlecache: removed sha256:%s: no snapshot object holds it any more (%v)", name, keys)
+			}
+		}
+		c.mu.Unlock()
+	}
+	return removed, ctx.Err()
+}
+
+// allGone says whether every key answers not found; any other answer keeps the object.
+func allGone(ctx context.Context, st snapstore.Store, keys []string) bool {
+	for _, k := range keys {
+		if _, err := st.Stat(ctx, k); !errors.Is(err, snapstore.ErrNotFound) {
+			return false
+		}
+	}
+	return true
 }

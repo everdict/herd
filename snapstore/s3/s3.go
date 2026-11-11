@@ -161,6 +161,19 @@ func (s *Store) doQuery(ctx context.Context, method, key string, q url.Values, h
 		return nil, err
 	}
 	u.RawQuery = q.Encode()
+	return s.doURL(ctx, method, u, hdr, body, size, payloadHash)
+}
+
+// bucketURL is the bucket's own URL with query q (a listing).
+func (s *Store) bucketURL(q url.Values) *url.URL {
+	u := *s.endpoint
+	u.Path = "/" + s.cfg.Bucket + "/"
+	u.RawQuery = q.Encode()
+	return &u
+}
+
+// doURL sends one signed request to u.
+func (s *Store) doURL(ctx context.Context, method string, u *url.URL, hdr http.Header, body io.Reader, size int64, payloadHash string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
 	if err != nil {
 		return nil, err
@@ -855,4 +868,120 @@ func (s *Store) copyParts(ctx context.Context, from, to string, src snapstore.Ob
 	}
 	completed = true
 	return nil
+}
+
+// listAnswer reads a list call's answer into out.
+func listAnswer(op string, resp *http.Response, out any) error {
+	defer drain(resp)
+	if resp.StatusCode/100 != 2 {
+		return statusError(op, "", resp)
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {
+		return fmt.Errorf("snapstore/s3: %s: %w", op, err)
+	}
+	return nil
+}
+
+// List lists the bucket under the store's prefix and prefix (ListObjectsV2), every page; the keys it answers are the
+// store's, with its prefix taken off.
+func (s *Store) List(ctx context.Context, prefix string) ([]snapstore.Listed, error) {
+	var out []snapstore.Listed
+	token := ""
+	for {
+		q := url.Values{"list-type": {"2"}, "prefix": {s.prefix + prefix}}
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		resp, err := s.doURL(ctx, http.MethodGet, s.bucketURL(q), nil, nil, 0, "")
+		if err != nil {
+			return nil, fmt.Errorf("snapstore/s3: list %q: %w", prefix, err)
+		}
+		var page struct {
+			IsTruncated           bool
+			NextContinuationToken string
+			Contents              []struct {
+				Key          string
+				Size         int64
+				LastModified time.Time
+			}
+		}
+		if err := listAnswer("list "+strconv.Quote(prefix), resp, &page); err != nil {
+			return nil, err
+		}
+		for _, c := range page.Contents {
+			key, ok := strings.CutPrefix(c.Key, s.prefix)
+			if !ok {
+				return nil, fmt.Errorf("snapstore/s3: list %q: the endpoint answered %q, outside %q", prefix, c.Key, s.prefix+prefix)
+			}
+			out = append(out, snapstore.Listed{Key: key, Size: c.Size, Modified: c.LastModified})
+		}
+		if !page.IsTruncated {
+			return out, nil
+		}
+		if page.NextContinuationToken == "" || page.NextContinuationToken == token {
+			return nil, fmt.Errorf("snapstore/s3: list %q: a truncated answer without a new continuation token", prefix)
+		}
+		token = page.NextContinuationToken
+	}
+}
+
+// AbortUploads aborts the multipart uploads under the store's prefix begun before cutoff (ListMultipartUploads, every
+// page): an upload whose writer died keeps its parts on the endpoint, out of any listing of objects, until aborted.
+func (s *Store) AbortUploads(ctx context.Context, cutoff time.Time) (int, error) {
+	type stale struct{ key, id string }
+	var old []stale
+	keyMarker, idMarker := "", ""
+	for {
+		q := url.Values{"uploads": {""}, "prefix": {s.prefix}}
+		if keyMarker != "" {
+			q.Set("key-marker", keyMarker)
+			q.Set("upload-id-marker", idMarker)
+		}
+		resp, err := s.doURL(ctx, http.MethodGet, s.bucketURL(q), nil, nil, 0, "")
+		if err != nil {
+			return 0, fmt.Errorf("snapstore/s3: list uploads: %w", err)
+		}
+		var page struct {
+			IsTruncated        bool
+			NextKeyMarker      string
+			NextUploadIdMarker string
+			Upload             []struct {
+				Key       string
+				UploadId  string
+				Initiated time.Time
+			}
+		}
+		if err := listAnswer("list uploads", resp, &page); err != nil {
+			return 0, err
+		}
+		for _, u := range page.Upload {
+			if u.Initiated.Before(cutoff) {
+				old = append(old, stale{u.Key, u.UploadId})
+			}
+		}
+		if !page.IsTruncated {
+			break
+		}
+		if page.NextKeyMarker == "" || page.NextKeyMarker == keyMarker && page.NextUploadIdMarker == idMarker {
+			return 0, errors.New("snapstore/s3: list uploads: a truncated answer without a new marker")
+		}
+		keyMarker, idMarker = page.NextKeyMarker, page.NextUploadIdMarker
+	}
+	n := 0
+	for _, u := range old {
+		e := *s.endpoint
+		e.Path = "/" + s.cfg.Bucket + "/" + u.key
+		e.RawQuery = url.Values{"uploadId": {u.id}}.Encode()
+		resp, err := s.doURL(ctx, http.MethodDelete, &e, nil, nil, 0, "")
+		if err != nil {
+			return n, fmt.Errorf("snapstore/s3: abort upload %s of %s: %w", u.id, u.key, err)
+		}
+		if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
+			defer resp.Body.Close()
+			return n, statusError("abort upload "+u.id, u.key, resp)
+		}
+		drain(resp)
+		n++
+	}
+	return n, nil
 }

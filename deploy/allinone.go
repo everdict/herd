@@ -137,7 +137,7 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 	api := &API{Key: key, Store: "bolt:" + filepath.Join(a.Data, "herd.db"), Snapshots: snapDir,
 		S3: a.S3, S3Endpoint: a.S3Endpoint, S3Region: a.S3Region,
 		CallTimeout: 30 * time.Second, Reconcile: 10 * time.Second, AdvertiseTunnel: addrs.Tunnel,
-		CredentialTTL: 365 * 24 * time.Hour, OnJoin: a.OnJoin, GoldenWarmup: a.GoldenWarmup}
+		CredentialTTL: 365 * 24 * time.Hour, OnJoin: a.OnJoin, GoldenWarmup: a.GoldenWarmup, SnapshotSweep: DefaultSnapshotSweep}
 	start("herd-api", func() error { return api.Run(ctx, apiLn) })
 	rt := &Router{Key: key, API: addrs.API, ParkingBudget: 30 * time.Second, DefaultPort: 8080}
 	start("herd-router", func() error { return rt.Run(ctx, cl, tl) })

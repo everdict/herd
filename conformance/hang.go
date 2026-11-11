@@ -2,8 +2,11 @@ package conformance
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/everdict/herd/snapstore"
 )
@@ -16,7 +19,12 @@ type hangStore struct {
 
 	mu      sync.Mutex
 	resumed chan struct{} // nil: answering; closed when a hang ends
+	// failDeletes makes every Delete fail without removing anything.
+	failDeletes atomic.Bool
 }
+
+// FailSnapshotDeletes makes every Delete of the shared snapshot store fail, removing nothing (on), or work again (off).
+func (e *Env) FailSnapshotDeletes(on bool) { e.hang.failDeletes.Store(on) }
 
 // HangSnapshots makes the snapshot store herd-api and the herdlets share stop answering (on) or answer again (off).
 func (e *Env) HangSnapshots(on bool) {
@@ -86,6 +94,9 @@ func (h *hangStore) Delete(ctx context.Context, key string) error {
 	if err := h.wait(ctx); err != nil {
 		return err
 	}
+	if h.failDeletes.Load() {
+		return errors.New("conformance: the snapshot store refused the delete")
+	}
 	return h.Store.Delete(ctx, key)
 }
 
@@ -94,4 +105,18 @@ func (h *hangStore) Copy(ctx context.Context, from, to, digest string) (snapstor
 		return snapstore.Object{}, err
 	}
 	return h.Store.Copy(ctx, from, to, digest)
+}
+
+func (h *hangStore) List(ctx context.Context, prefix string) ([]snapstore.Listed, error) {
+	if err := h.wait(ctx); err != nil {
+		return nil, err
+	}
+	return h.Store.List(ctx, prefix)
+}
+
+func (h *hangStore) AbortUploads(ctx context.Context, cutoff time.Time) (int, error) {
+	if err := h.wait(ctx); err != nil {
+		return 0, err
+	}
+	return h.Store.AbortUploads(ctx, cutoff)
 }

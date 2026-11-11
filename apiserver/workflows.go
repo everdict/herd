@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -128,7 +129,7 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 	if err := s.save(ctx, ar); err != nil {
 		return err
 	}
-	gen := len(ar.actor.Status.Snapshots) + 1
+	gen := nextGeneration(ar)
 	key := snapshotKey("actors", ar.rec.Space, ar.rec.Name, ar.rec.UID, gen)
 	snap, _, res, reason := s.takeSnapshot(ctx, ar, key, fidelityFor(tpl, caps), link.CauseSuspend)
 	switch res {
@@ -155,7 +156,58 @@ func (s *Server) suspendSteps(ctx context.Context, ar *actorRec) error {
 	if err := s.save(ctx, ar); err != nil {
 		return err
 	}
+	if err := s.dropGenerations(ctx, ar); err != nil {
+		return err
+	}
 	return s.release(ctx, ar)
+}
+
+// nextGeneration is the generation of the actor's next snapshot: one past the highest it has listed. Generations only
+// count up, so a key (…/<gen>) is never written twice (A-45's sealed objects), though older ones are dropped.
+func nextGeneration(ar *actorRec) int {
+	gen := 0
+	for _, sn := range ar.actor.Status.Snapshots {
+		gen = max(gen, int(sn.GetGeneration()))
+	}
+	return gen + 1
+}
+
+// dropGenerations releases every snapshot object of the actor's but its latest, which a suspend has just verified and
+// recorded (A-58): nothing restores the actor from an older one, and a tag that references one keeps it (dropObject
+// leaves an object another record names, and it goes with that record). An object whose delete fails stays among the
+// actor's Keys, logged, and the next suspend or the actor's delete releases it. It holds refsMu from its read of the
+// records until the actor's record stops naming what it released (A-45).
+func (s *Server) dropGenerations(ctx context.Context, ar *actorRec) error {
+	cur := ar.st.Snapshot.Key
+	if len(ar.st.Keys) < 2 {
+		return nil
+	}
+	s.refsMu.Lock()
+	defer s.refsMu.Unlock()
+	keep := []string{}
+	for _, k := range ar.st.Keys {
+		if k == cur {
+			keep = append(keep, k)
+			continue
+		}
+		if err := s.dropObject(ctx, k, ar.rec.Key); err != nil {
+			log.Printf("herd-api: actor %s/%s: previous snapshot %s not released (owed to its next suspend or delete): %v", ar.rec.Space, ar.rec.Name, k, err)
+			keep = append(keep, k)
+			continue
+		}
+		log.Printf("herd-api: actor %s/%s: previous snapshot %s released: its snapshot %s is verified and recorded", ar.rec.Space, ar.rec.Name, k, cur)
+	}
+	if len(keep) == len(ar.st.Keys) {
+		return nil
+	}
+	snaps := ar.actor.Status.Snapshots[:0:0]
+	for _, sn := range ar.actor.Status.Snapshots {
+		if slices.Contains(keep, sn.GetUuid()) {
+			snaps = append(snaps, sn)
+		}
+	}
+	ar.st.Keys, ar.actor.Status.Snapshots = keep, snaps
+	return s.save(ctx, ar)
 }
 
 // release deletes a suspended actor's VM on its worker; the actor is SUSPENDED and the slot free only once the

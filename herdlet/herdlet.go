@@ -194,6 +194,15 @@ func (a *Agent) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 			a.sweepSnapshots(sctx)
 		}()
 	}
+	if a.Bundles != nil && a.SnapshotSweep >= 0 {
+		bctx, stopBundles := context.WithCancel(ctx)
+		defer stopBundles()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.sweepBundles(bctx)
+		}()
+	}
 	if a.Pool != nil {
 		a.Pool.Changed = func(warm map[string]int) {
 			c := a.capacity(warm)

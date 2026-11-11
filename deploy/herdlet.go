@@ -61,7 +61,10 @@ type Herdlet struct {
 	// BundleCacheMiB bounds <state>/bundles, the node's copy of the snapshot objects it wrote to or read from an S3
 	// store (-bundle-cache, PLT-227): a restore of one it holds reads no S3 bytes. 0 keeps none.
 	BundleCacheMiB int
-	Slots          int
+	// ImageCacheMiB bounds <state>/images, the rootfs images and layer blobs built here (-image-cache; 0: no bound):
+	// past it, the least recently used that no VM runs on are removed (A-58).
+	ImageCacheMiB int
+	Slots         int
 	// ReserveCPU (millicores) and ReserveMemoryMiB are what the host keeps for itself, and CPUOvercommit how many vCPUs
 	// a core carries: what remains is what the herdlet reports it can allocate to VMs (PLT-452).
 	ReserveCPU       int64
@@ -148,6 +151,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 	fs.Float64Var(&h.CPUOvercommit, "cpu-overcommit", 1, "vCPUs a core carries when counting what VMs may take")
 	fs.StringVar(&h.StateDir, "state", "/var/lib/herdlet", "state directory: join grant, VMs, shares, image cache")
 	fs.StringVar(&h.Snapshots, "snapshots", "", "snapshot store directory, herd-api's, for a herd-api without -s3 (default: <state>/snapshots; ignored when the join handed out an S3 store)")
+	fs.IntVar(&h.ImageCacheMiB, "image-cache", DefaultImageCacheMiB, "MiB of rootfs images and layer blobs kept in <state>/images, least recently used removed first, never one a VM runs on (0: no bound)")
 	fs.IntVar(&h.BundleCacheMiB, "bundle-cache", DefaultBundleCacheMiB, "MiB of snapshot bundles kept in <state>/bundles when snapshots are in S3, least recently used evicted first: a restore of a bundle this node wrote or read before (a template's golden) reads it from there, not from S3 (0: none)")
 	fs.StringVar(&h.Router, "router", "", "herd-router tunnel address (default: the one herd-api handed out at join)")
 	fs.StringVar(&h.Kernel, "kernel", "/usr/local/share/herd/kernel", "guest kernel from guest/build.sh (bzImage on amd64, Image on arm64)")
@@ -405,13 +409,15 @@ func (h *Herdlet) build(ctx context.Context) (Backend, *machine.Machines, string
 	if err != nil {
 		return Backend{}, nil, why, err
 	}
+	images := &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: h.imageSource(), Builder: builder,
+		Platform: image.Platform{OS: "linux", Architecture: caps.Arch}, MaxBytes: int64(h.ImageCacheMiB) << 20}
 	m, err := machine.New(machine.Config{
 		VMM: host.VMM, Guests: host.Guests, Flush: h.flusher(host.Guests), Clock: h.clocker(host.Guests), ShareDir: shares,
-		Network: host.Network,
-		Images: &image.Cache{Dir: filepath.Join(h.StateDir, "images"), Source: h.imageSource(), Builder: builder,
-			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}},
-		Base: base,
+		Network: host.Network, Images: images, Base: base,
 	})
+	if m != nil {
+		images.InUse = m.ImagePaths
+	}
 	return host, m, why, err
 }
 
@@ -666,6 +672,9 @@ func sameStore(a, b *s3.Config) bool {
 	}
 	return *a == *b
 }
+
+// DefaultImageCacheMiB is -image-cache's default.
+const DefaultImageCacheMiB = 20 << 10
 
 // DefaultBundleCacheMiB is -bundle-cache's default.
 const DefaultBundleCacheMiB = 20 << 10

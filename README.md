@@ -53,7 +53,7 @@ credential injection), `herd-guest` (the in-VM agent).
 | `link`, `herdlet` | The herdlet's outbound link (three-valued outcomes) and the herdlet agent on a `vmm.VMM` |
 | `sched` | Placement by cpu and memory (slots for an older herdlet), class, labels, warm VMs and restore family |
 | `store` | Records with uid+version preconditions: `memstore`, `boltstore` (bbolt, all-in-one), `storetest` (the contract) |
-| `snapstore` | Snapshot objects with digests: `snapstore/disk` |
+| `snapstore` | Snapshot objects with digests, listed and swept of what no record names (A-58): `snapstore/disk`, `snapstore/s3`, `snapstore/bundlecache` |
 | `auth` | Authn and per-space authz interfaces; static-key HS256 JWTs |
 | `guest/agent`, `guest/guestclient`, `cmd/herd-guest` | herd-guest: env-compatible process/file API on grpc-go, and its host-side client |
 | `conformance` | The Control-subset conformance suite against herd-api with fake herdlets |

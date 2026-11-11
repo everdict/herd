@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/everdict/herd/snapstore"
 )
@@ -216,4 +218,83 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // Copy streams the object: a local copy is a read and a write of the same disk.
 func (s *Store) Copy(ctx context.Context, from, to, digest string) (snapstore.Object, error) {
 	return snapstore.StreamCopy(ctx, s, from, to, digest)
+}
+
+// List walks the objects directory: every file that is not a digest (.sha256) or a Put's temporary file (.tmp-*) is
+// an object, whether or not its digest file was written (a Put that died between the two leaves such a file, which
+// Stat does not report and the sweep must still see). Its time is the file's.
+func (s *Store) List(ctx context.Context, prefix string) ([]snapstore.Listed, error) {
+	root := filepath.Join(s.root, "objects")
+	var out []snapstore.Listed
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) && p == root {
+				return fs.SkipAll
+			}
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() || !d.Type().IsRegular() || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".sha256") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, prefix) || snapstore.ValidateKey(key) != nil {
+			return nil
+		}
+		fi, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // deleted while listed
+		}
+		if err != nil {
+			return err
+		}
+		out = append(out, snapstore.Listed{Key: key, Size: fi.Size(), Modified: fi.ModTime()})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("snapstore/disk: list %q: %w", prefix, err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// AbortUploads removes the temporary files (.tmp-*) of Puts begun before cutoff: a Put that died (a crash, a full
+// disk) leaves one, which no listing or Stat reports. A newer one may be a Put still writing, and is left.
+func (s *Store) AbortUploads(ctx context.Context, cutoff time.Time) (int, error) {
+	root := filepath.Join(s.root, "objects")
+	n := 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasPrefix(d.Name(), ".tmp-") {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil || !fi.ModTime().Before(cutoff) {
+			return nil
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		n++
+		return nil
+	})
+	if err != nil {
+		return n, fmt.Errorf("snapstore/disk: removing stale temporary files: %w", err)
+	}
+	return n, nil
 }

@@ -183,3 +183,27 @@ func (a *Agent) sweepSnapshots(ctx context.Context) {
 func SnapshotRefsPath(stateDir string) string {
 	return filepath.Join(stateDir, "vm-snapshot-refs.json")
 }
+
+// DefaultBundleSweep is how often a herdlet drops the bundles in its cache whose snapshot objects are all gone
+// (bundlecache.Cache.Sweep, A-58).
+const DefaultBundleSweep = 10 * time.Minute
+
+// sweepBundles runs the bundle cache's Sweep every DefaultBundleSweep (or SnapshotSweep, if shorter) until ctx ends.
+func (a *Agent) sweepBundles(ctx context.Context) {
+	every := DefaultBundleSweep
+	if a.SnapshotSweep > 0 && a.SnapshotSweep < every {
+		every = a.SnapshotSweep
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := a.Bundles.Sweep(ctx, a.Snapshots); err != nil && ctx.Err() == nil {
+			log.Printf("herdlet: bundle cache sweep: %v", err)
+		}
+	}
+}

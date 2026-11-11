@@ -3,11 +3,14 @@ package disk_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/snapstore/disk"
@@ -129,4 +132,57 @@ func TestContract(t *testing.T) {
 			}
 		},
 	})
+}
+
+// TestListAndAbortUploadsOnDisk (A-58): an object whose Put died between the object and its digest file is listed
+// (Stat reports none, and the sweep must still see its bytes); a Put's temporary file is not an object. AbortUploads
+// removes temporary files older than the cutoff and leaves a newer one (a Put still writing) and every object.
+func TestListAndAbortUploadsOnDisk(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := disk.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, "sp/actors/a/u/1", strings.NewReader("whole")); err != nil {
+		t.Fatal(err)
+	}
+	objs := filepath.Join(dir, "objects", "sp", "actors", "a", "u")
+	if err := os.WriteFile(filepath.Join(objs, "2"), []byte("no digest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, young := filepath.Join(objs, ".tmp-old"), filepath.Join(objs, ".tmp-young")
+	for _, p := range []string{old, young} {
+		if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	day := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(old, day, day); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.List(ctx, "sp/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, o := range got {
+		keys = append(keys, fmt.Sprintf("%s:%d", o.Key, o.Size))
+	}
+	if want := "sp/actors/a/u/1:5 sp/actors/a/u/2:9"; strings.Join(keys, " ") != want {
+		t.Errorf("List = %v, want %s", keys, want)
+	}
+	n, err := s.AbortUploads(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil || n != 1 {
+		t.Errorf("AbortUploads = %d, %v; want 1", n, err)
+	}
+	if _, err := os.Stat(old); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the stale temporary file: %v, want gone", err)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("the young temporary file: %v, want kept", err)
+	}
+	if got, err := s.List(ctx, "sp/"); err != nil || len(got) != 2 {
+		t.Errorf("List after AbortUploads = %+v, %v; want both objects", got, err)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -410,6 +411,58 @@ func Run(t *testing.T, h Harness) {
 		before := m.Bytes()
 		if got := readAll(t, s, "m/1"); !bytes.Equal(got, data) || m.Bytes() != before {
 			t.Errorf("a read on another context counted %d bytes on the meter", m.Bytes()-before)
+		}
+	})
+
+	t.Run("ListNamesWhatIsStored", func(t *testing.T) {
+		ctx := ctxT(t)
+		s := h.Open(t)
+		start := time.Now()
+		for k, v := range map[string]string{"l/a/1": "one", "l/a/2": "two!", "l/b/1": "x", "lz/1": "outside"} {
+			if _, err := s.Put(ctx, k, strings.NewReader(v)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Another client (herd-api's sweep, after a herdlet's Put) lists what was put, in key order.
+		other := h.Open(t)
+		got, err := other.List(ctx, "l/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys []string
+		for _, o := range got {
+			keys = append(keys, fmt.Sprintf("%s:%d", o.Key, o.Size))
+			if o.Modified.Before(start.Add(-time.Minute)) || o.Modified.After(time.Now().Add(time.Minute)) {
+				t.Errorf("List: %s modified %v, want about %v", o.Key, o.Modified, start)
+			}
+		}
+		if want := "l/a/1:3 l/a/2:4 l/b/1:1"; strings.Join(keys, " ") != want {
+			t.Errorf("List(l/) = %v, want %s", keys, want)
+		}
+		if got, err := other.List(ctx, "l/a/"); err != nil || len(got) != 2 {
+			t.Errorf("List(l/a/) = %+v, %v; want l/a/1 and l/a/2", got, err)
+		}
+		if err := s.Delete(ctx, "l/a/1"); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := other.List(ctx, "l/a/"); err != nil || len(got) != 1 || got[0].Key != "l/a/2" {
+			t.Errorf("List(l/a/) after a delete = %+v, %v; want l/a/2 alone", got, err)
+		}
+		if got, err := other.List(ctx, "none/"); err != nil || len(got) != 0 {
+			t.Errorf("List of an empty prefix = %+v, %v; want nothing and no error", got, err)
+		}
+		all, err := other.List(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, o := range all {
+			if o.Key == "l/a/2" || o.Key == "l/b/1" || o.Key == "lz/1" {
+				found++
+			}
+		}
+		if found != 3 {
+			t.Errorf("List of everything = %+v; want l/a/2, l/b/1 and lz/1 among them", all)
 		}
 	})
 

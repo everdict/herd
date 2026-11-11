@@ -178,6 +178,9 @@ func (r *Registry) Blob(ctx context.Context, ref image.Ref, d image.Descriptor) 
 // Builder writes the flattened tree's listing (image.Listing) as the "filesystem image".
 type Builder struct {
 	Type string
+	// Pad, if positive, follows the listing with that many bytes, so an image is as large as a real filesystem's
+	// share of the cache.
+	Pad int
 
 	mu     sync.Mutex
 	builds int
@@ -210,7 +213,7 @@ func (b *Builder) Build(ctx context.Context, tarPath, outPath string) error {
 	b.mu.Lock()
 	b.builds++
 	b.mu.Unlock()
-	return os.WriteFile(outPath, []byte(l), 0o644)
+	return os.WriteFile(outPath, append([]byte(l), make([]byte, max(b.Pad, 0))...), 0o644)
 }
 
 // Corrupt flips a byte of a stored blob, as a registry or a proxy serving the wrong bytes would.

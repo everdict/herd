@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/everdict/herd/apiserver"
 	"github.com/everdict/herd/auth"
@@ -46,6 +47,7 @@ func (e *Env) serve(t testing.TB, ln net.Listener) {
 		GoldenWarmup:         GoldenWarmup,
 		GoldenRetryBackoff:   GoldenRetryBackoff,
 		GoldenRebuilds:       GoldenRebuilds,
+		SweepGrace:           SweepGrace,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -171,4 +173,18 @@ func (s endedSnapshots) Copy(ctx context.Context, from, to, digest string) (snap
 		return snapstore.Object{}, errEnded
 	}
 	return s.Store.Copy(ctx, from, to, digest)
+}
+
+func (s endedSnapshots) List(ctx context.Context, prefix string) ([]snapstore.Listed, error) {
+	if s.p.ended.Load() {
+		return nil, errEnded
+	}
+	return s.Store.List(ctx, prefix)
+}
+
+func (s endedSnapshots) AbortUploads(ctx context.Context, cutoff time.Time) (int, error) {
+	if s.p.ended.Load() {
+		return 0, errEnded
+	}
+	return s.Store.AbortUploads(ctx, cutoff)
 }

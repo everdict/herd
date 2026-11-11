@@ -2,7 +2,8 @@
 // multipart upload calls (create, upload part, complete, abort), the server-side copies (CopyObject, UploadPartCopy)
 // and HEAD of one part (?partNumber), SigV4 checked against one set of credentials, the signed payload hash and
 // x-amz-checksum-sha256 checked against the body as S3 does, S3's composite checksum of a multipart object, and
-// switches for the faults a real endpoint or the network between can produce.
+// switches for the faults a real endpoint or the network between can produce. It lists a bucket's objects
+// (ListObjectsV2) and its unfinished multipart uploads (ListMultipartUploads), a page at a time.
 package s3test
 
 import (
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +55,8 @@ type object struct {
 	parts []int64
 	// recorded is the object's s3.ChecksumMetaHeader metadata.
 	recorded string
+	// modified is when it was stored (LastModified).
+	modified time.Time
 }
 
 // checksum is what HEAD reports as the object's x-amz-checksum-sha256.
@@ -70,10 +74,11 @@ type part struct {
 }
 
 type upload struct {
-	path     string
-	digest   string
-	recorded string
-	parts    map[int]part
+	initiated time.Time
+	path      string
+	digest    string
+	recorded  string
+	parts     map[int]part
 }
 
 // Server is a fake S3 endpoint.
@@ -103,6 +108,51 @@ type Server struct {
 	noCopy     bool
 	copies     int
 	partCopies int
+	// now, if set, is the server's clock (LastModified, Initiated); listPage is the most keys or uploads one list
+	// answer carries (default 1000, S3's); lists counts the list calls.
+	now      func() time.Time
+	listPage int
+	lists    int
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// SetClock makes now the server's clock for the times it records: an object's LastModified and an upload's Initiated.
+func (s *Server) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
+}
+
+// SetListPage sets the most keys (or uploads) one list answer carries; the rest follow a continuation, as S3 pages
+// past 1000.
+func (s *Server) SetListPage(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listPage = n
+}
+
+// Lists counts the list calls the server answered (objects and uploads, every page).
+func (s *Server) Lists() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lists
+}
+
+// Begin starts a multipart upload of path ("/bucket/key") that nobody finishes, as a writer that died midway leaves
+// one, and answers its id.
+func (s *Server) Begin(path string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	id := "upload-" + strconv.Itoa(s.nextID)
+	s.uploads[id] = &upload{initiated: s.clock(), path: path, parts: map[int]part{}}
+	return id
 }
 
 // New returns a server that accepts creds in region.
@@ -290,7 +340,7 @@ func (s *Server) Tamper(path string) bool {
 func (s *Server) Plant(path string, data []byte, digest, recorded string, partSize int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o := object{data: bytes.Clone(data), digest: digest, recorded: recorded}
+	o := object{data: bytes.Clone(data), digest: digest, recorded: recorded, modified: s.clock()}
 	if partSize > 0 {
 		var sums []byte
 		for off := 0; off < len(data); off += partSize {
@@ -353,11 +403,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
+	q := r.URL.Query()
+	if bucket, ok := strings.CutPrefix(strings.TrimSuffix(path, "/"), "/"); ok && bucket != "" && !strings.Contains(bucket, "/") && r.Method == http.MethodGet {
+		switch {
+		case q.Get("list-type") == "2":
+			s.listObjects(w, bucket, q)
+			return
+		case q.Has("uploads"):
+			s.listUploads(w, bucket, q)
+			return
+		}
+	}
 	if strings.Count(path, "/") < 2 {
 		s3Error(w, http.StatusBadRequest, "InvalidRequest")
 		return
 	}
-	q := r.URL.Query()
 	switch {
 	case r.Method == http.MethodPost && q.Has("uploads"):
 		s.createUpload(w, r, path)
@@ -489,7 +549,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 		stored = bytes.Clone(data)
 		stored[len(stored)-1] ^= 0x01
 	}
-	s.objects[path] = object{data: stored, digest: r.Header.Get(s3.DigestHeader)}
+	s.objects[path] = object{data: stored, digest: r.Header.Get(s3.DigestHeader), modified: s.clock()}
 	s.puts++
 	s.mu.Unlock()
 	if fault == DropAnswer {
@@ -522,7 +582,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request, path strin
 	s.mu.Lock()
 	s.nextID++
 	id := "upload-" + strconv.Itoa(s.nextID)
-	s.uploads[id] = &upload{path: path, digest: r.Header.Get(s3.DigestHeader), recorded: r.Header.Get(s3.ChecksumMetaHeader), parts: map[int]part{}}
+	s.uploads[id] = &upload{initiated: s.clock(), path: path, digest: r.Header.Get(s3.DigestHeader), recorded: r.Header.Get(s3.ChecksumMetaHeader), parts: map[int]part{}}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/xml")
 	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>", id)
@@ -620,7 +680,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, path, id
 	fault := s.fault
 	composite := sha256.Sum256(sums)
 	s.objects[path] = object{data: data, digest: u.digest, recorded: u.recorded,
-		composite: base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(req.Parts)), parts: sizes}
+		composite: base64.StdEncoding.EncodeToString(composite[:]) + "-" + strconv.Itoa(len(req.Parts)), parts: sizes, modified: s.clock()}
 	delete(s.uploads, id)
 	s.puts++
 	s.mu.Unlock()
@@ -700,7 +760,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, path string)
 		data = bytes.Clone(data)
 		data[len(data)-1] ^= 0x01
 	}
-	c := object{data: data, digest: digest, recorded: recorded}
+	c := object{data: data, digest: digest, recorded: recorded, modified: s.clock()}
 	s.objects[path] = c
 	s.copies++
 	if s.fault == DropAnswer {
@@ -759,4 +819,103 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, path, id
 	w.Header().Set("Content-Type", "application/xml")
 	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyPartResult><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></CopyPartResult>",
 		etag(sum), base64.StdEncoding.EncodeToString(sum[:]))
+}
+
+func (s *Server) page() int {
+	if s.listPage > 0 {
+		return min(s.listPage, 1000)
+	}
+	return 1000
+}
+
+// listObjects is ListObjectsV2 of the bucket: the keys under prefix in order, a page at a time, the next page named
+// by an opaque continuation token (here the base64 of the last key answered, so it carries characters a signer must
+// encode).
+func (s *Server) listObjects(w http.ResponseWriter, bucket string, q url.Values) {
+	after := ""
+	if t := q.Get("continuation-token"); t != "" {
+		b, err := base64.StdEncoding.DecodeString(t)
+		if err != nil {
+			s3Error(w, http.StatusBadRequest, "InvalidArgument")
+			return
+		}
+		after = string(b)
+	}
+	s.mu.Lock()
+	s.lists++
+	root := "/" + bucket + "/"
+	var keys []string
+	for p := range s.objects {
+		if k, ok := strings.CutPrefix(p, root); ok && strings.HasPrefix(k, q.Get("prefix")) && k > after {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	n := s.page()
+	if m, err := strconv.Atoi(q.Get("max-keys")); err == nil && m > 0 {
+		n = min(n, m)
+	}
+	truncated := len(keys) > n
+	if truncated {
+		keys = keys[:n]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>%s</Name><Prefix>%s</Prefix><KeyCount>%d</KeyCount><IsTruncated>%v</IsTruncated>",
+		bucket, q.Get("prefix"), len(keys), truncated)
+	for _, k := range keys {
+		o := s.objects[root+k]
+		fmt.Fprintf(&b, "<Contents><Key>%s</Key><LastModified>%s</LastModified><Size>%d</Size><StorageClass>STANDARD</StorageClass></Contents>",
+			k, o.modified.UTC().Format("2006-01-02T15:04:05.000Z"), len(o.data))
+	}
+	if truncated {
+		fmt.Fprintf(&b, "<NextContinuationToken>%s</NextContinuationToken>", base64.StdEncoding.EncodeToString([]byte(keys[len(keys)-1])))
+	}
+	b.WriteString("</ListBucketResult>")
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = io.WriteString(w, b.String())
+}
+
+// listUploads is ListMultipartUploads of the bucket: the uploads begun under prefix and neither completed nor aborted,
+// ordered by key and then id, a page at a time after key-marker and upload-id-marker.
+func (s *Server) listUploads(w http.ResponseWriter, bucket string, q url.Values) {
+	type entry struct {
+		key, id   string
+		initiated time.Time
+	}
+	s.mu.Lock()
+	s.lists++
+	root := "/" + bucket + "/"
+	var es []entry
+	for id, u := range s.uploads {
+		k, ok := strings.CutPrefix(u.path, root)
+		if !ok || !strings.HasPrefix(k, q.Get("prefix")) {
+			continue
+		}
+		if km := q.Get("key-marker"); km != "" && (k < km || k == km && id <= q.Get("upload-id-marker")) {
+			continue
+		}
+		es = append(es, entry{k, id, u.initiated})
+	}
+	s.mu.Unlock()
+	sort.Slice(es, func(i, j int) bool { return es[i].key < es[j].key || es[i].key == es[j].key && es[i].id < es[j].id })
+	s.mu.Lock()
+	n := s.page()
+	s.mu.Unlock()
+	truncated := len(es) > n
+	if truncated {
+		es = es[:n]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>%s</Bucket><IsTruncated>%v</IsTruncated>", bucket, truncated)
+	if truncated {
+		last := es[len(es)-1]
+		fmt.Fprintf(&b, "<NextKeyMarker>%s</NextKeyMarker><NextUploadIdMarker>%s</NextUploadIdMarker>", last.key, last.id)
+	}
+	for _, e := range es {
+		fmt.Fprintf(&b, "<Upload><Key>%s</Key><UploadId>%s</UploadId><Initiated>%s</Initiated></Upload>", e.key, e.id, e.initiated.UTC().Format("2006-01-02T15:04:05.000Z"))
+	}
+	b.WriteString("</ListMultipartUploadsResult>")
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = io.WriteString(w, b.String())
 }

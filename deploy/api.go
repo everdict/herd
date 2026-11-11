@@ -99,6 +99,10 @@ type API struct {
 	AdvertiseTunnel     string
 	CredentialTTL       time.Duration
 	GoldenWarmup        time.Duration
+	// SnapshotSweep is how often herd-api removes the snapshot objects no record names (apiserver.SweepSnapshots;
+	// -snapshot-sweep, 0: never); the first pass runs SnapshotSweepDelay after start.
+	SnapshotSweep      time.Duration
+	SnapshotSweepDelay time.Duration
 
 	// Key, if set, is used instead of KeyFile (all-in-one reads or creates its own).
 	Key []byte
@@ -122,7 +126,15 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
 	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
 	fs.DurationVar(&a.GoldenWarmup, "golden-warmup", DefaultGoldenWarmup, goldenWarmupUsage)
+	fs.DurationVar(&a.SnapshotSweep, "snapshot-sweep", DefaultSnapshotSweep, "how often to remove the snapshot objects no actor, tag or template record names (older than an hour) and abort writes unfinished for a day; the first pass runs 10 minutes after start (0: never)")
 }
+
+// DefaultSnapshotSweep is -snapshot-sweep's default.
+const DefaultSnapshotSweep = 24 * time.Hour
+
+// DefaultSnapshotSweepDelay is how long after start herd-api's first snapshot sweep runs: after the herdlets have
+// linked and Reconcile has settled what a restart left owed.
+const DefaultSnapshotSweepDelay = 10 * time.Minute
 
 // DefaultGoldenWarmup is Substrate's wait between starting a template's golden actor and taking its snapshot.
 const DefaultGoldenWarmup = 20 * time.Second
@@ -193,6 +205,13 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 			}
 		}
 	}()
+	if a.SnapshotSweep > 0 {
+		delay := a.SnapshotSweepDelay
+		if delay <= 0 {
+			delay = DefaultSnapshotSweepDelay
+		}
+		go sweepSnapshots(ctx, srv, delay, a.SnapshotSweep)
+	}
 	log.Printf("herd-api serving on %s", ln.Addr())
 	go func() {
 		<-ctx.Done()
@@ -205,6 +224,24 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		return nil
 	}
 	return err
+}
+
+// sweepSnapshots runs srv's snapshot sweep after delay and then every interval until ctx ends. herd-api is one process
+// per record store (bolt holds its file; A-55), so the pass has no other leader to defer to.
+func sweepSnapshots(ctx context.Context, srv *apiserver.Server, delay, every time.Duration) {
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := srv.SweepSnapshots(ctx); err != nil {
+			log.Printf("herd-api: %v", err)
+		}
+		t.Reset(every)
+	}
 }
 
 // Token is `herd-api token`: it mints a bearer token offline from the key.

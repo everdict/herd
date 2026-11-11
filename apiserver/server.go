@@ -81,6 +81,9 @@ type Config struct {
 	// SnapshotStore names Snapshots as herdlets declare theirs (link.Register.SnapshotStore): a herdlet that declares
 	// another store is refused its link, since herd-api would find none of its snapshots (PLT-382). Empty: no check.
 	SnapshotStore string
+	// SweepGrace is how old an object no record names must be before SweepSnapshots removes it (default
+	// DefaultSweepGrace; negative: no grace), so a snapshot written a moment ago, whose record is not saved yet, stays.
+	SweepGrace time.Duration
 }
 
 // Server is herd-api.

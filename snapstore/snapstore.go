@@ -23,6 +23,14 @@ type Object struct {
 	Size   int64
 }
 
+// Listed is one object a List found.
+type Listed struct {
+	Key  string
+	Size int64
+	// Modified is when the object was last written, as the store records it.
+	Modified time.Time
+}
+
 // Store holds snapshot objects.
 type Store interface {
 	// Put stores the bytes of r under key and returns only once they are durable. A Put that fails leaves no object
@@ -44,6 +52,13 @@ type Store interface {
 	// is durable and holds exactly them: ErrNotFound, ErrDigestMismatch. A Copy that fails leaves no object under to
 	// that Stat would report.
 	Copy(ctx context.Context, from, to, digest string) (Object, error)
+	// List answers every object whose key starts with prefix, in key order: each one Stat reports, and any a Put that
+	// did not finish left under a key (herd-api's sweep removes what no record names, A-58). It reads the whole
+	// listing or fails; an answer is never a part of one.
+	List(ctx context.Context, prefix string) ([]Listed, error)
+	// AbortUploads removes what writes begun before cutoff and never finished hold out of List's and Stat's sight — an
+	// S3 multipart upload's parts, a directory's temporary file — and answers how many it removed.
+	AbortUploads(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 var (

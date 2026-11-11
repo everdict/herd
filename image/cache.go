@@ -11,10 +11,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Rootfs is a built root filesystem image.
@@ -37,13 +40,23 @@ type Cache struct {
 	Source   Source
 	Builder  Builder
 	Platform Platform
+	// MaxBytes bounds the images and layer blobs the cache keeps, the builds and fetches in progress counted (zero: no
+	// bound). Trim, which every Get that built runs, removes the least recently used images and blobs past it, never
+	// one InUse names nor one used within Recent (A-58).
+	MaxBytes int64
+	// InUse, if set, answers the image paths the host's VMs run on now.
+	InUse func() []string
+	// Recent is how long after a Get answered an image (or a build read a blob) Trim leaves it, so an image handed to a
+	// VM that is still booting is not taken from under it (zero: DefaultRecent; negative: none).
+	Recent time.Duration
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 }
 
-func (c *Cache) lock(key string) func() {
+func (c *Cache) keyLock(key string) *sync.Mutex {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.locks == nil {
 		c.locks = map[string]*sync.Mutex{}
 	}
@@ -52,7 +65,11 @@ func (c *Cache) lock(key string) func() {
 		l = &sync.Mutex{}
 		c.locks[key] = l
 	}
-	c.mu.Unlock()
+	return l
+}
+
+func (c *Cache) lock(key string) func() {
+	l := c.keyLock(key)
 	l.Lock()
 	return l.Unlock
 }
@@ -74,18 +91,138 @@ func (c *Cache) Get(ctx context.Context, ref string) (Rootfs, error) {
 	fsType := c.Builder.FSType()
 	key := fsType + "/" + strings.TrimPrefix(img.Digest, "sha256:")
 	unlock := c.lock(key)
-	defer unlock()
 	out := Rootfs{Ref: ref, Digest: img.Digest, Index: img.Index, FSType: fsType, Config: img.Config,
 		Path: filepath.Join(c.Dir, fsType, strings.TrimPrefix(img.Digest, "sha256:")+"."+fsType)}
 	if _, err := os.Stat(out.Path); err == nil {
+		touch(out.Path)
+		unlock()
 		return out, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
+		unlock()
 		return Rootfs{}, fmt.Errorf("image: cache: %w", err)
 	}
-	if err := c.build(ctx, r, img, out.Path); err != nil {
+	err = c.build(ctx, r, img, out.Path)
+	unlock()
+	if err != nil {
 		return Rootfs{}, err
 	}
+	if c.MaxBytes > 0 {
+		if _, _, err := c.Trim(); err != nil {
+			log.Printf("image: cache: trim: %v", err)
+		}
+	}
 	return out, nil
+}
+
+// touch marks p used now: Trim removes the least recently used first.
+func touch(p string) {
+	now := time.Now()
+	_ = os.Chtimes(p, now, now)
+}
+
+// DefaultRecent is Cache.Recent's default.
+const DefaultRecent = 10 * time.Minute
+
+// Trim removes the least recently used images and layer blobs until the cache holds at most MaxBytes, counting builds
+// and fetches in progress, which it never removes. It leaves every image InUse names, every image or blob used within
+// Recent, and an image a Get is building or checking now. It answers how many files it removed and their bytes.
+func (c *Cache) Trim() (removed int, freed int64, err error) {
+	if c.MaxBytes <= 0 {
+		return 0, 0, nil
+	}
+	type entry struct {
+		path, key string // key: the image's lock key, "" for a blob
+		size      int64
+		used      time.Time
+	}
+	var total int64
+	var es []entry
+	tops, err := os.ReadDir(c.Dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("image: cache: %w", err)
+	}
+	for _, top := range tops {
+		if !top.IsDir() || top.Name() == "manifests" {
+			continue
+		}
+		dir := filepath.Join(c.Dir, top.Name())
+		if top.Name() == "blobs" {
+			dir = filepath.Join(dir, "sha256")
+		}
+		werr := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			total += fi.Size()
+			name := d.Name()
+			// A build (.build-*) or fetch (.fetch-*) in progress counts and stays.
+			if strings.HasPrefix(top.Name(), ".") || strings.HasPrefix(name, ".") || filepath.Dir(p) != dir {
+				return nil
+			}
+			e := entry{path: p, size: fi.Size(), used: fi.ModTime()}
+			if top.Name() != "blobs" {
+				e.key = top.Name() + "/" + strings.TrimSuffix(name, "."+top.Name())
+			}
+			es = append(es, e)
+			return nil
+		})
+		if werr != nil {
+			return 0, 0, werr
+		}
+	}
+	if total <= c.MaxBytes {
+		return 0, 0, nil
+	}
+	inUse := map[string]bool{}
+	if c.InUse != nil {
+		for _, p := range c.InUse() {
+			inUse[filepath.Clean(p)] = true
+		}
+	}
+	recent := c.Recent
+	if recent == 0 {
+		recent = DefaultRecent
+	}
+	cutoff := time.Now().Add(-max(recent, 0))
+	sort.Slice(es, func(i, j int) bool { return es[i].used.Before(es[j].used) })
+	for _, e := range es {
+		if total <= c.MaxBytes {
+			break
+		}
+		if inUse[e.path] || e.used.After(cutoff) {
+			continue
+		}
+		if e.key != "" {
+			l := c.keyLock(e.key)
+			if !l.TryLock() {
+				continue // a Get is building or answering it
+			}
+			err := os.Remove(e.path)
+			l.Unlock()
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				log.Printf("image: cache: %s not removed: %v", e.path, err)
+				continue
+			}
+		} else if err := os.Remove(e.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("image: cache: %s not removed: %v", e.path, err)
+			continue
+		}
+		total -= e.size
+		removed++
+		freed += e.size
+		log.Printf("image: cache: removed %s (%d bytes, last used %s): over %d bytes and no VM runs on it", e.path, e.size, e.used.UTC().Format(time.RFC3339), c.MaxBytes)
+	}
+	if total > c.MaxBytes {
+		log.Printf("image: cache: holds %d bytes after trim, over %d: the rest is in use, recent or being built", total, c.MaxBytes)
+	}
+	return removed, freed, nil
 }
 
 // resolve answers a reference that names a digest from the manifest records, and asks the Source otherwise (or when
@@ -263,6 +400,7 @@ func (c *Cache) blob(ctx context.Context, r Ref, d Descriptor) (*os.File, error)
 		h := sha256.New()
 		_, err := io.Copy(h, f)
 		if _, serr := f.Seek(0, io.SeekStart); err == nil && serr == nil && "sha256:"+hex.EncodeToString(h.Sum(nil)) == d.Digest {
+			touch(p)
 			return f, nil
 		}
 		_ = f.Close()

@@ -680,6 +680,19 @@ func (m *Machines) bundlePins(ctx context.Context, id string, man Manifest) map[
 	return nil
 }
 
+// ImagePaths is every image file a VM this host holds runs on (image.Cache.InUse): the cache never removes one.
+func (m *Machines) ImagePaths() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, roots := range m.images {
+		for _, r := range roots {
+			out = append(out, r.Path)
+		}
+	}
+	return out
+}
+
 // Images is the image the actor's VM runs per reference of its template (nil for a VM this host does not hold).
 func (m *Machines) Images(id string) map[string]image.Rootfs {
 	vmID := m.resolve(id)
