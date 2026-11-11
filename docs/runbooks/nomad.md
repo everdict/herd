@@ -14,7 +14,9 @@ reach it with no lab allowance and no address in a job file. An actor still need
 
 - Nomad 1.7+ (Nomad variables, `nomadService` templates), with the `exec` and `raw_exec` drivers enabled on the
   clients (`plugin "raw_exec" { config { enabled = true } }`): herdlet needs `/dev/kvm`, TAP devices and nftables on
-  the host, which only `raw_exec` gives it.
+  the host, which only `raw_exec` gives it, and `conntrack` (Ubuntu package `conntrack`) to clear a VM address's
+  stale connection tracking before its guest runs (ADR A-59; without it herdlet logs `conntrack entries … not
+  cleared` and goes on).
 - On every Linux client: Cloud Hypervisor v54.0 at `/usr/local/bin/cloud-hypervisor`, as in all-in-one.md step 1,
   and `herdlet doctor` passing (from the unpacked archive, with the job's kernel, initramfs and virtiofsd:
   `sudo ./herd/herdlet doctor -kernel ./herd/kernel -initrd ./herd/initrd.img -virtiofsd ./herd/virtiofsd`).

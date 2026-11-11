@@ -37,6 +37,31 @@ type Host struct {
 
 	holes  []fakeHole
 	handle int
+	// flows counts conntrack entries by their original source address (flows a VM opened).
+	flows map[string]int
+	// KeepFlows makes "conntrack -D" report entries deleted and remove none (a kernel that recreates them at once).
+	KeepFlows bool
+	// Deleted counts the conntrack entries "conntrack -D" reported deleted.
+	Deleted int
+	// NoConntrack makes conntrack(8) missing from the host.
+	NoConntrack bool
+}
+
+// AddFlow records a conntrack entry of a flow from addr, as one the kernel tracked before the VM's table existed.
+func (h *Host) AddFlow(addr string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.flows == nil {
+		h.flows = map[string]int{}
+	}
+	h.flows[addr]++
+}
+
+// Flows is how many conntrack entries are of flows from addr.
+func (h *Host) Flows(addr string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.flows[addr]
 }
 
 var _ nft.Host = (*Host)(nil)
@@ -167,6 +192,28 @@ func (h *Host) Run(_ context.Context, c nft.Command) ([]byte, error) {
 		if !h.tables[a[3]] {
 			return fail("Error: Could not process rule: No such file or directory")
 		}
+	case c.Name == "conntrack" && len(a) == 3 && (a[0] == "-D" || a[0] == "-L") && (a[1] == "-s" || a[1] == "-d"):
+		// conntrack(8) as conntrack-tools 1.4 answers: the entries on stdout, the count on stderr; a delete that
+		// matched nothing exits 1.
+		if h.NoConntrack {
+			return []byte(""), fmt.Errorf("exec: \"conntrack\": executable file not found in $PATH")
+		}
+		n := 0
+		if a[1] == "-s" {
+			n = h.flows[a[2]]
+		}
+		if a[0] == "-L" {
+			out := strings.Repeat(fmt.Sprintf("udp      17 29 src=%s dst=1.1.1.1 sport=40000 dport=53 [UNREPLIED] src=1.1.1.1 dst=%s sport=53 dport=40000 mark=0 use=1\n", a[2], a[2]), n)
+			return []byte(out + fmt.Sprintf("conntrack v1.4.6 (conntrack-tools): %d flow entries have been shown.\n", n)), nil
+		}
+		if n == 0 {
+			return fail("conntrack v1.4.6 (conntrack-tools): 0 flow entries have been deleted.")
+		}
+		if !h.KeepFlows {
+			delete(h.flows, a[2])
+		}
+		h.Deleted += n
+		return []byte(fmt.Sprintf("conntrack v1.4.6 (conntrack-tools): %d flow entries have been deleted.\n", n)), nil
 	default:
 		return fail("nfttest: unknown command")
 	}

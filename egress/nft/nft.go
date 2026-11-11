@@ -252,3 +252,45 @@ func present(ctx context.Context, h Host, c Command, absent string) (bool, error
 	}
 	return false, fmt.Errorf("nft: %s: %w", c, err)
 }
+
+var (
+	ctDeletedRE = regexp.MustCompile(`(\d+) flow entries have been deleted`)
+	ctShownRE   = regexp.MustCompile(`(\d+) flow entries have been shown`)
+)
+
+// FlushConntrack deletes every conntrack entry whose original source or destination is addr (conntrack -D -s and
+// -d), then lists them again and answers how many remain. An entry the kernel made for the address before the VM's
+// table existed was never NATed by the table's redirect, so the flow it tracks (a restored guest's resolver retrying
+// from the source port in its memory) passes the redirect and is dropped by the input chain, which accepts only
+// `ct status dnat` (DEFAUL-1622, A-59). A delete that matched nothing exits 1 saying "0 flow entries", which is
+// success here.
+func FlushConntrack(ctx context.Context, h Host, addr netip.Addr) (left int, err error) {
+	if !addr.IsValid() {
+		return 0, fmt.Errorf("%w: conntrack address %v", ErrInvalid, addr)
+	}
+	for _, dir := range []string{"-s", "-d"} {
+		c := Command{Name: "conntrack", Args: []string{"-D", dir, addr.String()}}
+		out, err := h.Run(ctx, c)
+		if err != nil {
+			m := ctDeletedRE.FindStringSubmatch(string(out) + err.Error())
+			if m == nil || m[1] != "0" {
+				return 0, fmt.Errorf("nft: %s: %w", c, err)
+			}
+		}
+	}
+	for _, dir := range []string{"-s", "-d"} {
+		c := Command{Name: "conntrack", Args: []string{"-L", dir, addr.String()}}
+		out, err := h.Run(ctx, c)
+		if err != nil {
+			return 0, fmt.Errorf("nft: %s: %w", c, err)
+		}
+		m := ctShownRE.FindStringSubmatch(string(out))
+		if m == nil {
+			return 0, fmt.Errorf("nft: %s: no count in its answer: %.200s", c, out)
+		}
+		var n int
+		fmt.Sscan(m[1], &n)
+		left += n
+	}
+	return left, nil
+}

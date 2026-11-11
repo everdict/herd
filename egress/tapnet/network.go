@@ -199,11 +199,28 @@ func (n *Network) Up(ctx context.Context, id string) error {
 	n.up[id] = true
 	n.mu.Unlock()
 	log.Printf("tapnet: %s: up: tap %s %s, table inet %s (tcp to :%d, udp 53 to :%d) loaded before link up", id, l.TAP, l.Host, v.Table(), n.ProxyPort, n.DNSPort)
+	n.flushConntrack(ctx, id, l)
 	if err := n.bind(id); err != nil {
 		_, _ = n.Down(context.WithoutCancel(ctx), id)
 		return err
 	}
 	return nil
+}
+
+// flushConntrack removes the conntrack entries naming the VM's address, now that its table is loaded and before its
+// guest runs (Up precedes every Boot and Restore), and checks none remain (A-59): an entry made before the table
+// existed carries a flow past its redirect, and the input chain drops it. A flush that fails or leaves entries is
+// logged, not an error: the table is in force, and only flows of such an entry are at stake.
+func (n *Network) flushConntrack(ctx context.Context, id string, l Lease) {
+	left, err := nft.FlushConntrack(ctx, n.Host, l.VM)
+	switch {
+	case err != nil:
+		log.Printf("tapnet: %s: conntrack entries of %s not cleared (a flow tracked before the table would pass its redirect and be dropped): %v", id, l.VM, err)
+	case left > 0:
+		log.Printf("tapnet: %s: %d conntrack entries of %s remain after the flush: not cleared (a flow tracked before the table would pass its redirect and be dropped)", id, left, l.VM)
+	default:
+		log.Printf("tapnet: %s: conntrack entries of %s flushed, none remain", id, l.VM)
+	}
 }
 
 // Down unbinds the VM and removes its TAP and table, then observes all three gone. Present means something is
