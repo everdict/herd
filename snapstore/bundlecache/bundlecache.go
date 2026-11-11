@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/everdict/herd/snapstore"
@@ -24,12 +25,28 @@ import (
 
 // Cache keeps objects under Dir/<sha256 hex>, at most MaxBytes in all.
 type Cache struct {
+	// Stall bounds a fetch: one that has read no bytes from its store for this long ends with a deadline (zero:
+	// DefaultStall). No caller's deadline ends a fetch (PLT-457).
+	Stall time.Duration
+
 	dir string
 	max int64
 
 	mu       sync.Mutex
-	inflight map[string]chan struct{} // digest → closed when its fetch ends
-	fetched  int64                    // bytes read from stores
+	inflight map[string]*flight // digest → its fetch in progress
+	fetched  int64              // bytes read from stores
+}
+
+// DefaultStall is Cache.Stall's default.
+const DefaultStall = 2 * time.Minute
+
+// flight is a fetch in progress, which the Opens of its digest wait for.
+type flight struct {
+	done chan struct{} // closed when the fetch ends
+	err  error
+	// big is the object of a fetch too large to keep, for the first waiter to take; waiters counts the Opens waiting.
+	big     *os.File
+	waiters int
 }
 
 // New returns a cache in dir (created) holding at most maxBytes.
@@ -46,7 +63,7 @@ func New(dir string, maxBytes int64) (*Cache, error) {
 			_ = os.Remove(t)
 		}
 	}
-	return &Cache{dir: dir, max: maxBytes, inflight: map[string]chan struct{}{}}, nil
+	return &Cache{dir: dir, max: maxBytes, inflight: map[string]*flight{}}, nil
 }
 
 // Fetched is how many bytes the cache has read from snapshot stores.
@@ -65,8 +82,12 @@ func (c *Cache) path(digest string) (string, error) {
 }
 
 // Open returns the bytes of the object st holds at key, which must be digest: from the cache when it holds digest,
-// else read from st once (and kept). A fetch of the same digest in flight is waited for, not repeated. The object is
-// refused (snapstore.ErrDigestMismatch) unless its bytes are digest.
+// else read from st once (and kept). The object is refused (snapstore.ErrDigestMismatch) unless its bytes are digest.
+//
+// A fetch is not the caller's: it goes on when the Open that started it gives up (ctx ends), until it has the object or
+// has read nothing for Stall, and every Open of the digest meanwhile waits for it rather than starting another. A
+// restore whose fetch outlasts the deadline of its work therefore ends unknown, and the next attempt joins the fetch
+// or finds the object kept, instead of fetching from zero again and again (PLT-457).
 func (c *Cache) Open(ctx context.Context, st snapstore.Store, key, digest string) (io.ReadCloser, error) {
 	p, err := c.path(digest)
 	if err != nil {
@@ -77,24 +98,67 @@ func (c *Cache) Open(ctx context.Context, st snapstore.Store, key, digest string
 			return f, nil
 		}
 		c.mu.Lock()
-		wait, busy := c.inflight[digest]
+		fl, busy := c.inflight[digest]
 		if !busy {
-			done := make(chan struct{})
-			c.inflight[digest] = done
-			c.mu.Unlock()
-			f, err := c.fetch(ctx, st, key, digest, p)
-			c.mu.Lock()
-			delete(c.inflight, digest)
-			c.mu.Unlock()
-			close(done)
-			return f, err
+			fl = &flight{done: make(chan struct{})}
+			c.inflight[digest] = fl
+			go c.fly(context.WithoutCancel(ctx), st, key, digest, p, fl)
 		}
+		fl.waiters++
 		c.mu.Unlock()
 		select {
-		case <-wait:
+		case <-fl.done:
+			c.mu.Lock()
+			fl.waiters--
+			big, err := fl.big, fl.err
+			fl.big = nil
+			c.mu.Unlock()
+			if big != nil {
+				return big, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			// Kept: the next pass opens it.
 		case <-ctx.Done():
+			c.mu.Lock()
+			fl.waiters--
+			c.unclaimed(fl)
+			c.mu.Unlock()
 			return nil, fmt.Errorf("bundlecache: waiting for the fetch of %s: %w", key, ctx.Err())
 		}
+	}
+}
+
+// fly runs fl's fetch and hands its end to the Opens waiting for it.
+func (c *Cache) fly(ctx context.Context, st snapstore.Store, key, digest, p string, fl *flight) {
+	f, kept, err := c.fetch(ctx, st, key, digest, p)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.inflight, digest)
+	fl.err = err
+	if f != nil {
+		if kept {
+			// Every waiter opens its own copy from the cache.
+			_ = f.Close()
+		} else {
+			fl.big = f
+		}
+	}
+	close(fl.done)
+	c.unclaimed(fl)
+}
+
+// unclaimed closes the object of a fetch too large to keep once no Open waits for it any more. c.mu is held.
+func (c *Cache) unclaimed(fl *flight) {
+	select {
+	case <-fl.done:
+	default:
+		return
+	}
+	if fl.waiters == 0 && fl.big != nil {
+		_ = fl.big.Close()
+		fl.big = nil
 	}
 }
 
@@ -109,15 +173,52 @@ func (c *Cache) hit(p string) (*os.File, error) {
 	return f, nil
 }
 
-func (c *Cache) fetch(ctx context.Context, st snapstore.Store, key, digest, p string) (*os.File, error) {
+// fetch reads the object from st into the cache, and returns it open, and whether it was kept (a too large one is
+// served from a file that goes when it is closed). It ends with a deadline once it has read nothing for Stall.
+func (c *Cache) fetch(ctx context.Context, st snapstore.Store, key, digest, p string) (*os.File, bool, error) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stall := c.Stall
+	if stall <= 0 {
+		stall = DefaultStall
+	}
+	var last atomic.Int64
+	last.Store(time.Now().UnixNano())
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		t := time.NewTicker(stall / 4)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+			if time.Since(time.Unix(0, last.Load())) >= stall {
+				cancel(fmt.Errorf("no bytes from the store for %v: %w", stall, context.DeadlineExceeded))
+				return
+			}
+		}
+	}()
+	// What a fetch that ended reports: why it was ended, if it was.
+	cause := func(err error) error {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return err
+	}
 	rc, err := st.Open(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, false, cause(err)
 	}
 	defer rc.Close()
+	// A store whose read does not watch its context still ends when its reader is closed.
+	unwatch := context.AfterFunc(ctx, func() { _ = rc.Close() })
+	defer unwatch()
 	tmp, err := os.CreateTemp(c.dir, ".tmp-*")
 	if err != nil {
-		return nil, fmt.Errorf("bundlecache: %w", err)
+		return nil, false, fmt.Errorf("bundlecache: %w", err)
 	}
 	keep := false
 	defer func() {
@@ -127,31 +228,31 @@ func (c *Cache) fetch(ctx context.Context, st snapstore.Store, key, digest, p st
 		}
 	}()
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), ctxReader{ctx, rc})
+	n, err := io.Copy(io.MultiWriter(tmp, h), ctxReader{ctx, rc, &last})
 	c.mu.Lock()
 	c.fetched += n
 	c.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("bundlecache: fetching %s: %w", key, err)
+		return nil, false, fmt.Errorf("bundlecache: fetching %s: %w", key, cause(err))
 	}
 	if got := "sha256:" + hex.EncodeToString(h.Sum(nil)); got != digest {
-		return nil, fmt.Errorf("%w: %s holds %s (%d bytes), want %s", snapstore.ErrDigestMismatch, key, got, n, digest)
+		return nil, false, fmt.Errorf("%w: %s holds %s (%d bytes), want %s", snapstore.ErrDigestMismatch, key, got, n, digest)
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("bundlecache: %w", err)
+		return nil, false, fmt.Errorf("bundlecache: %w", err)
 	}
 	keep = true
 	if n > c.max {
 		// Too large to keep: the reader still gets it, and the file goes when it is closed.
 		_ = os.Remove(tmp.Name())
-		return tmp, nil
+		return tmp, false, nil
 	}
 	if err := os.Rename(tmp.Name(), p); err != nil {
 		_ = os.Remove(tmp.Name())
-		return tmp, nil
+		return tmp, false, nil
 	}
 	c.evict(p)
-	return tmp, nil
+	return tmp, true, nil
 }
 
 // CreateTemp creates a temporary file in the cache's directory, for a file Keep then moves in without a copy. A
@@ -252,14 +353,20 @@ func (c *Cache) evict(fresh string) {
 	}
 }
 
+// ctxReader reads r until ctx ends, and marks when it last read bytes.
 type ctxReader struct {
-	ctx context.Context
-	r   io.Reader
+	ctx  context.Context
+	r    io.Reader
+	last *atomic.Int64
 }
 
 func (c ctxReader) Read(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
-		return 0, err
+		return 0, context.Cause(c.ctx)
 	}
-	return c.r.Read(p)
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.last.Store(time.Now().UnixNano())
+	}
+	return n, err
 }

@@ -29,14 +29,32 @@ type counting struct {
 	mu   sync.Mutex
 	read int64
 	gate chan struct{} // if set, every Open waits for it
+	// pace, if set, is how long each read takes, of at most chunk bytes: a slow link to the store.
+	pace  time.Duration
+	chunk int
+	// hang, if set, makes the reads of the first Open block until their context ends: a store that stops sending.
+	hang  bool
+	opens int
 }
 
 type countReader struct {
 	io.ReadCloser
-	c *counting
+	c    *counting
+	ctx  context.Context
+	hang bool
 }
 
 func (r countReader) Read(p []byte) (int, error) {
+	if r.hang {
+		<-r.ctx.Done()
+		return 0, r.ctx.Err()
+	}
+	if r.c.pace > 0 {
+		time.Sleep(r.c.pace)
+		if len(p) > r.c.chunk {
+			p = p[:r.c.chunk]
+		}
+	}
 	n, err := r.ReadCloser.Read(p)
 	r.c.mu.Lock()
 	r.c.read += int64(n)
@@ -52,7 +70,11 @@ func (c *counting) Open(ctx context.Context, key string) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, err
 	}
-	return countReader{rc, c}, nil
+	c.mu.Lock()
+	c.opens++
+	hang := c.hang && c.opens == 1
+	c.mu.Unlock()
+	return countReader{rc, c, ctx, hang}, nil
 }
 
 func (c *counting) bytes() int64 {
@@ -253,5 +275,65 @@ func TestConcurrentOpensFetchOnce(t *testing.T) {
 	}
 	if n := st.bytes(); n != int64(len(b)) {
 		t.Errorf("four Opens at once read %d store bytes, want %d", n, len(b))
+	}
+}
+
+// TestFetchOutlivesItsCaller (PLT-457): a fetch that takes longer than any one caller waits goes on after the caller
+// that started it gave up, and a later Open joins it or finds its object kept, so the attempts of a restore that each
+// outlast their deadline add up instead of each starting from zero. The store is read once.
+func TestFetchOutlivesItsCaller(t *testing.T) {
+	st := store(t)
+	b := bytes.Repeat([]byte("golden bundle "), 100) // 1400 bytes
+	d := put(t, st, "tags/g/1", b)
+	st.pace, st.chunk = 10*time.Millisecond, 100 // about 140 ms in all
+	c, err := bundlecache.New(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	attempts := 0
+	for attempts < 10 && got == nil {
+		attempts++
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		rc, err := c.Open(ctx, st, "tags/g/1", d)
+		if err == nil {
+			got, err = io.ReadAll(rc)
+			rc.Close()
+		} else if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d: %v, want a deadline (the herdlet answers unknown, and herd-api asks again)", attempts, err)
+		}
+		cancel()
+	}
+	if got == nil {
+		t.Fatalf("ten attempts of 50 ms each never opened a bundle whose fetch takes about 140 ms: every attempt fetched from zero")
+	}
+	if !bytes.Equal(got, b) {
+		t.Fatal("wrong bytes")
+	}
+	if n := st.bytes(); n != int64(len(b)) {
+		t.Errorf("%d attempts read %d store bytes, want %d (one fetch)", attempts, n, len(b))
+	}
+}
+
+// TestStalledFetchEndsAndStartsAgain (PLT-457): a fetch that gets no bytes for the cache's stall bound ends with a
+// deadline, whoever waits, and the next Open fetches again: a fetch no caller bounds is still bounded.
+func TestStalledFetchEndsAndStartsAgain(t *testing.T) {
+	st := store(t)
+	b := []byte("a bundle behind a store that stopped sending")
+	d := put(t, st, "k", b)
+	st.hang = true
+	c, err := bundlecache.New(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Stall = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.Open(ctx, st, "k", d); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("Open of a stalled fetch = %v after %v, want a deadline within the stall bound", err, time.Since(start))
+	}
+	if got := read(t, c, st, "k", d); !bytes.Equal(got, b) {
+		t.Fatal("the Open after a stall: wrong bytes")
 	}
 }
