@@ -130,4 +130,5 @@ func (s *Server) Register(g grpc.ServiceRegistrar) {
 	g.RegisterService(&ControlServiceDesc, s)
 	g.RegisterService(&CapabilitiesServiceDesc, s)
 	g.RegisterService(&linkServiceDesc, s)
+	g.RegisterService(&authzServiceDesc, s)
 }

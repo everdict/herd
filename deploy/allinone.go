@@ -213,7 +213,7 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		CallTimeout: 30 * time.Second, Reconcile: 10 * time.Second, AdvertiseTunnel: addrs.Tunnel,
 		OnJoin: a.OnJoin, GoldenWarmup: a.GoldenWarmup, SnapshotSweep: DefaultSnapshotSweep}
 	start("herd-api", func() error { return api.Run(ctx, apiLn) })
-	rt := &Router{Identity: Identity{Source: ids.router}, Policy: ids.policy, LocalCA: true, API: addrs.API, ParkingBudget: 30 * time.Second, DefaultPort: 8080}
+	rt := &Router{Identity: Identity{Source: ids.router}, LocalCA: true, API: addrs.API, ParkingBudget: 30 * time.Second, DefaultPort: 8080}
 	start("herd-router", func() error { return rt.Run(ctx, cl, tl) })
 
 	// The herdlet joins like any other host: by its node SVID.

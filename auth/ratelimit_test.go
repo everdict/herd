@@ -19,7 +19,7 @@ func TestBreakGlassLogIsRateLimited(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	m := auth.NewMeter()
 	m.Now = func() time.Time { return now }
-	chain := auth.Chain{BreakGlass: auth.StaticKey{Key: key, Now: func() time.Time { return now }}, Meter: m}
+	chain := auth.Chain{BreakGlass: auth.StaticKey{Key: key, Now: func() time.Time { return now }}, Meter: m, Component: "herd-api"}
 	var logs bytes.Buffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
@@ -50,7 +50,7 @@ func TestBreakGlassLogIsRateLimited(t *testing.T) {
 
 	call(herder, 100)
 	call(other, 1)
-	if n := m.Value(auth.MetricBreakGlassCalls, "subject", "everdict"); n != 100 {
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "herd-api", "subject", "everdict"); n != 100 {
 		t.Errorf("counter = %d after 100 calls, want 100: the count is exact whatever the log does", n)
 	}
 	if l := lines("everdict"); len(l) != 1 || !strings.Contains(l[0], "break-glass HS256 call by subject") {
@@ -68,10 +68,10 @@ func TestBreakGlassLogIsRateLimited(t *testing.T) {
 	now = now.Add(31 * time.Second)
 	call(herder, 1)
 	l := lines("everdict")
-	if len(l) != 2 || !strings.Contains(l[1], `110 break-glass HS256 calls by subject "everdict" in the last 61s`) {
+	if len(l) != 2 || !strings.Contains(l[1], `110 break-glass HS256 calls by subject "everdict" at herd-api in the last 61s`) {
 		t.Fatalf("a minute on, the log for the subject is %q; want one summary of the 110 calls since its first", l)
 	}
-	if n := m.Value(auth.MetricBreakGlassCalls, "subject", "everdict"); n != 111 {
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "herd-api", "subject", "everdict"); n != 111 {
 		t.Errorf("counter = %d, want 111", n)
 	}
 

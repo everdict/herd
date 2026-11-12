@@ -84,10 +84,6 @@ type placement struct{ worker, vm string }
 type Config struct {
 	Control Control
 	Tunnels Tunnels
-	Authn   auth.Authenticator
-	Authz   auth.Authorizer
-	// Meter counts the requests to actors with no creator recorded (auth.MetricUnownedActorWrites); nil counts nothing.
-	Meter *auth.Meter
 	// DefaultPort is the guest port ordinary requests go to (herd-guest's API, 8080).
 	DefaultPort uint32
 	// ParkingBudget bounds how long a request waits for its actor to become reachable (default 30 s). It bounds
@@ -112,8 +108,8 @@ type Router struct {
 
 // New returns a router.
 func New(cfg Config) (*Router, error) {
-	if cfg.Control == nil || cfg.Tunnels == nil || cfg.Authn == nil || cfg.Authz == nil {
-		return nil, errors.New("router: Control, Tunnels, Authn and Authz are required")
+	if cfg.Control == nil || cfg.Tunnels == nil {
+		return nil, errors.New("router: Control and Tunnels are required")
 	}
 	if cfg.DefaultPort == 0 {
 		cfg.DefaultPort = 8080
@@ -130,31 +126,47 @@ func New(cfg Config) (*Router, error) {
 	return &Router{cfg: cfg}, nil
 }
 
-// actorWrite decides one request's write on its actor (auth.ActorWriter), once: a parked request reads the actor
-// again on every poll, and its creator cannot change.
+// actorWrite is one request's write on its actor, decided by herd-api (Control.CheckActorWrite) with the client's own
+// bearer: the router holds no policy (review 7). The decision is for one actor uid: a parked request that finds the
+// actor of the name re-created (another uid, perhaps another creator) asks again (review 6).
 type actorWrite struct {
-	rt      *Router
-	p       auth.Principal
-	decided bool
+	rt                 *Router
+	token, space, name string
+	uid                string
+	expires            time.Time
 }
 
-func (w *actorWrite) allow(space, name, creator string) *routeError {
-	if w.decided {
+// decide asks herd-api; nil when the write is allowed.
+func (w *actorWrite) decide(ctx context.Context) *routeError {
+	d, err := w.rt.cfg.Control.CheckActorWrite(ctx, w.token, w.space, w.name)
+	if err != nil {
+		switch status.Code(err) {
+		case codes.Unauthenticated:
+			return &routeError{http.StatusUnauthorized, codes.Unauthenticated, ReasonUnauthenticated, status.Convert(err).Message()}
+		case codes.PermissionDenied:
+			return &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, status.Convert(err).Message()}
+		case codes.NotFound:
+			return &routeError{http.StatusNotFound, codes.NotFound, ReasonActorNotFound, fmt.Sprintf("actor %s/%s not found", w.space, w.name)}
+		case codes.InvalidArgument:
+			return &routeError{http.StatusBadRequest, codes.InvalidArgument, ReasonBadTarget, status.Convert(err).Message()}
+		}
+		return &routeError{http.StatusServiceUnavailable, codes.Unavailable, ReasonParkingBudget, "herd-api: " + err.Error()}
+	}
+	w.uid, w.expires = d.UID, d.Expires
+	return nil
+}
+
+// allow is the decision for the actor of uid: the one made, or a new one when the uid is another.
+func (w *actorWrite) allow(ctx context.Context, uid string) *routeError {
+	if uid == w.uid {
 		return nil
 	}
-	a, err := auth.ActorWriter(w.p, space, creator)
-	if err != nil {
-		return &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, fmt.Sprintf("actor %s/%s: %v", space, name, err)}
+	if rerr := w.decide(ctx); rerr != nil {
+		return rerr
 	}
-	w.decided = true
-	if a.Counted() {
-		w.rt.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
-		caller := w.p.Creator()
-		w.rt.cfg.Meter.Note("unowned "+string(a)+" "+caller,
-			fmt.Sprintf("herd-router: actor %s/%s has no creator recorded; %s reaches it under the %s allowance (ADR 0001 A-60); later such requests by it are summed once a minute", space, name, caller, a),
-			func(n int, d time.Duration) string {
-				return fmt.Sprintf("herd-router: %d requests by %s to actors with no creator recorded (%s) in the last %s", n, caller, a, auth.Seconds(d))
-			})
+	if w.uid != uid {
+		// The actor changed again between the read and the decision; the next poll reads it again.
+		return &routeError{http.StatusServiceUnavailable, codes.Unavailable, ReasonParkingBudget, fmt.Sprintf("actor %s/%s changed while it was decided", w.space, w.name)}
 	}
 	return nil
 }
@@ -199,23 +211,15 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, &routeError{http.StatusBadRequest, codes.InvalidArgument, ReasonBadTarget, err.Error()})
 		return
 	}
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || token == "" {
+	token := auth.BearerToken(r.Header.Get("Authorization"))
+	if token == "" {
 		fail(w, r, &routeError{http.StatusUnauthorized, codes.Unauthenticated, ReasonUnauthenticated, "no bearer token"})
 		return
 	}
-	p, err := rt.cfg.Authn.Authenticate(r.Context(), token)
-	if err != nil {
-		fail(w, r, &routeError{http.StatusUnauthorized, codes.Unauthenticated, ReasonUnauthenticated, err.Error()})
-		return
-	}
-	// Authority before effect: nothing is resumed or reached for a caller the atespace does not admit.
-	if p.Herdlet {
-		fail(w, r, &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, "a herdlet credential cannot reach actors"})
-		return
-	}
-	if err := rt.cfg.Authz.Authorize(p, space, auth.ActionWrite); err != nil {
-		fail(w, r, &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, err.Error()})
+	// Authority before effect: herd-api decides, with the client's bearer, before anything is resumed or reached.
+	wr := &actorWrite{rt: rt, token: token, space: space, name: name}
+	if rerr := wr.decide(r.Context()); rerr != nil {
+		fail(w, r, rerr)
 		return
 	}
 	port := rt.cfg.DefaultPort
@@ -230,11 +234,16 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The parking budget bounds only the wait for a connection, never the request once delivered.
 	pctx, cancel := context.WithTimeout(r.Context(), rt.cfg.ParkingBudget)
-	conn, rerr := rt.connect(pctx, p, token, space, name, port)
+	conn, rerr := rt.connect(pctx, wr, token, space, name, port)
 	cancel()
 	if rerr != nil {
 		fail(w, r, rerr)
 		return
+	}
+	// A stream lasts no longer than the credential that opened it (review 2): at its end the connection is cut.
+	if !wr.expires.IsZero() {
+		cut := time.AfterFunc(time.Until(wr.expires), func() { _ = conn.Close() })
+		defer cut.Stop()
 	}
 	if r.Method == http.MethodConnect {
 		rt.splice(w, r, conn, token, space, name)
@@ -245,8 +254,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // connect resolves the actor (parking while it is not running) and opens a connection to port through its worker's
 // tunnel, retrying until ctx (the parking budget) ends.
-func (rt *Router) connect(ctx context.Context, p auth.Principal, token, space, name string, port uint32) (net.Conn, *routeError) {
-	w := &actorWrite{rt: rt, p: p}
+func (rt *Router) connect(ctx context.Context, w *actorWrite, token, space, name string, port uint32) (net.Conn, *routeError) {
 	parked := false
 	defer func() {
 		if parked {
@@ -322,9 +330,9 @@ func (rt *Router) resolve(ctx context.Context, wr *actorWrite, token, space, nam
 		}
 		return "", "", "herd-api: " + err.Error(), nil
 	}
-	// A request to an actor (an exec, a stream, a resume on request) is a write on it: its creator's or an
-	// operator's, before anything is resumed or reached (ADR 0001 A-60).
-	if rerr := wr.allow(space, name, a.GetStatus().GetCreator()); rerr != nil {
+	// A request to an actor (an exec, a stream, a resume on request) is a write on it, decided for this actor uid
+	// (ADR 0001 A-60).
+	if rerr := wr.allow(ctx, a.GetMetadata().GetUid()); rerr != nil {
 		return "", "", "", rerr
 	}
 	st := a.GetStatus().GetState()

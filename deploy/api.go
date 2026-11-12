@@ -177,6 +177,12 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	}
 	// A JWT-SVID for herd-api names herd-api's own SPIFFE ID as its audience.
 	authn, key, err := authenticator("herd-api", src, self, policy, &a.BreakGlass, meter)
+	if err == nil {
+		// A call herd-router forwards for its client was counted where the client called (CheckActorWrite).
+		router := auth.HerdID(self.TrustDomain(), "router")
+		sv := authn.SVID.(*auth.SPIFFE)
+		authn.Forwarded = func(ctx context.Context) bool { id, ok := sv.PeerID(ctx); return ok && id == router }
+	}
 	if err == nil && self.TrustDomain().Name() == LocalTrustDomain && !a.LocalCA {
 		err = fmt.Errorf("herd-api: its SVID %s is of %s, herd all-in-one's local development CA; a herd-api that is not all-in-one does not start on it", self, LocalTrustDomain)
 	}
@@ -223,7 +229,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 			return false
 		}}
 	// Herdlets behind NAT keep their link alive with pings (every 15 s); allow them every 10 s, as herd-router does.
-	g := grpc.NewServer(serverCreds(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(serverCreds(src), serverKeepalive(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
 	srv.Register(g)
 	js.Register(g)
 	every := a.Reconcile

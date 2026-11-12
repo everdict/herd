@@ -252,7 +252,7 @@ func TestBreakGlassFlagIsDated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an HS256 bearer under -break-glass-hs256-until %s: %v", tomorrow, err)
 	}
-	if n := m.Value(auth.MetricBreakGlassCalls, "subject", "everdict"); n != 1 {
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "herd-api", "subject", "everdict"); n != 1 {
 		t.Errorf("%s{subject=everdict} = %d after one call, want 1", auth.MetricBreakGlassCalls, n)
 	}
 
@@ -271,7 +271,7 @@ func TestBreakGlassFlagIsDated(t *testing.T) {
 		if err := waitErr(t, runAPI(t, api, listen(t)), 10*time.Second); err == nil || !strings.Contains(err.Error(), tc.reason) {
 			t.Errorf("herd-api with %s: %v; want a refusal to start naming %q", tc.name, err, tc.reason)
 		}
-		rt := &deploy.Router{Identity: routerIdentity(t), Policy: noRules(t), API: "127.0.0.1:1", DefaultPort: 8080, BreakGlass: tc.bg}
+		rt := &deploy.Router{Identity: routerIdentity(t), API: "127.0.0.1:1", DefaultPort: 8080, BreakGlass: tc.bg}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- rt.Run(ctx, listen(t), listen(t)) }()
@@ -283,16 +283,15 @@ func TestBreakGlassFlagIsDated(t *testing.T) {
 	}
 }
 
-// TestRouterFailsClosed (A-60): herd-router with no identity, with herd-api's SVID, or with no policy does not start.
+// TestRouterFailsClosed (A-60): herd-router with no identity, or with herd-api's SVID, does not start.
 func TestRouterFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		r      deploy.Router
 		reason string
 	}{
-		{"no Workload API", deploy.Router{Identity: deploy.Identity{Socket: "unix:///tmp/herd-no-agent/api.sock", Wait: 300 * time.Millisecond}, Policy: noRules(t)}, "no SPIFFE identity"},
-		{"herd-api's SVID", deploy.Router{Identity: apiIdentity(t), Policy: noRules(t)}, "reach it as spiffe://herd.test/herd/router"},
-		{"no policy file", deploy.Router{Identity: routerIdentity(t), Policy: filepath.Join(t.TempDir(), "absent.json")}, "no workload gets an atespace grant"},
+		{"no Workload API", deploy.Router{Identity: deploy.Identity{Socket: "unix:///tmp/herd-no-agent/api.sock", Wait: 300 * time.Millisecond}}, "no SPIFFE identity"},
+		{"herd-api's SVID", deploy.Router{Identity: apiIdentity(t)}, "reach it as spiffe://herd.test/herd/router"},
 	} {
 		r := tc.r
 		r.API, r.DefaultPort = "127.0.0.1:1", 8080
@@ -324,7 +323,7 @@ func TestLocalCAOnlyInAllInOne(t *testing.T) {
 		t.Errorf("herd-api on herd.local outside all-in-one: %v; want a refusal to start naming the local CA", err)
 	}
 	r := &deploy.Router{Identity: deploy.Identity{Source: must(dev.Source("spiffe://herd.local/herd/router", localca.Options{}))},
-		Policy: policy, API: "127.0.0.1:1", DefaultPort: 8080}
+		API: "127.0.0.1:1", DefaultPort: 8080}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

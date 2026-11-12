@@ -121,18 +121,12 @@ job "herd-api" {
         read_only   = true
       }
 
-      template {
-        data        = "{{ with nomadVar \"nomad/jobs/herd-api\" }}{{ .spiffe_policy }}{{ end }}"
-        destination = "local/spiffe-policy.json"
-      }
-
       config {
         command = "local/herd-router"
         args = [
           "-listen", "0.0.0.0:${NOMAD_PORT_router}",
           "-tunnel-listen", "0.0.0.0:${NOMAD_PORT_tunnel}",
           "-api", "${NOMAD_ADDR_api}",
-          "-spiffe-policy", "local/spiffe-policy.json",
         ]
       }
     }

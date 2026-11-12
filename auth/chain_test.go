@@ -34,7 +34,7 @@ func TestChainCountsBreakGlass(t *testing.T) {
 			t.Fatalf("an HS256 bearer: %+v, %v; want the break-glass principal hs256:everdict", p, err)
 		}
 	}
-	if n := m.Value(auth.MetricBreakGlassCalls, "subject", "everdict"); n != 2 {
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "", "subject", "everdict"); n != 2 {
 		t.Errorf("%s{subject=everdict} = %d after two HS256 calls, want 2", auth.MetricBreakGlassCalls, n)
 	}
 	if !strings.Contains(logs.String(), `break-glass HS256 call by subject "everdict"`) {
@@ -46,14 +46,14 @@ func TestChainCountsBreakGlass(t *testing.T) {
 	if _, err := chain.Authenticate(withChain(c.x509SVID(t, runnerID, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))), ""); err != nil {
 		t.Fatalf("an X.509-SVID through the chain: %v", err)
 	}
-	if n := m.Value(auth.MetricBreakGlassCalls, "subject", "everdict"); n != 2 {
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "", "subject", "everdict"); n != 2 {
 		t.Errorf("SVID calls moved the break-glass count to %d", n)
 	}
 	var text bytes.Buffer
 	if err := m.WriteText(&text); err != nil {
 		t.Fatal(err)
 	}
-	if want := auth.MetricBreakGlassCalls + `{subject="everdict"} 2`; !strings.Contains(text.String(), want) {
+	if want := auth.MetricBreakGlassCalls + `{component="",subject="everdict"} 2`; !strings.Contains(text.String(), want) {
 		t.Errorf("metrics text %q does not carry %q", text.String(), want)
 	}
 
@@ -144,5 +144,29 @@ func TestEgressRoleReadsOnlyEgressPolicies(t *testing.T) {
 		if err := az.Authorize(auth.Principal{Spaces: map[string]auth.Role{"acme": r}}, "acme", auth.ActionReadEgress); err != nil {
 			t.Errorf("role %s reading an egress policy: %v", r, err)
 		}
+	}
+}
+
+// TestForwardedCallsAreNotCountedAgain (review, small items): a call another herd component forwards for its client
+// (herd-router's to herd-api) is not counted where it arrives; the component the client called counted it.
+func TestForwardedCallsAreNotCountedAgain(t *testing.T) {
+	m := auth.NewMeter()
+	fwd := true
+	c := auth.Chain{BreakGlass: auth.StaticKey{Key: key}, Meter: m, Component: "herd-api", Forwarded: func(context.Context) bool { return fwd }}
+	hs, err := auth.Sign(key, auth.Claims{Subject: "everdict", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := c.Authenticate(context.Background(), hs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fwd = false
+	if _, err := c.Authenticate(context.Background(), hs); err != nil {
+		t.Fatal(err)
+	}
+	if n := m.Value(auth.MetricBreakGlassCalls, "component", "herd-api", "subject", "everdict"); n != 1 {
+		t.Errorf("%s{component=herd-api} = %d after three forwarded calls and one direct, want 1", auth.MetricBreakGlassCalls, n)
 	}
 }

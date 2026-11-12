@@ -222,7 +222,9 @@ func (s *SPIFFE) x509SVID(b trust, chain []*x509.Certificate) (Principal, error)
 	if _, _, err := x509svid.Verify(chain, b, x509svid.WithTime(now)); err != nil {
 		return Principal{}, refuse("X.509-SVID %s does not chain to the trust bundle: %v", id, err)
 	}
-	return s.principal(id, SchemeX509SVID)
+	p, err := s.principal(id, SchemeX509SVID)
+	p.Expires = leaf.NotAfter
+	return p, err
 }
 
 func (s *SPIFFE) jwtSVID(b trust, token string) (Principal, error) {
@@ -240,7 +242,9 @@ func (s *SPIFFE) jwtSVID(b trust, token string) (Principal, error) {
 	if err != nil {
 		return Principal{}, refuse("JWT-SVID refused: %v", err)
 	}
-	return s.principal(sv.ID, SchemeJWTSVID)
+	p, err := s.principal(sv.ID, SchemeJWTSVID)
+	p.Expires = sv.Expiry
+	return p, err
 }
 
 // svidAlgorithms are the JWS algorithms a JWT-SVID may be signed with (the JWT-SVID standard's).
@@ -258,6 +262,21 @@ func unverifiedSubject(token string) (string, bool) {
 		return "", false
 	}
 	return c.Subject, true
+}
+
+// PeerID is ctx's caller's X.509-SVID ID, verified against the trust bundle but mapped through no policy: a herd
+// component dialing another (herd-router forwarding its client's call to herd-api) is told apart by it.
+func (s *SPIFFE) PeerID(ctx context.Context) (spiffeid.ID, bool) {
+	chain := PeerChain(ctx)
+	if len(chain) == 0 {
+		return spiffeid.ID{}, false
+	}
+	now := s.now()
+	id, _, err := x509svid.Verify(chain, s.trust(), x509svid.WithTime(now))
+	if err != nil || id.TrustDomain() != s.td {
+		return spiffeid.ID{}, false
+	}
+	return id, true
 }
 
 // principal maps a verified SPIFFE ID through the policy.

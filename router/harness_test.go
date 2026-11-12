@@ -72,6 +72,9 @@ type stack struct {
 	tun        *herdlet.Tunnel
 	dials      atomic.Int64 // tunnel dials the router made
 	resumes    atomic.Int64 // ResumeActor calls the router made
+	checks     atomic.Int64 // CheckActorWrite calls the router made
+	// afterCheck, if set, runs after each CheckActorWrite answers (a test re-creating the actor in between).
+	afterCheck atomic.Pointer[func()]
 	guestDials atomic.Int64 // guest connections the herdlet made
 	// apiDelay, when set, delays each GetActor herd-api serves (a herd-api slower than the parking budget).
 	apiDelay   atomic.Int64
@@ -126,6 +129,15 @@ func (c countingControl) GetActor(ctx context.Context, token, space, name string
 	return c.c.GetActor(ctx, token, space, name)
 }
 
+func (c countingControl) CheckActorWrite(ctx context.Context, token, space, name string) (router.ActorWriteDecision, error) {
+	c.s.checks.Add(1)
+	d, err := c.c.CheckActorWrite(ctx, token, space, name)
+	if h := c.s.afterCheck.Load(); h != nil {
+		(*h)()
+	}
+	return d, err
+}
+
 func (c countingControl) ResumeActor(ctx context.Context, token, space, name string) error {
 	c.s.resumes.Add(1)
 	return c.c.ResumeActor(ctx, token, space, name)
@@ -159,7 +171,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	snaps.NoSync = true
 	hub := link.NewHub()
 	s.records, s.meter = memstore.New(), auth.NewMeter()
-	api, err := apiserver.New(apiserver.Config{Store: s.records, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{},
+	api, err := apiserver.New(apiserver.Config{Store: s.records, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: s.meter,
 		CallTimeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +203,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	}
 	s.rt, err = router.New(router.Config{
 		Control: countingControl{s, router.GRPCControl{CC: apiCC}}, Tunnels: countingTunnels{s, s.tunnels},
-		Authn: authn, Authz: auth.SpaceRoles{}, Meter: s.meter, DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
+		DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)

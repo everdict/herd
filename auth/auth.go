@@ -58,6 +58,9 @@ type Principal struct {
 	Join bool
 	// Scheme is how the caller was authenticated. The zero value is SchemeHS256, the shared-key bearer.
 	Scheme Scheme
+	// Expires is when the credential stops authenticating the caller: a JWT's exp (an HS256 bearer's no later than
+	// its break-glass end), an X.509-SVID's NotAfter. A stream the credential opened ends then (review 2).
+	Expires time.Time
 }
 
 // Scheme names the credential a principal was authenticated by.
@@ -217,7 +220,7 @@ func (s StaticKey) Authenticate(ctx context.Context, token string) (Principal, e
 	if c.Join && (c.Herdlet || len(c.Spaces) > 0) {
 		return Principal{}, fmt.Errorf("%w: a join token grants nothing else", ErrUnauthenticated)
 	}
-	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet, Join: c.Join}, nil
+	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet, Join: c.Join, Expires: time.Unix(c.ExpiresAt, 0)}, nil
 }
 
 func decodePart(p string, v any) error {

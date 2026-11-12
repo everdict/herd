@@ -24,6 +24,12 @@ type Chain struct {
 	Meter *Meter
 	// Now is the clock BreakGlassUntil is read against (default time.Now).
 	Now func() time.Time
+	// Component names the herd component that counts (MetricBreakGlassCalls' component label): the one the client
+	// called.
+	Component string
+	// Forwarded, if set, reports a call another herd component forwards for its client (herd-router to herd-api): the
+	// component the client called counted it, so it is not counted again here.
+	Forwarded func(context.Context) bool
 }
 
 func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error) {
@@ -42,12 +48,13 @@ func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error
 		if err != nil {
 			return Principal{}, err
 		}
-		c.Meter.Inc(MetricBreakGlassCalls, "subject", p.Subject)
-		c.Meter.Note("break-glass "+p.Subject,
-			fmt.Sprintf("auth: break-glass HS256 call by subject %q (ADR 0001 A-60); its later calls are summed once a minute", p.Subject),
-			func(n int, d time.Duration) string {
-				return fmt.Sprintf("auth: %d break-glass HS256 calls by subject %q in the last %s", n, p.Subject, Seconds(d))
-			})
+		if !c.BreakGlassUntil.IsZero() && c.BreakGlassUntil.Before(p.Expires) {
+			p.Expires = c.BreakGlassUntil
+		}
+		if c.Forwarded != nil && c.Forwarded(ctx) {
+			return p, nil
+		}
+		CountBreakGlass(c.Meter, c.Component, p.Subject)
 		return p, nil
 	}
 	if c.SVID == nil {
@@ -57,6 +64,16 @@ func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error
 		return Principal{}, refuse("only HS256 bearers are accepted: no SPIFFE trust bundle is configured")
 	}
 	return c.SVID.Authenticate(ctx, token)
+}
+
+// CountBreakGlass counts one break-glass call of subject at component and logs it, rate-limited.
+func CountBreakGlass(m *Meter, component, subject string) {
+	m.Inc(MetricBreakGlassCalls, "component", component, "subject", subject)
+	m.Note("break-glass "+component+" "+subject,
+		fmt.Sprintf("auth: break-glass HS256 call by subject %q at %s (ADR 0001 A-60); its later calls are summed once a minute", subject, component),
+		func(n int, d time.Duration) string {
+			return fmt.Sprintf("auth: %d break-glass HS256 calls by subject %q at %s in the last %s", n, subject, component, Seconds(d))
+		})
 }
 
 // headerAlg is a JWT's header alg, "" if token is not a JWT.

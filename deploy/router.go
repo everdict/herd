@@ -23,11 +23,9 @@ type Router struct {
 	ParkingBudget time.Duration
 	DefaultPort   uint
 	// Identity is herd-router's own SPIFFE identity (spiffe://<td>/herd/router), the Workload API's by default. Both
-	// listeners serve TLS with it, and it dials herd-api as itself. A client is the bearer it carries (a JWT-SVID for
-	// herd-api, which the router forwards); a herdlet's tunnel is its node's X.509-SVID.
+	// listeners serve TLS with it, and it dials herd-api as itself. A client is the bearer it carries, which herd-api
+	// alone decides (CheckActorWrite); a herdlet's tunnel is its node's X.509-SVID.
 	Identity Identity
-	// Policy grants workloads atespace roles (-spiffe-policy, default DefaultPolicy, which must exist).
-	Policy string
 	// BreakGlass is the dated HS256 allowance, as herd-api's.
 	BreakGlass BreakGlass
 	// LocalCA marks herd all-in-one's herd-router, as API.LocalCA.
@@ -46,7 +44,6 @@ func (r *Router) Flags(fs *flag.FlagSet) {
 	fs.UintVar(&r.DefaultPort, "default-port", 8080, "guest port ordinary requests go to (herd-guest's API)")
 	r.Identity.Flags(fs)
 	r.BreakGlass.Flags(fs)
-	fs.StringVar(&r.Policy, "spiffe-policy", "", "JSON policy granting workloads atespace roles, as herd-api's (default "+DefaultPolicy+", which must exist)")
 	fs.StringVar(&r.MetricsListen, "metrics-listen", DefaultRouterMetrics, "serve the authentication allowance counters at http://<addr>/metrics (empty: not served)")
 }
 
@@ -64,14 +61,11 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 	if err != nil {
 		return err
 	}
-	policy, err := policyFile("herd-router", r.Policy)
-	if err != nil {
-		return err
-	}
 	meter := auth.NewMeter()
-	// The router forwards a client's bearer to herd-api, so the JWT-SVID it checks is one for herd-api.
+	// herd-api decides every client request (CheckActorWrite, with the client's bearer): the router keeps no policy,
+	// and authenticates only the herdlets' tunnels (node SVIDs, or the break-glass HS256 credential of a token join).
 	apiID := auth.HerdID(self.TrustDomain(), "api")
-	authn, _, err := authenticator("herd-router", src, apiID, policy, &r.BreakGlass, meter)
+	authn, _, err := authenticator("herd-router", src, apiID, "", &r.BreakGlass, meter)
 	if err != nil {
 		return err
 	}
@@ -92,14 +86,14 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 	defer cc.Close()
 	tunnels := &tunnel.Server{Authn: authn}
 	rt, err := router.New(router.Config{
-		Control: router.GRPCControl{CC: cc}, Tunnels: tunnels, Authn: authn, Authz: auth.SpaceRoles{}, Meter: meter,
+		Control: router.GRPCControl{CC: cc}, Tunnels: tunnels,
 		DefaultPort: uint32(r.DefaultPort), ParkingBudget: r.ParkingBudget,
 	})
 	if err != nil {
 		return err
 	}
 	// Herdlets behind NAT keep their tunnel alive with pings; allow them every 10 s even with no stream open.
-	g := grpc.NewServer(serverCreds(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(serverCreds(src), serverKeepalive(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
 	tunnels.Register(g)
 	hs := router.NewHTTPServer(rt)
 	hs.Protocols.SetHTTP2(true)

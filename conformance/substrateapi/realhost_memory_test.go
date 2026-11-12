@@ -130,7 +130,7 @@ func TestRealHostMemoryAcrossHerdlets(t *testing.T) {
 	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: bucket, S3Endpoint: endpoint,
 		S3Credentials: creds, CallTimeout: 2 * time.Minute, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), Policy: herd.policy, API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
 	builder, why, err := mkfs.Detect(ctx, mkfs.Exec{})
 	if err != nil {

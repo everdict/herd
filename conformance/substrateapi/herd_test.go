@@ -419,7 +419,7 @@ func TestSuiteGreenOnJoin(t *testing.T) {
 	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), Snapshots: snaps,
 		CallTimeout: 10 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), Policy: herd.policy, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
 
 	vms := fake.NewStore()
@@ -505,7 +505,7 @@ func TestSuiteGreenOnJoinOfLinuxHostsAtMemory(t *testing.T) {
 	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: bucket.URL,
 		S3Credentials: creds, CallTimeout: 10 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), Policy: herd.policy, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
 
 	for _, w := range []string{"herd-fresh-1", "herd-fresh-2"} {

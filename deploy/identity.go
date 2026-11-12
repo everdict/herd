@@ -15,6 +15,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 )
 
 // Identity is where a herd component gets its SPIFFE identity (ADR 0001 A-60): by default the SPIFFE Workload API
@@ -185,7 +186,7 @@ func authenticator(who string, src auth.Source, audience spiffeid.ID, policy str
 	if err != nil {
 		return auth.Chain{}, nil, err
 	}
-	c := auth.Chain{SVID: s, Meter: m}
+	c := auth.Chain{SVID: s, Meter: m, Component: who}
 	key, until, err := bg.open(who)
 	if err != nil {
 		return auth.Chain{}, nil, err
@@ -194,6 +195,24 @@ func authenticator(who string, src auth.Source, audience spiffeid.ID, policy str
 		c.BreakGlass, c.BreakGlassUntil = auth.StaticKey{Key: key, Audience: bg.Audience}, until
 	}
 	return c, key, nil
+}
+
+// MinConnectionAge is the least age a herd gRPC server lets a connection reach before it asks the client to reconnect.
+var MinConnectionAge = 30 * time.Second
+
+// serverKeepalive bounds every connection's age well under the SVID's lifetime (review 1): a caller's X.509-SVID is
+// the handshake's, checked on every call, so a connection outliving its client's leaf would refuse every later call.
+// The age is half the server's own SVID lifetime (the install's SVID TTL), at least MinConnectionAge; the client
+// redials on the GOAWAY with its current SVID.
+func serverKeepalive(src auth.Source) grpc.ServerOption {
+	age := MinConnectionAge
+	if sv, err := src.GetX509SVID(); err == nil && len(sv.Certificates) > 0 {
+		leaf := sv.Certificates[0]
+		if half := leaf.NotAfter.Sub(leaf.NotBefore) / 2; half > age {
+			age = half
+		}
+	}
+	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: age / 4})
 }
 
 // serverCreds is a herd gRPC listener's TLS (auth.ServerTLS).

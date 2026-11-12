@@ -1,5 +1,5 @@
-# herd-router beside herd-api (docs/runbooks/join.md): spiffe://<td>/herd/router from the host's SPIRE agent, the
-# workloads' grants in /etc/herd/spiffe-policy.json (ADR 0001 A-60).
+# herd-router beside herd-api (docs/runbooks/join.md): spiffe://<td>/herd/router from the host's SPIRE agent;
+# herd-api decides its clients' requests, so it reads no policy (ADR 0001 A-60).
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herd-router

@@ -1,11 +1,14 @@
 package router_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
+	"github.com/everdict/herd/apiserver"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/router"
 	"github.com/everdict/herd/store"
 	"google.golang.org/grpc/codes"
@@ -64,5 +67,74 @@ func TestRequestsAreTheCreators(t *testing.T) {
 	}
 	if n := s.meter.Value(auth.MetricUnownedActorWrites, "allowance", string(auth.AllowUnownedBreakGlass), "caller", "hs256:intruder"); n != 1 {
 		t.Errorf("%s{allowance=%s,caller=hs256:intruder} = %d after one request, want 1", auth.MetricUnownedActorWrites, auth.AllowUnownedBreakGlass, n)
+	}
+}
+
+// TestRouterAsksHerdAPI (review 7): herd-api is the one decider. The router keeps no policy: each request is decided
+// by herd-api's CheckActorWrite with the client's own bearer, and herd-api's refusal is the router's answer.
+func TestRouterAsksHerdAPI(t *testing.T) {
+	if router.CheckActorWriteMethod != apiserver.CheckActorWriteMethod {
+		t.Fatalf("the router calls %s, herd-api serves %s", router.CheckActorWriteMethod, apiserver.CheckActorWriteMethod)
+	}
+	s := startStack(t, stackOpts{budget: time.Second})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	before := s.checks.Load()
+	if _, err := listDir(ctx, s.client(space1+"/a1", s.clientToken())); err != nil {
+		t.Fatalf("the creator's request: %v", err)
+	}
+	if n := s.checks.Load() - before; n != 1 {
+		t.Errorf("one request asked herd-api %d times, want once", n)
+	}
+	intruder := s.token(map[string]auth.Role{space1: auth.RoleWrite}, false, "intruder")
+	reason, err := listDir(ctx, s.client(space1+"/a1", intruder))
+	wantCode(t, "another writer's request", err, codes.PermissionDenied)
+	if reason != string(router.ReasonPermissionDenied) {
+		t.Errorf("herd-reason %q, want %q", reason, router.ReasonPermissionDenied)
+	}
+}
+
+// TestParkedRequestDecidesAgainForANewActor (review 6): the decision is for one actor uid. A request whose actor is
+// deleted and created again under the same name by another caller, between the decision and the connection, is
+// decided again for the new actor, and refused.
+func TestParkedRequestDecidesAgainForANewActor(t *testing.T) {
+	s := startStack(t, stackOpts{budget: 2 * time.Second})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	intruderTok := s.token(map[string]auth.Role{space1: auth.RoleWrite}, false, "intruder")
+	intruder := conformance.NewClient(s.apiAddr, intruderTok)
+	defer intruder.Close()
+	var once sync.Once
+	h := func() {
+		once.Do(func() {
+			if _, err := s.api.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: &ateapi.ObjectRef{Atespace: space1, Name: "a1"}}); err != nil {
+				t.Errorf("DeleteActor: %v", err)
+			}
+			if _, err := intruder.CreateActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+				Metadata: &ateapi.ResourceMetadata{Atespace: space1, Name: "a1"}, ActorTemplate: &ateapi.ObjectRef{Atespace: space1, Name: "tpl"}}}); err != nil {
+				t.Errorf("CreateActor by the intruder: %v", err)
+			}
+		})
+	}
+	s.afterCheck.Store(&h)
+	_, err := listDir(ctx, s.client(space1+"/a1", s.clientToken()))
+	wantCode(t, "the client's request reaching the intruder's a1", err, codes.PermissionDenied)
+}
+
+// TestBreakGlassCountedOncePerRequest (review, small items): a break-glass bearer's request through the router is
+// counted once, for herd-router (the component the client called), however many times the parked request reads the
+// actor again.
+func TestBreakGlassCountedOncePerRequest(t *testing.T) {
+	s := startStack(t, stackOpts{budget: 5 * time.Second})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	if err := s.suspend(space1, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listDir(ctx, s.client(space1+"/a1", s.clientToken())); err != nil {
+		t.Fatalf("a request that resumes a1: %v", err)
+	}
+	if n := s.meter.Value(auth.MetricBreakGlassCalls, "component", "herd-router", "subject", "client"); n != 1 {
+		t.Errorf("%s{component=herd-router,subject=client} = %d after one request, want 1", auth.MetricBreakGlassCalls, n)
 	}
 }
