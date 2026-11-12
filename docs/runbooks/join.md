@@ -40,7 +40,7 @@ original destination of a redirected flow is a `getsockopt(SO_ORIGINAL_DST)` on 
 `-egress-ca`). The herdlet stays root: `/dev/kvm`, TAP devices, nftables, conntrack and the VMs' cgroups need it.
 
 Nodes, herd-egress and operators need no grant: theirs are built in. The workloads that call herd (Everdict's
-herders, `spiffe://<td>/everdict/ws/<ws>/runner/<runner>`) get atespace roles from `/etc/herd/spiffe-policy.json` on
+herders, `spiffe://<td>/everdict/ws/<ws>/runner/<runner>`) get atespace roles from `/etc/herd/spiffe-policy.json` (herd-api's; herd-router asks herd-api) on
 the control host. On a cluster without a Workload API, `-tls-cert`, `-tls-key` and `-spiffe-bundle` give each process
 its SVID and the bundle as files instead.
 
@@ -172,7 +172,8 @@ join cannot take the name of a worker that is connected.
 
 Fallback, break-glass only: until every caller has an SVID, herd-api and herd-router accept HS256 bearers signed with
 `-key-file` only with `-break-glass-hs256-until <YYYY-MM-DD>` (each call counted on `herd_auth_breakglass_calls_total`
-at `http://<host>:7449/metrics`), and refuse to start once that day has passed. Under it a host may join with a join
+at `http://127.0.0.1:7449/metrics` on the host), and refuse to start once that day has passed or with a date more than
+30 days away. Under it a host may join with a join
 token (`herd-api join-token -key-file ...`, `herdlet join <herd-api> --token <t>`): its grant carries an HS256 herdlet
 credential bound to that worker (it may register no other) and short-lived (`-credential-ttl`, 24 h, never past the
 allowance's end); when it ends the herdlet stops, and its next start joins again with the token. The SPIRE path above
