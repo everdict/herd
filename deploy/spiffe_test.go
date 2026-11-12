@@ -20,6 +20,7 @@ import (
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	herdext "github.com/everdict/herd/api/herdext/v1"
+	"github.com/everdict/herd/apiserver"
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/auth/localca"
 	"github.com/everdict/herd/conformance"
@@ -622,5 +623,72 @@ func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
 	time.Sleep(6 * time.Second) // three SVID lifetimes, a dozen rotations
 	if err := list(); err != nil {
 		t.Errorf("the same CONNECT after the node's SVID rotated a dozen times: %v", err)
+	}
+}
+
+// TestWorkerIdentityAnswersHerdRouterOnly (re-review 5): herd.ext.v1.Authz/WorkerIdentity, which tells herd-router
+// whether a node SVID registered a worker, answers herd-router's verified SVID alone, through the real server: a node,
+// herd-egress, an operator, a workload the policy grants write, a break-glass HS256 bearer and a caller with no
+// credential are all refused.
+func TestWorkerIdentityAnswersHerdRouterOnly(t *testing.T) {
+	key := make([]byte, 32)
+	policy := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(policy, []byte(`{"rules": [{"id": "`+runnerID1+`", "spaces": {"team-a": "write"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := startAPIWith(t, func(a *deploy.API) {
+		a.Policy = policy
+		a.BreakGlass = deploy.BreakGlass{Until: time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02"), Key: key}
+	})
+	h := herdletOn(t, "node-1", nil)
+	h.API, h.Snapshots = a.addr, filepath.Join(a.dir, "snapshots")
+	runHerdlet(t, h)
+	waitWorkers(t, a.addr, "", 1)
+
+	ask := func(src auth.Source, tok string, noCert bool) (string, error) {
+		cfg, err := auth.ClientTLS(src, auth.HerdID(spiffeid.RequireTrustDomainFromString(testTD), "api"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if noCert {
+			cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &tls.Certificate{}, nil }
+		}
+		opts := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(cfg))}
+		if tok != "" {
+			opts = append(opts, grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+		}
+		cc, err := grpc.NewClient("passthrough:///"+a.addr, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cc.Close()
+		var resp apiserver.WorkerIdentityResponse
+		err = cc.Invoke(ctxT(t), apiserver.WorkerIdentityMethod, &apiserver.WorkerIdentityRequest{Worker: "node-1"}, &resp, grpc.CallContentSubtype("json"))
+		return resp.Identity, err
+	}
+	id, err := ask(source(t, "spiffe://herd.test/herd/router"), "", false)
+	if err != nil || id != "spiffe://herd.test/herd/node/node-1" {
+		t.Fatalf("herd-router asking node-1's identity: %q, %v; want node-1's node SVID", id, err)
+	}
+	hs, err := auth.Sign(key, auth.Claims{Subject: "ops", ExpiresAt: time.Now().Add(time.Hour).Unix(), Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleOperator}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		who    string
+		src    auth.Source
+		tok    string
+		noCert bool
+	}{
+		{"a node SVID", source(t, "spiffe://herd.test/herd/node/node-1"), "", false},
+		{"an egress SVID", source(t, "spiffe://herd.test/herd/egress/node-1"), "", false},
+		{"an operator SVID", source(t, operatorID), "", false},
+		{"a workload granted write", source(t, runnerID1), "", false},
+		{"a break-glass HS256 operator bearer", source(t, operatorID), hs, true},
+		{"a caller with no credential", source(t, operatorID), "", true},
+	} {
+		if id, err := ask(c.src, c.tok, c.noCert); status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s asking node-1's identity: %q, %v; want PermissionDenied", c.who, id, err)
+		}
 	}
 }
