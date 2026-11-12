@@ -301,7 +301,7 @@ func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
 		a.BreakGlass = deploy.BreakGlass{Until: time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02"), Key: key}
 	})
 	good, _ := join.MintToken(key, time.Hour)
-	g, err := joinGrant(t, b.addr, node1, good, "node-x")
+	g, err := joinGrant(t, b.addr, source(t, operatorID), good, "node-x")
 	if err != nil {
 		t.Fatalf("a join token under the break-glass: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
 	forged, _ := join.MintToken([]byte("ffffffffffffffffffffffffffffffff"), time.Hour)
 	expired, _ := auth.Sign(key, auth.Claims{Subject: "join-old", ExpiresAt: time.Now().Add(-time.Minute).Unix(), Join: true})
 	for name, tok := range map[string]string{"forged": forged, "expired": expired} {
-		if err := joinAs(t, b.addr, node1, tok, "node-y"); status.Code(err) != codes.Unauthenticated {
+		if err := joinAs(t, b.addr, source(t, operatorID), tok, "node-y"); status.Code(err) != codes.Unauthenticated {
 			t.Errorf("a %s join token under the break-glass: %v, want Unauthenticated", name, err)
 		}
 	}
@@ -361,5 +361,37 @@ func TestTokenMintsEgress(t *testing.T) {
 	}
 	if p, err := (auth.StaticKey{Key: key}).Authenticate(ctxT(t), tok); err != nil || p.Spaces[auth.AllSpaces] != auth.RoleEgress {
 		t.Errorf("minted %+v, %v; want the egress role in every space", p, err)
+	}
+}
+
+// TestTokenJoinCannotTakeAnSVIDWorker (review 4): under the break-glass, a join token cannot take the name of a worker
+// a node SVID registered, even while that node is offline; and a node SVID presented beside a join token still names
+// the only worker it may join as.
+func TestTokenJoinCannotTakeAnSVIDWorker(t *testing.T) {
+	key := make([]byte, 32)
+	a := startAPIWith(t, func(a *deploy.API) {
+		a.BreakGlass = deploy.BreakGlass{Until: time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02"), Key: key}
+	})
+	h := herdletOn(t, "node-1", nil)
+	h.API, h.Snapshots = a.addr, filepath.Join(a.dir, "snapshots")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = h.Run(ctx); close(done) }()
+	waitWorkers(t, a.addr, "", 1)
+	cancel()
+	<-done // node-1 is offline now
+
+	jt, _ := join.MintToken(key, time.Hour)
+	err := joinAs(t, a.addr, source(t, operatorID), jt, "node-1")
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "a join token cannot take its name") {
+		t.Errorf("a token join of node-1, registered by its node SVID: %v; want PermissionDenied", err)
+	}
+	node2 := source(t, "spiffe://"+testTD+"/herd/node/node-2")
+	err = joinAs(t, a.addr, node2, jt, "node-3")
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), `worker "node-2"'s`) {
+		t.Errorf("node-2's SVID with a join token for node-3: %v; want PermissionDenied naming node-2", err)
+	}
+	if err := joinAs(t, a.addr, source(t, operatorID), jt, "node-3"); err != nil {
+		t.Errorf("a token join of a name no SVID registered: %v", err)
 	}
 }

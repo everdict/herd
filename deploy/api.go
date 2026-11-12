@@ -213,7 +213,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	log.Printf("herd-api: record store %s, store id %s", a.Store, srv.StoreID())
 	// A node joins by its SVID; a join token is HS256, so only under the break-glass allowance (key set).
 	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
-		NotAfter: authn.BreakGlassUntil,
+		NotAfter: authn.BreakGlassUntil, SVIDWorker: srv.WorkerIdentity,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {
 				if c.Worker == w {

@@ -64,6 +64,9 @@ type Server struct {
 	// worker, whose registration it alone may make.
 	TTL      time.Duration
 	NotAfter time.Time
+	// SVIDWorker, if set, answers the node SVID that registered a worker ("" if none did): a token join cannot take
+	// such a worker's name.
+	SVIDWorker func(ctx context.Context, worker string) (string, error)
 	// OnGrant, if set, sees every grant before it is answered.
 	OnGrant func(Grant)
 	Now     func() time.Time
@@ -100,8 +103,23 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "join: %v", err)
 	}
+	// A node SVID presented beside a bearer still names the worker it may join as.
+	if tok != "" && len(auth.PeerChain(ctx)) > 0 {
+		if np, err := s.Authn.Authenticate(ctx, ""); err == nil && np.Herdlet && np.SVID() && np.HerdletWorker() != req.Worker {
+			return nil, status.Errorf(codes.PermissionDenied, "join: the node SVID %s is worker %q's, not %q's", np.Subject, np.HerdletWorker(), req.Worker)
+		}
+	}
 	switch {
 	case p.Join:
+		if s.SVIDWorker != nil {
+			id, err := s.SVIDWorker(ctx, req.Worker)
+			if err != nil {
+				return nil, status.Errorf(codes.Unavailable, "join: %v", err)
+			}
+			if id != "" {
+				return nil, status.Errorf(codes.PermissionDenied, "join: worker %q is node SVID %s's; a join token cannot take its name", req.Worker, id)
+			}
+		}
 	case p.Herdlet && p.SVID():
 		if req.Worker != p.HerdletWorker() {
 			return nil, status.Errorf(codes.PermissionDenied, "join: the node SVID %s is worker %q's, not %q's", p.Subject, p.HerdletWorker(), req.Worker)
