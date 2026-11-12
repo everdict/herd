@@ -103,6 +103,10 @@ func requireID(who string, src auth.Source, segs ...string) (spiffeid.ID, error)
 	return self, nil
 }
 
+// MaxBreakGlass is how far from its start a break-glass allowance may end: at most 30 days (the day named is counted
+// whole).
+const MaxBreakGlass = 30 * 24 * time.Hour
+
 // BreakGlass is the dated HS256 allowance (ADR 0001 A-60): HS256 bearers signed with -key-file are accepted, and
 // counted, only with -break-glass-hs256-until, and only until the end of that day (UTC); a component started on or
 // after it refuses to start.
@@ -139,6 +143,9 @@ func (b *BreakGlass) open(who string) ([]byte, time.Time, error) {
 	now := time.Now
 	if b.Now != nil {
 		now = b.Now
+	}
+	if until.After(now().Add(MaxBreakGlass + 24*time.Hour)) {
+		return nil, time.Time{}, fmt.Errorf("%s: -break-glass-hs256-until %s is more than %d days away: an allowance is at most 30 days from its start", who, b.Until, int(MaxBreakGlass/(24*time.Hour)))
 	}
 	if !now().Before(until) {
 		return nil, time.Time{}, fmt.Errorf("%s: -break-glass-hs256-until %s has passed (it ended %s), so it does not start: move the HS256 callers to SVIDs and remove the flag, or name a new end date",
@@ -218,8 +225,9 @@ func serveMetrics(ctx context.Context, ln net.Listener, m *auth.Meter, who strin
 	}
 }
 
-// DefaultAPIMetrics and DefaultRouterMetrics are where herd-api and herd-router serve /metrics by default.
+// DefaultAPIMetrics and DefaultRouterMetrics are where herd-api and herd-router serve /metrics by default: the loopback
+// address, since its labels carry identities; an explicit -metrics-listen exposes it.
 const (
-	DefaultAPIMetrics    = ":7449"
-	DefaultRouterMetrics = ":8449"
+	DefaultAPIMetrics    = "127.0.0.1:7449"
+	DefaultRouterMetrics = "127.0.0.1:8449"
 )

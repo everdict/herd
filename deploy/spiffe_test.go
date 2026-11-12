@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"context"
+	"flag"
 	"crypto/tls"
 	"io"
 	"net"
@@ -264,6 +265,7 @@ func TestBreakGlassFlagIsDated(t *testing.T) {
 		{"a date that has passed", deploy.BreakGlass{Until: yesterday, Key: key}, "has passed"},
 		{"a key with no date", deploy.BreakGlass{Key: key}, "needs -break-glass-hs256-until"},
 		{"a date that is not one", deploy.BreakGlass{Until: "next week", Key: key}, "want YYYY-MM-DD"},
+		{"a date past 30 days", deploy.BreakGlass{Until: time.Now().UTC().Add(32 * 24 * time.Hour).Format("2006-01-02"), Key: key}, "at most 30 days"},
 	} {
 		api := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "memory", Snapshots: t.TempDir(), BreakGlass: tc.bg}
 		if err := waitErr(t, runAPI(t, api, listen(t)), 10*time.Second); err == nil || !strings.Contains(err.Error(), tc.reason) {
@@ -329,5 +331,23 @@ func TestLocalCAOnlyInAllInOne(t *testing.T) {
 	go func() { done <- r.Run(ctx, listen(t), listen(t)) }()
 	if err := waitErr(t, done, 10*time.Second); err == nil || !strings.Contains(err.Error(), "local development CA") {
 		t.Errorf("herd-router on herd.local outside all-in-one: %v; want a refusal to start naming the local CA", err)
+	}
+}
+
+// TestMetricsDefaultToLoopback (review 9): /metrics carries identities in its labels, so the flags bind it to the
+// loopback address by default; an explicit address exposes it.
+func TestMetricsDefaultToLoopback(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		flags func(*flag.FlagSet)
+	}{
+		{"herd-api", (&deploy.API{}).Flags},
+		{"herd-router", (&deploy.Router{}).Flags},
+	} {
+		fs := flag.NewFlagSet(c.name, flag.ContinueOnError)
+		c.flags(fs)
+		if d := fs.Lookup("metrics-listen").DefValue; !strings.HasPrefix(d, "127.0.0.1:") {
+			t.Errorf("%s -metrics-listen defaults to %q, want the loopback address", c.name, d)
+		}
 	}
 }
