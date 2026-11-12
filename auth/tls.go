@@ -16,6 +16,9 @@ func ServerTLS(src Source) *tls.Config {
 	c := tlsconfig.TLSServerConfig(src)
 	c.ClientAuth = tls.RequestClientCert
 	c.MinVersion = tls.VersionTLS12
+	// A resumed session carries the first handshake's client certificate: an SVID that has since expired, though the
+	// client holds a current one. Every connection does a full handshake, so it presents the SVID it holds now.
+	c.SessionTicketsDisabled = true
 	return c
 }
 

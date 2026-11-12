@@ -595,24 +595,38 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	done := make(chan struct{})
 	if tunnelAddr != "" && guests != nil {
 		agent.Tunnel = &herdlet.Tunnel{Worker: st.Grant.Worker, Guests: guests}
-		tc, err := dial(tunnelAddr, src, auth.HerdID(api.TrustDomain(), "router"), append(creds, keep)...)
+		dialTunnel := func() (*grpc.ClientConn, error) {
+			return dial(tunnelAddr, src, auth.HerdID(api.TrustDomain(), "router"), append(creds, keep)...)
+		}
+		tc, err := dialTunnel()
 		if err != nil {
 			return err
 		}
-		defer tc.Close()
 		go func() {
 			defer close(done)
-			forever(ctx, retry, "tunnel to "+tunnelAddr, func() error { return agent.Tunnel.Run(ctx, tc) })
+			defer func() { tc.Close() }()
+			forever(ctx, retry, "tunnel to "+tunnelAddr, func() error {
+				err := agent.Tunnel.Run(ctx, tc)
+				if st.Grant.Credential == "" && status.Code(err) == codes.Unauthenticated {
+					// The SVID the connection opened with ended: a new connection presents the current one.
+					if n, derr := dialTunnel(); derr == nil {
+						tc.Close()
+						tc = n
+					}
+				}
+				return err
+			})
 		}()
 	} else {
 		close(done)
 		log.Printf("herdlet: no herd-router tunnel (none advertised, or no guest dialer)")
 	}
-	cc, err := dial(st.API, src, api, append(creds, keep)...)
+	dialAPI := func() (*grpc.ClientConn, error) { return dial(st.API, src, api, append(creds, keep)...) }
+	cc, err := dialAPI()
 	if err != nil {
 		return err
 	}
-	defer cc.Close()
+	defer func() { cc.Close() }()
 	if host.Serve != nil {
 		// The in-process herd-egress reads the egress policies as the node (its SVID's built-in grant), or with the
 		// break-glass egress credential a token join granted.
@@ -640,6 +654,14 @@ func (h *Herdlet) Run(ctx context.Context) error {
 			// The break-glass credential ended (or the allowance did): the next start joins again with the token.
 			refused = err
 			cancel()
+		}
+		if st.Grant.Credential == "" && status.Code(err) == codes.Unauthenticated {
+			// The node SVID the connection opened with ended (review 1): link again over a new connection, which
+			// presents the node's current SVID, rather than retrying the old one.
+			if n, derr := dialAPI(); derr == nil {
+				cc.Close()
+				cc = n
+			}
 		}
 		return err
 	})

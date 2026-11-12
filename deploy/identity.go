@@ -202,17 +202,19 @@ var MinConnectionAge = 30 * time.Second
 
 // serverKeepalive bounds every connection's age well under the SVID's lifetime (review 1): a caller's X.509-SVID is
 // the handshake's, checked on every call, so a connection outliving its client's leaf would refuse every later call.
-// The age is half the server's own SVID lifetime (the install's SVID TTL), at least MinConnectionAge; the client
-// redials on the GOAWAY with its current SVID.
+// SPIRE rotates an SVID at half its lifetime, so a client's leaf has at least half its lifetime left when it
+// handshakes: the age is a quarter of the server's own SVID lifetime (the install's SVID TTL), and its grace an
+// eighth, so a connection ends (age + grace, with grpc's 10% jitter, under half) before the leaf it opened with; at
+// least MinConnectionAge. The client redials on the GOAWAY with its current SVID.
 func serverKeepalive(src auth.Source) grpc.ServerOption {
 	age := MinConnectionAge
 	if sv, err := src.GetX509SVID(); err == nil && len(sv.Certificates) > 0 {
 		leaf := sv.Certificates[0]
-		if half := leaf.NotAfter.Sub(leaf.NotBefore) / 2; half > age {
-			age = half
+		if q := leaf.NotAfter.Sub(leaf.NotBefore) / 4; q > age {
+			age = q
 		}
 	}
-	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: age / 4})
+	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: age / 2})
 }
 
 // serverCreds is a herd gRPC listener's TLS (auth.ServerTLS).

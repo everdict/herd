@@ -350,3 +350,72 @@ func TestMetricsDefaultToLoopback(t *testing.T) {
 		}
 	}
 }
+
+// TestShortLivedSVIDsOverLongConnections (PLT-489 review 1): a caller's X.509-SVID is its TLS handshake's, so a
+// connection that outlives the caller's leaf would refuse every later call. With SVIDs of a few seconds rotating under
+// both ends, one client connection keeps being answered: herd-api ends each connection well before an SVID's lifetime
+// (MaxConnectionAge), and the client redials with its current SVID.
+func TestShortLivedSVIDsOverLongConnections(t *testing.T) {
+	prev := deploy.MinConnectionAge
+	deploy.MinConnectionAge = 500 * time.Millisecond
+	t.Cleanup(func() { deploy.MinConnectionAge = prev })
+	const ttl = 3 * time.Second
+	ln := listen(t)
+	a := &deploy.API{Identity: deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/api", ttl)}, Policy: noRules(t),
+		Store: "memory", Snapshots: t.TempDir()}
+	runAPI(t, a, ln)
+	op := newRotating(t, operatorID, ttl)
+	c := asSVID(t, ln.Addr().String(), op, "")
+	end := time.Now().Add(3 * ttl)
+	calls, refused := 0, 0
+	for time.Now().Before(end) {
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := c.ListActors(cctx, &ateapi.ListActorsRequest{Atespace: space})
+		cancel()
+		calls++
+		if status.Code(err) == codes.Unauthenticated {
+			refused++
+			if refused == 1 {
+				t.Logf("refused: %v", err)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if refused > 0 {
+		t.Errorf("%d of %d calls over one client connection were refused Unauthenticated as its SVIDs rotated", refused, calls)
+	}
+}
+
+// TestHerdletRelinksWithItsCurrentSVID (review 1): a herdlet's link ends Unauthenticated when the node SVID it opened
+// with expires; the herdlet links again over a new connection with its current SVID instead of retrying the old one,
+// so a node of short-lived SVIDs stays a live worker.
+func TestHerdletRelinksWithItsCurrentSVID(t *testing.T) {
+	a := startAPI(t)
+	const ttl = 3 * time.Second
+	h := herdletOn(t, "node-1", nil)
+	h.API, h.Snapshots = a.addr, filepath.Join(a.dir, "snapshots")
+	h.Identity = deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/node/node-1", ttl)}
+	runHerdlet(t, h)
+	c := client(t, a.addr, "")
+	defer c.Close()
+	active := func() bool {
+		var resp ateapi.ListWorkersResponse
+		if err := c.Raw(ctxT(t), "ListWorkers", &ateapi.ListWorkersRequest{}, &resp); err != nil {
+			return false
+		}
+		for _, w := range resp.GetWorkers() {
+			if w.GetMetadata().GetName() == "node-1" && w.GetStatus().GetState() == ateapi.WorkerState_WORKER_STATE_ACTIVE {
+				return true
+			}
+		}
+		return false
+	}
+	time.Sleep(3 * ttl)
+	deadline := time.Now().Add(ttl)
+	for !active() {
+		if time.Now().After(deadline) {
+			t.Fatalf("node-1 is not a live worker %s after it started, with SVIDs of %s", 4*ttl, ttl)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

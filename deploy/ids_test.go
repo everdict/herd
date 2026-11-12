@@ -12,7 +12,10 @@ import (
 	"github.com/everdict/herd/auth/localca"
 	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
+	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -120,4 +123,56 @@ func jwtFor(t testing.TB, sub string) string {
 		t.Fatal(err)
 	}
 	return tok
+}
+
+// rotating is an identity source whose SVID for id lives ttl and is issued again every ttl/4 (sooner than SPIRE's
+// half-life rotation), as a Workload API's stream rotates a short-lived SVID.
+type rotating struct {
+	mu   sync.Mutex
+	cur  auth.Static
+	stop chan struct{}
+}
+
+func newRotating(t testing.TB, id string, ttl time.Duration) *rotating {
+	t.Helper()
+	r := &rotating{stop: make(chan struct{})}
+	issue := func() {
+		s, err := testCA(t).Source(id, localca.Options{DNS: []string{"localhost"}, IPs: []net.IP{net.IPv4(127, 0, 0, 1)}, TTL: ttl, NotBefore: time.Now()})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		r.mu.Lock()
+		r.cur = s
+		r.mu.Unlock()
+	}
+	issue()
+	go func() {
+		tk := time.NewTicker(ttl / 4)
+		defer tk.Stop()
+		for {
+			select {
+			case <-r.stop:
+				return
+			case <-tk.C:
+				issue()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(r.stop) })
+	return r
+}
+
+func (r *rotating) get() auth.Static {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur
+}
+
+func (r *rotating) GetX509SVID() (*x509svid.SVID, error) { return r.get().GetX509SVID() }
+func (r *rotating) GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bundle.Bundle, error) {
+	return r.get().GetX509BundleForTrustDomain(td)
+}
+func (r *rotating) GetJWTBundleForTrustDomain(td spiffeid.TrustDomain) (*jwtbundle.Bundle, error) {
+	return r.get().GetJWTBundleForTrustDomain(td)
 }
