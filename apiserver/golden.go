@@ -354,7 +354,7 @@ func (g *goldenBuild) step(ctx context.Context, t goldenTarget) (again time.Dura
 		_, err := s.createActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
 			Metadata:      &ateapi.ResourceMetadata{Atespace: space, Name: t.name},
 			ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: g.rec.Name},
-		}}, true)
+		}}, SelfCreator)
 		switch status.Code(err) {
 		case codes.OK, codes.AlreadyExists:
 			return 0, true, true, nil

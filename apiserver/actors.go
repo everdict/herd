@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -238,20 +239,33 @@ func (s *Server) loadTemplate(ctx context.Context, space string, r *ateapi.Objec
 // of a fork), and starts it on a worker the scheduler picked.
 func (s *Server) CreateActor(ctx context.Context, req *ateapi.CreateActorRequest) (*ateapi.Actor, error) {
 	in := req.GetActor()
-	if err := s.authorize(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite); err != nil {
+	p, err := s.authorizeAs(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite)
+	if err != nil {
 		return nil, err
 	}
-	return s.createActor(ctx, req, false)
+	return s.createActor(ctx, req, p.Creator())
 }
 
-// createActor is CreateActor once the caller is authorized. Without source_tag the actor restores from its template's
-// golden tag when the template has one, and boots cold otherwise; golden marks the template's own golden actor,
-// which always boots cold, on the worker keeping the highest fidelity.
-func (s *Server) createActor(ctx context.Context, req *ateapi.CreateActorRequest, golden bool) (*ateapi.Actor, error) {
+// SelfCreator is the status.creator of the actors herd-api makes itself (a template's golden actor). No caller can
+// be it: a caller's creator is a SPIFFE ID or starts with auth.BreakGlassPrefix.
+const SelfCreator = "herd-api"
+
+// MaxProvenance is the most bytes an Actor's provenance may hold (PLT-489).
+const MaxProvenance = 4096
+
+// createActor is CreateActor once the caller is authorized; creator is the caller as status.creator records it.
+// Without source_tag the actor restores from its template's golden tag when the template has one, and boots cold
+// otherwise; the template's own golden actor (creator SelfCreator) always boots cold, on the worker keeping the
+// highest fidelity.
+func (s *Server) createActor(ctx context.Context, req *ateapi.CreateActorRequest, creator string) (*ateapi.Actor, error) {
 	in := req.GetActor()
+	golden := creator == SelfCreator
 	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
 	if name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "metadata.name is required")
+	}
+	if n := len(in.GetProvenance()); n > MaxProvenance {
+		return nil, status.Errorf(codes.InvalidArgument, "provenance is %d bytes, at most %d", n, MaxProvenance)
 	}
 	tpl, tplRec, err := s.loadTemplate(ctx, space, in.GetActorTemplate())
 	if err != nil {
@@ -270,7 +284,9 @@ func (s *Server) createActor(ctx context.Context, req *ateapi.CreateActorRequest
 		rec: store.Record{Key: actorKey(space, name)},
 		actor: &ateapi.Actor{
 			ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: tplRec.Name}, WorkerSelector: in.GetWorkerSelector(),
-			SourceTag: in.GetSourceTag(), Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RESUMING},
+			SourceTag: in.GetSourceTag(), Provenance: in.GetProvenance(),
+			// The creator is the server's, never the request's (PLT-489): whatever status the request carries is dropped.
+			Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RESUMING, Creator: creator},
 		},
 		st:   actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID, Golden: golden},
 		pull: goldenPull{auth: pullAuth, plain: plain},
@@ -409,6 +425,11 @@ func (s *Server) UpdateActor(ctx context.Context, req *ateapi.UpdateActorRequest
 	}
 	if t := in.GetSourceTag(); t != nil && !proto.Equal(t, ar.actor.GetSourceTag()) {
 		return nil, status.Errorf(codes.InvalidArgument, "source_tag cannot change")
+	}
+	// provenance is set once at CreateActor (PLT-489): an update that carries none leaves it, one that carries other
+	// bytes is refused. status.creator is the server's and is never read from the request.
+	if p := in.GetProvenance(); len(p) > 0 && !bytes.Equal(p, ar.actor.GetProvenance()) {
+		return nil, status.Errorf(codes.InvalidArgument, "provenance cannot change")
 	}
 	ar.actor.WorkerSelector = in.GetWorkerSelector()
 	if err := s.save(ctx, ar); err != nil {

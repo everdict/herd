@@ -46,7 +46,36 @@ type Principal struct {
 	Herdlet bool
 	// Join is set for a join token: it may only be exchanged for a herdlet credential (package join).
 	Join bool
+	// Scheme is how the caller was authenticated. The zero value is SchemeHS256, the shared-key bearer.
+	Scheme Scheme
 }
+
+// Scheme names the credential a principal was authenticated by.
+type Scheme string
+
+const (
+	// SchemeHS256 is a bearer JWT signed with herd-api's shared key: break-glass since PLT-489 (ADR 0001 A-60).
+	SchemeHS256 Scheme = ""
+	// SchemeX509SVID is an X.509-SVID presented as the mTLS client certificate.
+	SchemeX509SVID Scheme = "x509-svid"
+	// SchemeJWTSVID is a JWT-SVID presented as the bearer.
+	SchemeJWTSVID Scheme = "jwt-svid"
+)
+
+// SVID reports whether p was authenticated by a SPIFFE verifiable identity document.
+func (p Principal) SVID() bool { return p.Scheme == SchemeX509SVID || p.Scheme == SchemeJWTSVID }
+
+// Creator is the caller as herd records it on what it creates (an Actor's status.creator): its SPIFFE ID, or
+// "hs256:<sub>" for a shared-key bearer, so no HS256 subject can name a SPIFFE ID.
+func (p Principal) Creator() string {
+	if p.SVID() {
+		return p.Subject
+	}
+	return BreakGlassPrefix + p.Subject
+}
+
+// BreakGlassPrefix starts the creator of what a shared-key (HS256) bearer created.
+const BreakGlassPrefix = "hs256:"
 
 // Authenticator turns a bearer token into a principal; ErrUnauthenticated otherwise.
 type Authenticator interface {

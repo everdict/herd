@@ -261,17 +261,23 @@ func (s *Server) principal(ctx context.Context) (auth.Principal, error) {
 
 // authorize authenticates the caller and checks the action in space: authority before effect.
 func (s *Server) authorize(ctx context.Context, space string, a auth.Action) error {
+	_, err := s.authorizeAs(ctx, space, a)
+	return err
+}
+
+// authorizeAs is authorize answering the principal it authorized.
+func (s *Server) authorizeAs(ctx context.Context, space string, a auth.Action) (auth.Principal, error) {
 	if space == "" {
-		return status.Errorf(codes.InvalidArgument, "no atespace named")
+		return auth.Principal{}, status.Errorf(codes.InvalidArgument, "no atespace named")
 	}
 	p, err := s.principal(ctx)
 	if err != nil {
-		return err
+		return auth.Principal{}, err
 	}
 	if err := s.cfg.Authz.Authorize(p, space, a); err != nil {
-		return status.Errorf(codes.PermissionDenied, "%v", err)
+		return auth.Principal{}, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
-	return nil
+	return p, nil
 }
 
 // status maps a domain error to a gRPC status.
