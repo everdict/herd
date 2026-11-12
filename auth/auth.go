@@ -1,7 +1,7 @@
 // Package auth is herd-api's authentication (who is calling) and per-space authorization (may they do this in that
-// atespace). Both are interfaces; this round ships a static-key implementation: HS256 JWTs signed with one shared
-// key, carrying the caller's spaces in a claim. An issuer-backed (JWKS) authenticator can replace it later without
-// touching the API server.
+// atespace). Both are interfaces. SPIFFE authenticates SVIDs (an X.509-SVID over mTLS, a JWT-SVID bearer) and maps
+// them to roles by a policy file; StaticKey authenticates HS256 JWTs signed with one shared key, which Chain keeps as
+// counted break-glass; ActorWriter is the creator-scoped rule for writes on an actor (ADR 0001 A-60).
 package auth
 
 import (

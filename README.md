@@ -54,7 +54,7 @@ credential injection), `herd-guest` (the in-VM agent).
 | `sched` | Placement by cpu and memory (slots for an older herdlet), class, labels, warm VMs and restore family |
 | `store` | Records with uid+version preconditions: `memstore`, `boltstore` (bbolt, all-in-one), `storetest` (the contract) |
 | `snapstore` | Snapshot objects with digests, listed and swept of what no record names (A-58): `snapstore/disk`, `snapstore/s3`, `snapstore/bundlecache` |
-| `auth` | Authn and per-space authz interfaces; static-key HS256 JWTs |
+| `auth` | Authn and per-space authz interfaces: SPIFFE SVIDs (X.509 over mTLS, JWT bearer) mapped by a policy file, HS256 JWTs as counted break-glass, the creator-scoped actor write rule (ADR 0001 A-60) |
 | `guest/agent`, `guest/guestclient`, `cmd/herd-guest` | herd-guest: env-compatible process/file API on grpc-go, and its host-side client |
 | `conformance` | The Control-subset conformance suite against herd-api with fake herdlets |
 | `cmd/herd-router`, `router`, `tunnel` | herd-router: `ate-target-actor` ingress with per-space JWT, parking and resume-on-request, typed 503s and cut reasons; the herdlet's outbound tunnel (router side in `tunnel`, herdlet side in `herdlet/tunnel.go`) |
