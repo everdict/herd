@@ -7,7 +7,7 @@
 # names none), a node-level fallback that defaults to none: a template's golden pull names its own plain-HTTP hosts
 # (image_plain_http_hosts), the store and its token realm, so no job holds a cluster's address.
 # The resources are the herdlet's own: each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under
-# /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (-slots), not the task's.
+# /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (ADR A-54), not the task's.
 # Rendered by deploy/artifacts; edit the template, not this file.
 # The base URL every client fetches herd_linux_<arch>.tar.gz from: a mirror of the release (docs/runbooks/nomad.md
 # step 3). No default: everdict/herd is private, and its GitHub release URL answers 404 to an artifact, which
