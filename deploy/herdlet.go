@@ -607,7 +607,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		}
 		go func() {
 			defer close(done)
-			generations(ctx, "tunnel to "+tunnelAddr, retry, dialTunnel, rotations(ctx, src), st.Grant.Credential == "", tc,
+			generations(ctx, "tunnel to "+tunnelAddr, retry, dialTunnel, rotations(ctx, src), st.Grant.Credential == "", true, tc,
 				func(cc *grpc.ClientConn) error { return agent.Tunnel.Run(ctx, cc) }, func(error) bool { return false })
 		}()
 	} else {
@@ -637,7 +637,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	var refused error
 	// The link runs make-before-break across the node SVID's rotations (re-review 3): a rotation opens a new link with
 	// the current SVID, herd-api moves the worker's calls to it, and the older link ends once its calls are answered.
-	generations(ctx, "link to "+st.API, retry, dialAPI, rotations(ctx, src), st.Grant.Credential == "", cc,
+	generations(ctx, "link to "+st.API, retry, dialAPI, rotations(ctx, src), st.Grant.Credential == "", false, cc,
 		func(cc *grpc.ClientConn) error { return agent.Run(ctx, cc) },
 		func(err error) bool {
 			if status.Code(err) == codes.FailedPrecondition {
@@ -701,21 +701,39 @@ func rotations(ctx context.Context, src auth.Source) <-chan struct{} {
 
 // generations runs run over cc until ctx ends, make-before-break: each rotation dials a new connection (presenting
 // the current SVID) and starts a new generation on it while the older one goes on until its server lets it go, and
-// is not retried then. A generation whose run ends with svid set and Unavailable (its connection draining) or
+// is not retried then. keepOld keeps a superseded generation's connection open until ctx ends: a tunnel's data streams
+// ride on it. A generation whose run ends with svid set and Unavailable (its connection draining) or
 // Unauthenticated dials again before it retries. stop, true, ends every generation.
 func generations(ctx context.Context, what string, retry time.Duration, dialFn func() (*grpc.ClientConn, error), rotate <-chan struct{},
-	svid bool, cc *grpc.ClientConn, run func(*grpc.ClientConn) error, stop func(error) bool) {
+	svid, keepOld bool, cc *grpc.ClientConn, run func(*grpc.ClientConn) error, stop func(error) bool) {
 	var gen atomic.Int64
 	var wg sync.WaitGroup
+	kept := make(chan *grpc.ClientConn, 1024)
+	defer func() {
+		close(kept)
+		for k := range kept {
+			k.Close()
+		}
+	}()
 	start := func(cc *grpc.ClientConn) {
 		g := gen.Add(1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer func() { cc.Close() }()
+			defer func() {
+				if cc != nil {
+					cc.Close()
+				}
+			}()
 			for ctx.Err() == nil {
 				err := run(cc)
 				if gen.Load() != g {
+					if keepOld {
+						// The data streams this connection carries (a tunnel's) stay up until they end; the server
+						// closes the connection then, and it is let go with ctx.
+						kept <- cc
+						cc = nil
+					}
 					return // a newer generation took over
 				}
 				if err != nil && ctx.Err() == nil {

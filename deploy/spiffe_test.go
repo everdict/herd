@@ -546,23 +546,38 @@ func TestLinkRotatesMakeBeforeBreak(t *testing.T) {
 	}
 }
 
-// TestStreamThroughRouterOutlivesRotations (re-review 3): a stream a client holds through herd-router to an actor (a
-// CONNECT to its guest, gRPC inside) keeps working while the node's SVID rotates several times: each rotation opens a
-// new tunnel, and the data stream already open stays on its connection until it ends.
-func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
-	prevR, prevM := deploy.RotationCheck, auth.DrainMargin
-	deploy.RotationCheck, auth.DrainMargin = 100*time.Millisecond, 500*time.Millisecond
-	t.Cleanup(func() { deploy.RotationCheck, auth.DrainMargin = prevR, prevM })
+// trustSwitch is an identity source whose X.509 bundle a test can replace (a CA dropped from the bundle).
+type trustSwitch struct {
+	auth.Static
+	mu     sync.Mutex
+	bundle *x509bundle.Bundle
+}
+
+func (s *trustSwitch) GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bundle.Bundle, error) {
+	s.mu.Lock()
+	b := s.bundle
+	s.mu.Unlock()
+	if b != nil {
+		return b, nil
+	}
+	return s.Static.GetX509BundleForTrustDomain(td)
+}
+
+func (s *trustSwitch) drop(b *x509bundle.Bundle) { s.mu.Lock(); s.bundle = b; s.mu.Unlock() }
+
+// routerStack runs herd-api and herd-router on the given identities and a herdlet node-1 on node, creates actor a1,
+// and answers a CONNECT through herd-router to a1's guest, a call over it, and whether node-1 is a live worker.
+func routerStack(t *testing.T, api, rtr, node auth.Source) (list func() error, conn net.Conn, live func() bool) {
+	t.Helper()
 	dir := t.TempDir()
 	apiLn, cl, tl := listen(t), listen(t), listen(t)
-	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "memory", Snapshots: filepath.Join(dir, "snapshots"),
+	a := &deploy.API{Identity: deploy.Identity{Source: api}, Policy: noRules(t), Store: "memory", Snapshots: filepath.Join(dir, "snapshots"),
 		CallTimeout: 5 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String()}
 	runAPI(t, a, apiLn)
-	rt := &deploy.Router{Identity: routerIdentity(t), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rt := &deploy.Router{Identity: deploy.Identity{Source: rtr}, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
 	rctx, rcancel := context.WithCancel(context.Background())
 	t.Cleanup(rcancel)
 	go func() { _ = rt.Run(rctx, cl, tl) }()
-
 	vms, err := os.MkdirTemp("", "drot")
 	if err != nil {
 		t.Fatal(err)
@@ -573,11 +588,11 @@ func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
 	h := herdletOn(t, "node-1", nil)
 	h.VMM, h.Guests, h.Slots = v, v, 2
 	h.API, h.Snapshots = apiLn.Addr().String(), filepath.Join(dir, "snapshots")
-	h.Identity = deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/node/node-1", 2*time.Second)}
+	h.Identity = deploy.Identity{Source: node}
 	runHerdlet(t, h)
 	waitWorkers(t, apiLn.Addr().String(), "", 1)
 	c := client(t, apiLn.Addr().String(), "")
-	defer c.Close()
+	t.Cleanup(func() { c.Close() })
 	ctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(ctx, tpl("agent")); err != nil {
 		t.Fatal(err)
@@ -586,10 +601,8 @@ func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
 		Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "a1"}, ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: "agent"}}}); err != nil {
 		t.Fatal(err)
 	}
-
 	roots := x509.NewCertPool()
 	roots.AddCert(testCA(t).Root)
-	var conn net.Conn
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
 		tc, err := tls.Dial("tcp", cl.Addr().String(), &tls.Config{RootCAs: roots, ServerName: "localhost", NextProtos: []string{"http/1.1"}})
 		if err != nil {
@@ -608,22 +621,91 @@ func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
 			t.Fatalf("CONNECT through herd-router: %v %v", resp, err)
 		}
 	}
-	defer conn.Close()
+	t.Cleanup(func() { conn.Close() })
 	gc, err := guestclient.New(func(context.Context) (net.Conn, error) { return conn, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer gc.Close()
-	list := func() error {
-		return gc.Invoke(ctx, agent.MethodListDirectory, &herdext.ListDirectoryRequest{Path: "/"}, new(herdext.ListDirectoryResponse), nil)
+	t.Cleanup(func() { gc.Close() })
+	list = func() error {
+		lctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return gc.Invoke(lctx, agent.MethodListDirectory, &herdext.ListDirectoryRequest{Path: "/"}, new(herdext.ListDirectoryResponse), nil)
+	}
+	live = func() bool {
+		var resp ateapi.ListWorkersResponse
+		if err := c.Raw(ctxT(t), "ListWorkers", &ateapi.ListWorkersRequest{}, &resp); err != nil {
+			return false
+		}
+		for _, w := range resp.GetWorkers() {
+			if w.GetMetadata().GetName() == "node-1" && w.GetStatus().GetState() == ateapi.WorkerState_WORKER_STATE_ACTIVE {
+				return true
+			}
+		}
+		return false
 	}
 	if err := list(); err != nil {
 		t.Fatalf("a call inside the CONNECT: %v", err)
 	}
+	return list, conn, live
+}
+
+// shortBounds sets the test's drain margin, stream grace and checks.
+func shortBounds(t *testing.T) {
+	pr, pm, pg, pc := deploy.RotationCheck, auth.DrainMargin, auth.DrainGrace, auth.StreamCheck
+	deploy.RotationCheck, auth.DrainMargin, auth.DrainGrace, auth.StreamCheck = 100*time.Millisecond, 500*time.Millisecond, time.Second, 100*time.Millisecond
+	t.Cleanup(func() { deploy.RotationCheck, auth.DrainMargin, auth.DrainGrace, auth.StreamCheck = pr, pm, pg, pc })
+}
+
+// TestStreamThroughRouterOutlivesRotations (re-review 3, R1): a stream a client holds through herd-router to an actor
+// (a CONNECT to its guest, gRPC inside) keeps working while the node's SVID rotates several times, past several of its
+// leaves and their grace: the data stream stays on its connection, held by the worker's current, valid tunnel.
+func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
+	shortBounds(t)
+	list, _, _ := routerStack(t, apiIdentity(t).Source, routerIdentity(t).Source, newRotating(t, "spiffe://herd.test/herd/node/node-1", 2*time.Second))
 	time.Sleep(6 * time.Second) // three SVID lifetimes, a dozen rotations
 	if err := list(); err != nil {
 		t.Errorf("the same CONNECT after the node's SVID rotated a dozen times: %v", err)
 	}
+}
+
+// TestNodeThatStopsRotatingLosesItsStreams (R1): a node that gets no new SVID (its entry deleted) loses its link and
+// its data streams by its leaf's end plus DrainGrace.
+func TestNodeThatStopsRotatingLosesItsStreams(t *testing.T) {
+	shortBounds(t)
+	node, err := testCA(t).Source("spiffe://herd.test/herd/node/node-1", localca.Options{TTL: 4 * time.Second, NotBefore: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().Add(4*time.Second + auth.DrainGrace)
+	list, _, live := routerStack(t, apiIdentity(t).Source, routerIdentity(t).Source, node)
+	time.Sleep(time.Until(end) + 2*time.Second)
+	if err := list(); err == nil {
+		t.Error("a data stream of a node that stopped rotating still answers after its leaf's end plus the grace")
+	}
+	if live() {
+		t.Error("a node that stopped rotating is still a live worker after its leaf's end plus the grace")
+	}
+}
+
+// TestDroppedCAEndsItsStreams (R1): a CA dropped from the bundle ends the streams and links its SVIDs opened, promptly
+// (at the next StreamCheck), not at their leaves' end.
+func TestDroppedCAEndsItsStreams(t *testing.T) {
+	shortBounds(t)
+	api := &trustSwitch{Static: must(testCA(t).Source("spiffe://herd.test/herd/api", localca.Options{DNS: []string{"localhost"}, IPs: []net.IP{net.IPv4(127, 0, 0, 1)}}))}
+	rtr := &trustSwitch{Static: must(testCA(t).Source("spiffe://herd.test/herd/router", localca.Options{DNS: []string{"localhost"}, IPs: []net.IP{net.IPv4(127, 0, 0, 1)}}))}
+	list, _, live := routerStack(t, api, rtr, source(t, "spiffe://herd.test/herd/node/node-1"))
+	other, err := localca.New(testTD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.drop(other.X509Bundle())
+	rtr.drop(other.X509Bundle())
+	time.Sleep(2 * time.Second)
+	if err := list(); err == nil {
+		t.Error("a data stream opened by a node of the dropped CA still answers 2 s after the drop")
+	}
+	_ = live
 }
 
 // TestWorkerIdentityAnswersHerdRouterOnly (re-review 5): herd.ext.v1.Authz/WorkerIdentity, which tells herd-router
