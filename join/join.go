@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/everdict/herd/auth"
@@ -88,8 +87,11 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if (!ok || tok == "") && len(auth.PeerChain(ctx)) == 0 {
+	if err := auth.RefuseHeader(h); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "join: %v", err)
+	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
 		return nil, status.Errorf(codes.Unauthenticated, "join: no node SVID and no join token")
 	}
 	// A node joins by its X.509-SVID (spiffe://<td>/herd/node/<worker>, ADR 0001 A-60), or, under the HS256

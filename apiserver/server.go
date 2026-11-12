@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -250,8 +249,11 @@ func (s *Server) principal(ctx context.Context) (auth.Principal, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if (!ok || tok == "") && len(auth.PeerChain(ctx)) == 0 {
+	if err := auth.RefuseHeader(h); err != nil {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
+	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
 		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no bearer token and no client certificate")
 	}
 	// No bearer: the caller is its mTLS client certificate, an X.509-SVID the authenticator verifies (ADR 0001 A-60).

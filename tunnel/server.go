@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -81,8 +80,11 @@ func (s *Server) herdlet(ctx context.Context) (string, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if (!ok || tok == "") && len(auth.PeerChain(ctx)) == 0 {
+	if err := auth.RefuseHeader(h); err != nil {
+		return "", status.Errorf(codes.Unauthenticated, "%v", err)
+	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
 		return "", status.Errorf(codes.Unauthenticated, "no node SVID and no bearer token")
 	}
 	// No bearer: the tunnel is its node's X.509-SVID over mTLS (ADR 0001 A-60).

@@ -240,3 +240,21 @@ func (b Bearer) GetRequestMetadata(context.Context, ...string) (map[string]strin
 
 // RequireTransportSecurity reports false; see Bearer.
 func (Bearer) RequireTransportSecurity() bool { return false }
+
+// BearerToken is the token of an authorization header value: what follows "Bearer ", or "" when h does not use that
+// scheme. A header in another form (a raw JWT) is not a bearer, never read whole as one.
+func BearerToken(h string) string {
+	tok, ok := strings.CutPrefix(h, "Bearer ")
+	if !ok {
+		return ""
+	}
+	return tok
+}
+
+// RefuseHeader is the reason an authorization header h that is not a bearer is refused; "" for none or a bearer.
+func RefuseHeader(h string) error {
+	if h != "" && BearerToken(h) == "" {
+		return fmt.Errorf("%w: the authorization header is not \"Bearer <token>\"", ErrUnauthenticated)
+	}
+	return nil
+}
