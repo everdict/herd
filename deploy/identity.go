@@ -9,12 +9,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/everdict/herd/auth"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 // Identity is where a herd component gets its SPIFFE identity (ADR 0001 A-60): by default the SPIFFE Workload API
@@ -281,3 +284,55 @@ const (
 	DefaultAPIMetrics    = "127.0.0.1:7449"
 	DefaultRouterMetrics = "127.0.0.1:8449"
 )
+
+// redialConn is a client connection to a herd component that, when a call is answered Unavailable (the server drains
+// the connection before its client's SVID ends) or Unauthenticated (a connection authenticated with an SVID that has
+// since been replaced), dials a new connection, which presents the current SVID, and tries the call once more on it
+// (re-review 2). Streams go to the current connection as they are.
+type redialConn struct {
+	dialFn func() (*grpc.ClientConn, error)
+	mu     sync.Mutex
+	cc     *grpc.ClientConn
+}
+
+// redialing dials addr as src, expecting id, with redialConn's retry.
+func redialing(addr string, src auth.Source, id spiffeid.ID, opts ...grpc.DialOption) (*redialConn, error) {
+	r := &redialConn{dialFn: func() (*grpc.ClientConn, error) { return dial(addr, src, id, opts...) }}
+	cc, err := r.dialFn()
+	if err != nil {
+		return nil, err
+	}
+	r.cc = cc
+	return r, nil
+}
+
+func (r *redialConn) current() *grpc.ClientConn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cc
+}
+
+func (r *redialConn) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
+	cc := r.current()
+	err := cc.Invoke(ctx, method, args, reply, opts...)
+	if c := status.Code(err); c != codes.Unavailable && c != codes.Unauthenticated {
+		return err
+	}
+	r.mu.Lock()
+	if r.cc == cc {
+		if n, derr := r.dialFn(); derr == nil {
+			_ = r.cc.Close()
+			r.cc = n
+		}
+	}
+	cc = r.cc
+	r.mu.Unlock()
+	return cc.Invoke(ctx, method, args, reply, opts...)
+}
+
+func (r *redialConn) NewStream(ctx context.Context, desc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return r.current().NewStream(ctx, desc, method, opts...)
+}
+
+// Close closes the current connection.
+func (r *redialConn) Close() error { return r.current().Close() }

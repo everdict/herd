@@ -250,7 +250,7 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	if tok != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(auth.Bearer(tok)))
 	}
-	conn, err := dial(e.API, id, auth.HerdID(self.TrustDomain(), "api"), opts...)
+	conn, err := redialing(e.API, id, auth.HerdID(self.TrustDomain(), "api"), opts...)
 	if err != nil {
 		return err
 	}

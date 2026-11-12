@@ -1,10 +1,14 @@
 package deploy_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,10 +19,17 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
+	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/auth/localca"
 	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
+	"github.com/everdict/herd/guest/agent"
+	"github.com/everdict/herd/guest/guestclient"
+	"github.com/everdict/herd/router"
+	"github.com/everdict/herd/vmm"
+	"github.com/everdict/herd/vmm/fake"
+	"github.com/everdict/herd/vmm/fakeguest"
 	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -476,5 +487,140 @@ func TestEgressRequiresItsOwnSVID(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.reason) {
 			t.Errorf("herd-egress of w1 as %s: %v; want a refusal naming %q", c.id, err, c.reason)
 		}
+	}
+}
+
+// slowBoot is a hypervisor whose boots take d.
+type slowBoot struct {
+	vmm.VMM
+	d time.Duration
+}
+
+func (s slowBoot) Boot(ctx context.Context, spec vmm.Spec) (vmm.VM, error) {
+	select {
+	case <-time.After(s.d):
+	case <-ctx.Done():
+		return vmm.VM{}, ctx.Err()
+	}
+	return s.VMM.Boot(ctx, spec)
+}
+
+// TestLinkRotatesMakeBeforeBreak (re-review 3): a herdlet whose node SVID rotates several times during a call herd-api
+// sent it (a boot of 3 s, SVIDs of 2 s reissued every half second) opens a new link at each rotation, and the call
+// finishes on the link it was sent on: the actor is RUNNING with nothing owed, and the node stays one live worker.
+func TestLinkRotatesMakeBeforeBreak(t *testing.T) {
+	prevR, prevM := deploy.RotationCheck, auth.DrainMargin
+	deploy.RotationCheck, auth.DrainMargin = 100*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { deploy.RotationCheck, auth.DrainMargin = prevR, prevM })
+	a := startAPI(t)
+	h := herdletOn(t, "node-1", nil)
+	h.VMM = slowBoot{VMM: h.VMM, d: 3 * time.Second}
+	h.API, h.Snapshots = a.addr, filepath.Join(a.dir, "snapshots")
+	h.Identity = deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/node/node-1", 2*time.Second)}
+	var logs syncBuffer
+	out := log.Writer()
+	log.SetOutput(io.MultiWriter(&logs, out))
+	t.Cleanup(func() { log.SetOutput(out) })
+	runHerdlet(t, h)
+	waitWorkers(t, a.addr, "", 1)
+	c := client(t, a.addr, "")
+	defer c.Close()
+	ctx := ctxT(t)
+	if _, err := c.CreateActorTemplate(ctx, tpl("agent")); err != nil {
+		t.Fatal(err)
+	}
+	act, err := c.CreateActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "a1"}, ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: "agent"}}})
+	if err != nil {
+		t.Fatalf("CreateActor, its boot running across the node's SVID rotations: %v", err)
+	}
+	if act.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_RUNNING {
+		t.Errorf("a1 is %v, want RUNNING", act.GetStatus().GetState())
+	}
+	if _, owed, err := c.GetActorOwed(ctx, space, "a1"); err != nil || owed != "" {
+		t.Errorf("a1 owes %q (%v); want nothing owed", owed, err)
+	}
+	if n := strings.Count(logs.String(), "the node SVID rotated; opening a new one"); n < 4 {
+		t.Errorf("the herdlet opened %d new links during the boot, want several (one per rotation)", n)
+	}
+}
+
+// TestStreamThroughRouterOutlivesRotations (re-review 3): a stream a client holds through herd-router to an actor (a
+// CONNECT to its guest, gRPC inside) keeps working while the node's SVID rotates several times: each rotation opens a
+// new tunnel, and the data stream already open stays on its connection until it ends.
+func TestStreamThroughRouterOutlivesRotations(t *testing.T) {
+	prevR, prevM := deploy.RotationCheck, auth.DrainMargin
+	deploy.RotationCheck, auth.DrainMargin = 100*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { deploy.RotationCheck, auth.DrainMargin = prevR, prevM })
+	dir := t.TempDir()
+	apiLn, cl, tl := listen(t), listen(t), listen(t)
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "memory", Snapshots: filepath.Join(dir, "snapshots"),
+		CallTimeout: 5 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String()}
+	runAPI(t, a, apiLn)
+	rt := &deploy.Router{Identity: routerIdentity(t), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rctx, rcancel := context.WithCancel(context.Background())
+	t.Cleanup(rcancel)
+	go func() { _ = rt.Run(rctx, cl, tl) }()
+
+	vms, err := os.MkdirTemp("", "drot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(vms) })
+	v := fakeguest.New(fake.New(chCaps(), nil), vms, nil)
+	t.Cleanup(v.Close)
+	h := herdletOn(t, "node-1", nil)
+	h.VMM, h.Guests, h.Slots = v, v, 2
+	h.API, h.Snapshots = apiLn.Addr().String(), filepath.Join(dir, "snapshots")
+	h.Identity = deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/node/node-1", 2*time.Second)}
+	runHerdlet(t, h)
+	waitWorkers(t, apiLn.Addr().String(), "", 1)
+	c := client(t, apiLn.Addr().String(), "")
+	defer c.Close()
+	ctx := ctxT(t)
+	if _, err := c.CreateActorTemplate(ctx, tpl("agent")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: space, Name: "a1"}, ActorTemplate: &ateapi.ObjectRef{Atespace: space, Name: "agent"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(testCA(t).Root)
+	var conn net.Conn
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		tc, err := tls.Dial("tcp", cl.Addr().String(), &tls.Config{RootCAs: roots, ServerName: "localhost", NextProtos: []string{"http/1.1"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(tc, "CONNECT a1:%d HTTP/1.1\r\nHost: a1:%d\r\n%s: %s/a1\r\nAuthorization: Bearer %s\r\n\r\n", fakeguest.GuestPort, fakeguest.GuestPort,
+			router.TargetActorHeader, space, jwtFor(t, operatorID))
+		br := bufio.NewReader(tc)
+		resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+		if err == nil && resp.StatusCode == http.StatusOK && br.Buffered() == 0 {
+			conn = tc
+			break
+		}
+		tc.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("CONNECT through herd-router: %v %v", resp, err)
+		}
+	}
+	defer conn.Close()
+	gc, err := guestclient.New(func(context.Context) (net.Conn, error) { return conn, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gc.Close()
+	list := func() error {
+		return gc.Invoke(ctx, agent.MethodListDirectory, &herdext.ListDirectoryRequest{Path: "/"}, new(herdext.ListDirectoryResponse), nil)
+	}
+	if err := list(); err != nil {
+		t.Fatalf("a call inside the CONNECT: %v", err)
+	}
+	time.Sleep(6 * time.Second) // three SVID lifetimes, a dozen rotations
+	if err := list(); err != nil {
+		t.Errorf("the same CONNECT after the node's SVID rotated a dozen times: %v", err)
 	}
 }

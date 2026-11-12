@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/everdict/herd/apiserver"
@@ -605,18 +607,8 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		}
 		go func() {
 			defer close(done)
-			defer func() { tc.Close() }()
-			forever(ctx, retry, "tunnel to "+tunnelAddr, func() error {
-				err := agent.Tunnel.Run(ctx, tc)
-				if st.Grant.Credential == "" && status.Code(err) == codes.Unauthenticated {
-					// The SVID the connection opened with ended: a new connection presents the current one.
-					if n, derr := dialTunnel(); derr == nil {
-						tc.Close()
-						tc = n
-					}
-				}
-				return err
-			})
+			generations(ctx, "tunnel to "+tunnelAddr, retry, dialTunnel, rotations(ctx, src), st.Grant.Credential == "", tc,
+				func(cc *grpc.ClientConn) error { return agent.Tunnel.Run(ctx, cc) }, func(error) bool { return false })
 		}()
 	} else {
 		close(done)
@@ -627,7 +619,6 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer func() { cc.Close() }()
 	if host.Serve != nil {
 		// The in-process herd-egress reads the egress policies as the node (its SVID's built-in grant), or with the
 		// break-glass egress credential a token join granted.
@@ -635,7 +626,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		if st.Grant.EgressCredential != "" {
 			eopts = append(eopts, grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.EgressCredential)))
 		}
-		ec, err := dial(st.API, src, api, eopts...)
+		ec, err := redialing(st.API, src, api, eopts...)
 		if err != nil {
 			return err
 		}
@@ -644,28 +635,25 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	}
 	log.Printf("herdlet %s: linking to herd-api at %s", st.Grant.Worker, st.API)
 	var refused error
-	forever(ctx, retry, "link to "+st.API, func() error {
-		err := agent.Run(ctx, cc)
-		if status.Code(err) == codes.FailedPrecondition {
-			// herd-api refuses this host as it is (its snapshot store is not herd-api's): a retry cannot change that.
-			refused = err
-			cancel()
-		}
-		if st.Grant.Credential != "" && status.Code(err) == codes.Unauthenticated {
-			// The break-glass credential ended (or the allowance did): the next start joins again with the token.
-			refused = err
-			cancel()
-		}
-		if st.Grant.Credential == "" && status.Code(err) == codes.Unauthenticated {
-			// The node SVID the connection opened with ended (review 1): link again over a new connection, which
-			// presents the node's current SVID, rather than retrying the old one.
-			if n, derr := dialAPI(); derr == nil {
-				cc.Close()
-				cc = n
+	// The link runs make-before-break across the node SVID's rotations (re-review 3): a rotation opens a new link with
+	// the current SVID, herd-api moves the worker's calls to it, and the older link ends once its calls are answered.
+	generations(ctx, "link to "+st.API, retry, dialAPI, rotations(ctx, src), st.Grant.Credential == "", cc,
+		func(cc *grpc.ClientConn) error { return agent.Run(ctx, cc) },
+		func(err error) bool {
+			if status.Code(err) == codes.FailedPrecondition {
+				// herd-api refuses this host as it is (its snapshot store is not herd-api's): a retry cannot change that.
+				refused = err
+				cancel()
+				return true
 			}
-		}
-		return err
-	})
+			if st.Grant.Credential != "" && status.Code(err) == codes.Unauthenticated {
+				// The break-glass credential ended (or the allowance did): the next start joins again with the token.
+				refused = err
+				cancel()
+				return true
+			}
+			return false
+		})
 	<-done
 	if cerr := changed(); cerr != nil {
 		return cerr
@@ -674,6 +662,94 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		return fmt.Errorf("%w (this host's join grant: %s; remove it and join again with a new join token)", refused, StatePath(h.StateDir))
 	}
 	return nil
+}
+
+// RotationCheck is how often a herdlet looks for a rotated node SVID to link again with.
+var RotationCheck = 5 * time.Second
+
+// rotations signals each time src's X.509-SVID is another certificate than the last one seen.
+func rotations(ctx context.Context, src auth.Source) <-chan struct{} {
+	out := make(chan struct{}, 1)
+	serial := func() string {
+		sv, err := src.GetX509SVID()
+		if err != nil || len(sv.Certificates) == 0 {
+			return ""
+		}
+		return sv.Certificates[0].SerialNumber.String()
+	}
+	last := serial()
+	go func() {
+		t := time.NewTicker(RotationCheck)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			if now := serial(); now != "" && now != last {
+				last = now
+				select {
+				case out <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// generations runs run over cc until ctx ends, make-before-break: each rotation dials a new connection (presenting
+// the current SVID) and starts a new generation on it while the older one goes on until its server lets it go, and
+// is not retried then. A generation whose run ends with svid set and Unavailable (its connection draining) or
+// Unauthenticated dials again before it retries. stop, true, ends every generation.
+func generations(ctx context.Context, what string, retry time.Duration, dialFn func() (*grpc.ClientConn, error), rotate <-chan struct{},
+	svid bool, cc *grpc.ClientConn, run func(*grpc.ClientConn) error, stop func(error) bool) {
+	var gen atomic.Int64
+	var wg sync.WaitGroup
+	start := func(cc *grpc.ClientConn) {
+		g := gen.Add(1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { cc.Close() }()
+			for ctx.Err() == nil {
+				err := run(cc)
+				if gen.Load() != g {
+					return // a newer generation took over
+				}
+				if err != nil && ctx.Err() == nil {
+					log.Printf("herdlet: %s: %v", what, err)
+				}
+				if stop(err) {
+					return
+				}
+				if c := status.Code(err); svid && (c == codes.Unavailable || c == codes.Unauthenticated) {
+					if n, derr := dialFn(); derr == nil {
+						cc.Close()
+						cc = n
+					}
+				}
+				select {
+				case <-ctx.Done():
+				case <-time.After(retry):
+				}
+			}
+		}()
+	}
+	start(cc)
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case <-rotate:
+			if n, err := dialFn(); err == nil {
+				log.Printf("herdlet: %s: the node SVID rotated; opening a new one before the old one goes", what)
+				start(n)
+			}
+		}
+	}
 }
 
 // forever runs f until ctx ends, waiting retry after each return.
