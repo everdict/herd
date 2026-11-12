@@ -251,6 +251,11 @@ func TestTwoHerdletsJoinBySVID(t *testing.T) {
 
 // joinAs asks herd-api at addr for worker's grant, dialing as src with tok as its bearer if set.
 func joinAs(t *testing.T, addr string, src auth.Source, tok, worker string) error {
+	_, err := joinGrant(t, addr, src, tok, worker)
+	return err
+}
+
+func joinGrant(t *testing.T, addr string, src auth.Source, tok, worker string) (join.Grant, error) {
 	t.Helper()
 	cfg, err := auth.ClientTLS(src, auth.HerdID(spiffeid.RequireTrustDomainFromString(testTD), "api"))
 	if err != nil {
@@ -261,8 +266,7 @@ func joinAs(t *testing.T, addr string, src auth.Source, tok, worker string) erro
 		t.Fatal(err)
 	}
 	defer cc.Close()
-	_, err = join.Call(ctxT(t), cc, tok, worker)
-	return err
+	return join.Call(ctxT(t), cc, tok, worker)
 }
 
 // TestJoinRefusesWhatIsNotItsNode (A-60): a join is granted to the node SVID of the worker it names. Another node's
@@ -297,8 +301,19 @@ func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
 		a.BreakGlass = deploy.BreakGlass{Until: time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02"), Key: key}
 	})
 	good, _ := join.MintToken(key, time.Hour)
-	if err := joinAs(t, b.addr, node1, good, "node-x"); err != nil {
-		t.Errorf("a join token under the break-glass: %v", err)
+	g, err := joinGrant(t, b.addr, node1, good, "node-x")
+	if err != nil {
+		t.Fatalf("a join token under the break-glass: %v", err)
+	}
+	// Its HS256 credential is short-lived and names its worker.
+	if exp := time.Unix(g.ExpiresAt, 0); g.Credential == "" || exp.After(time.Now().Add(join.DefaultCredentialTTL)) {
+		t.Errorf("a token join granted %q until %s; want a credential that ends within %s", g.Credential, exp, join.DefaultCredentialTTL)
+	}
+	if p, err := (auth.StaticKey{Key: key}).Authenticate(ctxT(t), g.Credential); err != nil || !p.Herdlet || p.HerdletWorker() != "node-x" {
+		t.Errorf("the granted credential is %+v, %v; want node-x's herdlet credential", p, err)
+	}
+	if svid, err := joinGrant(t, b.addr, node1, "", "node-1"); err != nil || svid.Credential != "" {
+		t.Errorf("a join by node SVID under the break-glass: %+v, %v; want a grant with no credential", svid, err)
 	}
 	forged, _ := join.MintToken([]byte("ffffffffffffffffffffffffffffffff"), time.Hour)
 	expired, _ := auth.Sign(key, auth.Claims{Subject: "join-old", ExpiresAt: time.Now().Add(-time.Minute).Unix(), Join: true})

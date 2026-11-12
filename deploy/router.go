@@ -30,6 +30,8 @@ type Router struct {
 	Policy string
 	// BreakGlass is the dated HS256 allowance, as herd-api's.
 	BreakGlass BreakGlass
+	// LocalCA marks herd all-in-one's herd-router, as API.LocalCA.
+	LocalCA bool
 	// MetricsListen serves the router's allowance counters at /metrics (default DefaultRouterMetrics in the flags;
 	// empty: not served).
 	MetricsListen string
@@ -72,6 +74,9 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 	authn, _, err := authenticator("herd-router", src, apiID, policy, &r.BreakGlass, meter)
 	if err != nil {
 		return err
+	}
+	if self.TrustDomain().Name() == LocalTrustDomain && !r.LocalCA {
+		return fmt.Errorf("herd-router: its SVID %s is of %s, herd all-in-one's local development CA; a herd-router that is not all-in-one does not start on it", self, LocalTrustDomain)
 	}
 	if r.MetricsListen != "" {
 		mln, err := net.Listen("tcp", r.MetricsListen)

@@ -60,8 +60,11 @@ type Server struct {
 	Tunnel string
 	// Snapshots, if set, is handed to every joining herdlet (Grant.Snapshots).
 	Snapshots *s3.Config
-	// TTL is the lifetime of the credentials a join grants (default one year).
-	TTL time.Duration
+	// TTL is the lifetime of the HS256 credentials a token join grants (default DefaultCredentialTTL), and NotAfter, if
+	// set, their latest end (the break-glass allowance's): a break-glass credential is short-lived and bound to its
+	// worker, whose registration it alone may make.
+	TTL      time.Duration
+	NotAfter time.Time
 	// OnGrant, if set, sees every grant before it is answered.
 	OnGrant func(Grant)
 	Now     func() time.Time
@@ -116,9 +119,13 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 	}
 	ttl := s.TTL
 	if ttl <= 0 {
-		ttl = 365 * 24 * time.Hour
+		ttl = DefaultCredentialTTL
 	}
-	exp := now().Add(ttl).Unix()
+	end := now().Add(ttl)
+	if !s.NotAfter.IsZero() && s.NotAfter.Before(end) {
+		end = s.NotAfter
+	}
+	exp := end.Unix()
 	g := &Grant{Worker: req.Worker, Tunnel: s.Tunnel, Snapshots: s.Snapshots, ExpiresAt: exp}
 	if p.Join {
 		// A join token is break-glass: its host links with the HS256 credentials it is granted. A node that joined by
@@ -148,6 +155,10 @@ func MintToken(key []byte, ttl time.Duration) (string, error) {
 	}
 	return auth.Sign(key, auth.Claims{Subject: "join-" + hex.EncodeToString(id[:]), ExpiresAt: time.Now().Add(ttl).Unix(), Join: true})
 }
+
+// DefaultCredentialTTL is how long the HS256 credentials of a token join live: a herdlet joins again with its join
+// token once they end.
+const DefaultCredentialTTL = 24 * time.Hour
 
 // Register serves the join call on g.
 func (s *Server) Register(g *grpc.Server) {

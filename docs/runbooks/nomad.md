@@ -104,6 +104,7 @@ reach it with no lab allowance and no address in a job file. An actor still need
    for p in $(pgrep -x cloud-hyperviso); do cat /proc/$p/cgroup; done
    ```
 
-Each herdlet joins once as its node's SVID and keeps its grant in `/var/lib/herdlet`; a node added later joins the
-same way, and if herd-api moves to another client, herdlets join again at the new address. herd-api serves
+Each herdlet is its node's SVID and needs no join token: at its first start it asks herd-api, as that SVID, for the
+node's settings and keeps them in `/var/lib/herdlet`; a node added later does the same, and if herd-api moves to
+another client, herdlets ask again at the new address. herd-api serves
 `/metrics` (the authentication allowance counters) on port 7449, herd-router on 8449.

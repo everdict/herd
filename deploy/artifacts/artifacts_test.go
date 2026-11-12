@@ -79,9 +79,9 @@ func TestArtifactsRunCommandLinesTheBinariesAccept(t *testing.T) {
 		}
 	}
 	for _, k := range []string{
-		"systemd:herd", "systemd:herd-api", "systemd:herd-router", "systemd:herdlet join", "systemd:herd-egress",
-		"launchd:herd", "launchd:herdlet join",
-		"nomad:herd-api", "nomad:herd-router", "nomad:herdlet join", "nomad:herd-egress",
+		"systemd:herd", "systemd:herd-api", "systemd:herd-router", "systemd:herdlet run", "systemd:herd-egress",
+		"launchd:herd", "launchd:herdlet run",
+		"nomad:herd-api", "nomad:herd-router", "nomad:herdlet run", "nomad:herd-egress",
 	} {
 		if !seen[k] {
 			t.Errorf("no %s artifact runs %s", strings.SplitN(k, ":", 2)[0], strings.SplitN(k, ":", 2)[1])
@@ -124,7 +124,7 @@ func TestNomadJobPair(t *testing.T) {
 }
 
 // TestMacHerdletJoinsLikeLinux (criterion launchd-install): the launchd daemon a Mac installs runs the same command
-// as the systemd unit on Linux — `herdlet join <herd-api>` as its SPIFFE identity, with the state directory and the
+// as the systemd unit on Linux — `herdlet run -api <herd-api>` as its SPIFFE identity, with the state directory and the
 // guest kernel and initramfs — and no flag the Linux unit does not pass; only paths differ. It is a launchd daemon
 // that starts at load and is kept alive, Interactive, with room for a host of VMs' files.
 func TestMacHerdletJoinsLikeLinux(t *testing.T) {
@@ -162,8 +162,8 @@ func TestMacHerdletJoinsLikeLinux(t *testing.T) {
 	}
 	ms, mf := flags(mac)
 	ls, lf := flags(linux)
-	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "join" || ls != "join" {
-		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet join", mac.Binary, mac.Args, linux.Binary, linux.Args)
+	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "run" || ls != "run" {
+		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet run", mac.Binary, mac.Args, linux.Binary, linux.Args)
 	}
 	for _, f := range []string{"state", "kernel", "initrd"} {
 		if !mf[f] || !lf[f] {
@@ -200,11 +200,11 @@ func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
 		}
 		for _, inv := range invs {
 			switch {
-			case inv.Binary == "herdlet" && len(inv.Args) > 0 && inv.Args[0] == "join":
+			case inv.Binary == "herdlet" && len(inv.Args) > 0 && inv.Args[0] == "run":
 				joins[f.Path] = true
 				for _, a := range inv.Args {
 					if n := strings.TrimLeft(a, "-"); a != n && (n == "snapshots" || strings.HasPrefix(n, "snapshots=")) {
-						t.Errorf("%s runs herdlet join with %s: a joined herdlet's snapshots go to the join's store", f.Path, a)
+						t.Errorf("%s runs herdlet run with %s: a joined herdlet's snapshots go to the join's store", f.Path, a)
 					}
 				}
 			case inv.Binary == "herd-api":
@@ -214,7 +214,7 @@ func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
 	}
 	for _, p := range []string{"systemd/herdlet.service", "launchd/com.everdict.herdlet.plist", "nomad/herdlet.nomad.hcl"} {
 		if !joins[p] {
-			t.Errorf("%s runs no herdlet join", p)
+			t.Errorf("%s runs no herdlet run", p)
 		}
 	}
 	for _, p := range []string{"systemd/herd-api.service", "nomad/herd-api.nomad.hcl"} {
@@ -233,7 +233,7 @@ func TestMacPlistsPassSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@",
+		"launchd/com.everdict.herdlet.plist": {"run", "-api", "@HERD_API@",
 			"-state", "/usr/local/var/herdlet", "-kernel", "/usr/local/share/herd/kernel",
 			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets",
 			"-registry-auth", "/usr/local/etc/herd/registry-auth.json"},

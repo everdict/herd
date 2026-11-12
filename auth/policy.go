@@ -10,8 +10,9 @@ import (
 )
 
 // Policy grants workloads atespace roles (ADR 0001 A-60). herd's own identities need no rule; their grants are built
-// in (Builtin): a node (/herd/node/<worker>) is a herdlet that reads every atespace, an operator (/herd/operator/<name>) holds operator in every
-// atespace, and a node's herd-egress (/herd/egress/<worker>) reads every atespace. The file is JSON:
+// in (Builtin): a node (/herd/node/<worker>) is a herdlet that reads every atespace's egress policies, an operator (/herd/operator/<name>) holds operator in every
+// atespace, and a node's herd-egress (/herd/egress/<worker>) reads every atespace's egress policies and nothing else
+// (RoleEgress: it is no herdlet). The file is JSON:
 //
 //	{"rules": [
 //	  {"id": "spiffe://td/everdict/ws/acme/runner/r1", "spaces": {"acme": "write"}},
@@ -109,13 +110,14 @@ func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 func Builtin(ident Identity) (Rule, bool) {
 	switch ident.Kind {
 	case KindNode:
-		// A node links as its herdlet, and its herd-egress (in the herdlet's process on a Mac, or apart under the
-		// node's SVID) reads the egress policies of every atespace, as the egress credential a join granted did.
-		return Rule{Herdlet: true, Spaces: map[string]Role{AllSpaces: RoleRead}}, true
+		// A node links as its herdlet; a Mac's herd-egress runs in the herdlet's process, so the node also reads the
+		// egress policies of every atespace, and nothing else of them.
+		return Rule{Herdlet: true, Spaces: map[string]Role{AllSpaces: RoleEgress}}, true
 	case KindOperator:
 		return Rule{Spaces: map[string]Role{AllSpaces: RoleOperator}}, true
 	case KindEgress:
-		return Rule{Spaces: map[string]Role{AllSpaces: RoleRead}}, true
+		// herd-egress reads egress policies: it is no herdlet, and reads no actor, template or tag.
+		return Rule{Spaces: map[string]Role{AllSpaces: RoleEgress}}, true
 	}
 	return Rule{}, false
 }

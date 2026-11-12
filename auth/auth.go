@@ -27,6 +27,8 @@ const (
 	// RoleOperator may write in the space as RoleWrite does, and also act on actors it did not create (and on the
 	// actors created before herd recorded creators): ADR 0001 A-60.
 	RoleOperator Role = "operator"
+	// RoleEgress may read the actors' egress policies and nothing else: herd-egress's grant (ADR 0001 A-60).
+	RoleEgress Role = "egress"
 )
 
 // AllSpaces in a principal's Spaces grants its role in every space.
@@ -38,6 +40,8 @@ type Action int
 const (
 	ActionRead Action = iota
 	ActionWrite
+	// ActionReadEgress reads an actor's egress policy: every role allows it, RoleEgress nothing else.
+	ActionReadEgress
 )
 
 // Principal is an authenticated caller.
@@ -114,7 +118,7 @@ func (SpaceRoles) Authorize(p Principal, space string, a Action) error {
 		return fmt.Errorf("%w: no atespace named", ErrPermissionDenied)
 	}
 	for _, r := range []Role{p.Spaces[space], p.Spaces[AllSpaces]} {
-		if r == RoleWrite || r == RoleOperator || (r == RoleRead && a == ActionRead) {
+		if r == RoleWrite || r == RoleOperator || (r == RoleRead && a != ActionWrite) || (r == RoleEgress && a == ActionReadEgress) {
 			return nil
 		}
 	}
@@ -122,8 +126,11 @@ func (SpaceRoles) Authorize(p Principal, space string, a Action) error {
 }
 
 func actionName(a Action) string {
-	if a == ActionWrite {
+	switch a {
+	case ActionWrite:
 		return "write"
+	case ActionReadEgress:
+		return "read egress policies"
 	}
 	return "read"
 }

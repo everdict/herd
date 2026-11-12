@@ -111,6 +111,9 @@ type API struct {
 	// MetricsListen serves the A-60 allowance counters at /metrics (-metrics-listen, default DefaultAPIMetrics in
 	// the flags; empty: not served).
 	MetricsListen string
+	// LocalCA marks herd all-in-one's herd-api, on its local CA's trust domain (LocalTrustDomain): any other herd-api
+	// refuses to start on that trust domain, so a development CA does not serve a real install.
+	LocalCA bool
 	// MetricsListener, if set, is used instead of MetricsListen (tests).
 	MetricsListener net.Listener
 	// Meter, if set, is the meter herd-api counts on instead of a new one (tests).
@@ -132,7 +135,7 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.Float64Var(&a.RestoreBandwidthMiB, "restore-bandwidth", apiserver.DefaultRestoreBandwidth>>20, "MiB/s a herdlet is expected to move a snapshot object to or from the store at, at least: a restore's call waits -call-timeout plus the object's size at this rate, and a snapshot's call plus the size its herdlet reports")
 	fs.DurationVar(&a.Reconcile, "reconcile", 10*time.Second, "how often to retry owed workflow steps")
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
-	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
+	fs.DurationVar(&a.CredentialTTL, "credential-ttl", join.DefaultCredentialTTL, "break-glass only: lifetime of the HS256 credentials a token join grants (never past -break-glass-hs256-until)")
 	fs.DurationVar(&a.GoldenWarmup, "golden-warmup", DefaultGoldenWarmup, goldenWarmupUsage)
 	a.Identity.Flags(fs)
 	a.BreakGlass.Flags(fs)
@@ -174,6 +177,12 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	}
 	// A JWT-SVID for herd-api names herd-api's own SPIFFE ID as its audience.
 	authn, key, err := authenticator("herd-api", src, self, policy, &a.BreakGlass, meter)
+	if err == nil && self.TrustDomain().Name() == LocalTrustDomain && !a.LocalCA {
+		err = fmt.Errorf("herd-api: its SVID %s is of %s, herd all-in-one's local development CA; a herd-api that is not all-in-one does not start on it", self, LocalTrustDomain)
+	}
+	if err == nil && a.LocalCA {
+		log.Printf("herd-api: running on herd all-in-one's local SPIFFE CA (%s): for development and tests only, never a cluster's identity", LocalTrustDomain)
+	}
 	if err != nil {
 		return err
 	}
@@ -204,6 +213,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	log.Printf("herd-api: record store %s, store id %s", a.Store, srv.StoreID())
 	// A node joins by its SVID; a join token is HS256, so only under the break-glass allowance (key set).
 	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
+		NotAfter: authn.BreakGlassUntil,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {
 				if c.Worker == w {

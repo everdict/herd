@@ -188,7 +188,7 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 // RunFlags registers `herdlet run`'s flags: the host flags, and a herdlet credential to dial with instead of a join.
 func (h *Herdlet) RunFlags(fs *flag.FlagSet) {
 	h.HostFlags(fs)
-	fs.StringVar(&h.API, "api", "", "herd-api address (with -token-file; default: the one the join recorded)")
+	fs.StringVar(&h.API, "api", "", "herd-api address: the first start asks it for the node's settings by the node's SVID (default: the address recorded then)")
 	fs.StringVar(&h.CredentialFile, "token-file", "", "break-glass only: an HS256 herdlet credential (herd-api token -herdlet); without it, the grant an earlier join left in -state")
 }
 
@@ -298,7 +298,10 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 	if err := join.ValidWorker(h.Worker); err != nil {
 		return State{}, fmt.Errorf("-worker: %w", err)
 	}
-	if s, err := readState(h.StateDir); err == nil && s.Grant.Worker == h.Worker && (h.API == "" || s.API == h.API) {
+	// A token join's HS256 credential is short-lived (join.DefaultCredentialTTL): a grant whose credential ended is
+	// joined again with the token.
+	if s, err := readState(h.StateDir); err == nil && s.Grant.Worker == h.Worker && (h.API == "" || s.API == h.API) &&
+		(s.Grant.Credential == "" || time.Now().Unix() < s.Grant.ExpiresAt) {
 		if h.granted == nil || sameStore(s.Grant.Snapshots, *h.granted) {
 			return s, nil
 		}
@@ -308,7 +311,7 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	if h.API == "" {
-		return State{}, errors.New("not joined yet: run `herdlet join <herd-api>`")
+		return State{}, errors.New("no herd-api to ask for this node's settings yet: give -api <herd-api>")
 	}
 	tok := h.Token
 	if tok == "" && h.TokenFile != "" {
@@ -630,6 +633,11 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		err := agent.Run(ctx, cc)
 		if status.Code(err) == codes.FailedPrecondition {
 			// herd-api refuses this host as it is (its snapshot store is not herd-api's): a retry cannot change that.
+			refused = err
+			cancel()
+		}
+		if st.Grant.Credential != "" && status.Code(err) == codes.Unauthenticated {
+			// The break-glass credential ended (or the allowance did): the next start joins again with the token.
 			refused = err
 			cancel()
 		}

@@ -1,7 +1,7 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
-# herdlet joins herd-api once as its node's SPIFFE identity, spiffe://<td>/herd/node/<worker>, from the node's SPIRE
-# agent (ADR 0001 A-60; herd-egress is spiffe://<td>/herd/egress/<worker>, or the node's), and reuses its grant after
-# that; without the agent neither starts. It keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
+# herdlet is its node's SPIFFE identity, spiffe://<td>/herd/node/<worker>, from the node's SPIRE agent (ADR 0001
+# A-60; herd-egress is spiffe://<td>/herd/egress/<worker>): no join token, its node's settings asked of herd-api by that
+# SVID at its first start and reused after; without the agent neither starts. It keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
 # docker config file, is the node's registry logins for private template images (-registry-auth, rendered 0600).
 # insecure_registries are registry hosts it pulls from over plain HTTP (-insecure-registry, comma-separated; ""
 # names none), a node-level fallback that defaults to none: a template's golden pull names its own plain-HTTP hosts
@@ -66,7 +66,7 @@ job "herdlet" {
       config {
         command = "local/herdlet"
         args = [
-          "join", "${HERD_API}",
+          "run", "-api", "${HERD_API}",
           "-state", "[[.HerdletStateDir]]",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",

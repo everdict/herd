@@ -1,6 +1,7 @@
 # herdlet on a joined host (docs/runbooks/join.md). HERD_API in /etc/herd/herdlet.env is herd-api's host:port. The
-# herdlet joins once as its node's SPIFFE identity (spiffe://<td>/herd/node/<worker>) from the host's SPIRE agent, and
-# later starts reuse the grant in the state directory; without the agent it does not start (ADR 0001 A-60). No
+# herdlet is its node's SPIFFE identity (spiffe://<td>/herd/node/<worker>) from the host's SPIRE agent: it needs no
+# join token, and asks herd-api for its node's settings by that SVID at its first start, reusing them after; without
+# the agent it does not start (ADR 0001 A-60). `herdlet join --token` is the break-glass fallback. No
 # -snapshots: the join hands the herdlet herd-api's S3 snapshot store.
 # /etc/herd/registry-auth.json (0600), a docker config file, is the node's registry logins for private template images
 # (-registry-auth); without the file pulls are anonymous.
@@ -14,7 +15,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/herd/herdlet.env
-ExecStart=/usr/local/bin/herdlet join ${HERD_API} -state /var/lib/herdlet \
+ExecStart=/usr/local/bin/herdlet run -api ${HERD_API} -state /var/lib/herdlet \
     -kernel /usr/local/share/herd/kernel -initrd /usr/local/share/herd/initrd.img \
     -virtiofsd /usr/local/libexec/herd/virtiofsd -registry-auth /etc/herd/registry-auth.json
 Restart=on-failure

@@ -193,10 +193,10 @@ func TestSPIFFEAcceptsX509SVID(t *testing.T) {
 		{runnerID, func(p auth.Principal) bool { return p.Spaces["acme"] == auth.RoleWrite }, "the exact id rule's write role"},
 		{"spiffe://herd.test/everdict/ws/acme/runner/r2", func(p auth.Principal) bool { return p.Spaces["acme"] == auth.RoleRead }, "the prefix rule's read role"},
 		{"spiffe://herd.test/herd/node/w1", func(p auth.Principal) bool {
-			return p.Herdlet && p.HerdletWorker() == "w1" && p.Spaces[auth.AllSpaces] == auth.RoleRead
+			return p.Herdlet && p.HerdletWorker() == "w1" && p.Spaces[auth.AllSpaces] == auth.RoleEgress
 		}, "a herdlet credential for worker w1 that reads every space"},
 		{"spiffe://herd.test/herd/operator/alice", func(p auth.Principal) bool { return p.Spaces[auth.AllSpaces] == auth.RoleOperator }, "the operator role"},
-		{"spiffe://herd.test/herd/egress/w1", func(p auth.Principal) bool { return p.Spaces[auth.AllSpaces] == auth.RoleRead && !p.Herdlet }, "read in every space"},
+		{"spiffe://herd.test/herd/egress/w1", func(p auth.Principal) bool { return p.Spaces[auth.AllSpaces] == auth.RoleEgress && !p.Herdlet }, "the egress role in every space, no herdlet"},
 	} {
 		p, err := s.Authenticate(withChain(c.x509SVID(t, tc.id, now.Add(-time.Minute), now.Add(time.Hour))), "")
 		if err != nil {

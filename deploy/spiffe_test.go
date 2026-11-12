@@ -304,3 +304,30 @@ func TestRouterFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalCAOnlyInAllInOne (A-60): herd all-in-one's development CA cannot serve a real install: a herd-api or
+// herd-router that is not all-in-one refuses to start on an SVID of its trust domain, herd.local.
+func TestLocalCAOnlyInAllInOne(t *testing.T) {
+	dev, err := localca.New(deploy.LocalTrustDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(policy, []byte(`{"rules": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := deploy.Identity{Source: must(dev.Source("spiffe://herd.local/herd/api", localca.Options{}))}
+	a := &deploy.API{Identity: api, Policy: policy, Store: "memory", Snapshots: t.TempDir()}
+	if err := waitErr(t, runAPI(t, a, listen(t)), 10*time.Second); err == nil || !strings.Contains(err.Error(), "local development CA") {
+		t.Errorf("herd-api on herd.local outside all-in-one: %v; want a refusal to start naming the local CA", err)
+	}
+	r := &deploy.Router{Identity: deploy.Identity{Source: must(dev.Source("spiffe://herd.local/herd/router", localca.Options{}))},
+		Policy: policy, API: "127.0.0.1:1", DefaultPort: 8080}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx, listen(t), listen(t)) }()
+	if err := waitErr(t, done, 10*time.Second); err == nil || !strings.Contains(err.Error(), "local development CA") {
+		t.Errorf("herd-router on herd.local outside all-in-one: %v; want a refusal to start naming the local CA", err)
+	}
+}

@@ -1,4 +1,4 @@
-# Runbook: several hosts, no cluster tool (`herdlet join`)
+# Runbook: several hosts, no cluster tool
 
 One control host runs herd-api and herd-router; every other host runs a herdlet and herd-egress and joins as its
 SPIFFE identity (ADR 0001 A-20, A-60). Hosts need only a network path to the control host's ports 7443 (herd-api) and
@@ -83,8 +83,9 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    ```
 
 3. Install and start herdlet and herd-egress (`dist/systemd/herdlet.service`, `dist/systemd/herd-egress.service`). The
-   first start joins as the node's SVID: herd-api grants it its snapshot store and the router tunnel address, which
-   it keeps in `/var/lib/herdlet`; later starts reuse them.
+   node needs no join token: its SPIRE agent gives it its SVID, and at its first start the herdlet asks herd-api, as
+   that SVID, for the node's settings (the snapshot store and the router tunnel address), which it keeps in
+   `/var/lib/herdlet`; later starts reuse them.
 
    ```sh
    sudo install -m 0644 herd/dist/systemd/herdlet.service herd/dist/systemd/herd-egress.service /etc/systemd/system/
@@ -92,10 +93,10 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    sudo systemctl enable --now herdlet herd-egress
    ```
 
-   The same join by hand, in the foreground:
+   The same by hand, in the foreground:
 
    ```sh
-   sudo herdlet join <control-host>:7443
+   sudo herdlet run -api <control-host>:7443
    ```
 
 4. Optional: private images. The unit passes `-registry-auth /etc/herd/registry-auth.json`: write the node's registry
@@ -148,7 +149,10 @@ fidelity and restore family as its runtime's compat attributes (ADR 0001 A-4).
 A join is refused to any caller that is not the node SVID of the worker it names (another node's, an operator's); a
 join cannot take the name of a worker that is connected.
 
-Break-glass: until every caller has an SVID, herd-api and herd-router accept HS256 bearers signed with `-key-file` only
-with `-break-glass-hs256-until <YYYY-MM-DD>` (each call counted on `herd_auth_breakglass_calls_total` at
-`http://<host>:7449/metrics`), and refuse to start once that day has passed. Under it a host may still join with a
-join token (`herd-api join-token -key-file ...`, `herdlet join --token`), on top of its node SVID.
+Fallback, break-glass only: until every caller has an SVID, herd-api and herd-router accept HS256 bearers signed with
+`-key-file` only with `-break-glass-hs256-until <YYYY-MM-DD>` (each call counted on `herd_auth_breakglass_calls_total`
+at `http://<host>:7449/metrics`), and refuse to start once that day has passed. Under it a host may join with a join
+token (`herd-api join-token -key-file ...`, `herdlet join <herd-api> --token <t>`): its grant carries an HS256 herdlet
+credential bound to that worker (it may register no other) and short-lived (`-credential-ttl`, 24 h, never past the
+allowance's end); when it ends the herdlet stops, and its next start joins again with the token. The SPIRE path above
+is the default; the token join is for the migration only.

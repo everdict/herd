@@ -56,7 +56,9 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    sudo systemctl enable --now herd
    ```
 
-5. Check the pool. The all-in-one is its own SPIFFE issuer (trust domain `herd.local`, ADR 0001 A-60): it keeps a local
+5. Check the pool. The all-in-one is its own SPIFFE issuer, for development and tests only (trust domain `herd.local`,
+   ADR 0001 A-60; herd-api logs that it runs on it, and a herd-api or herd-router that is not all-in-one refuses to
+   start on `herd.local`, so the development CA never serves a real install): it keeps a local
    CA in `/var/lib/herd/identity`, issues its components their SVIDs, and writes an operator's SVID there
    (`operator.pem`, `operator-key.pem`, `spiffe://herd.local/herd/operator/local`) with the bundle (`bundle.pem`).
    List the workers as that operator — this host's name appears, with platform `PLATFORM_LINUX_CLOUD_HYPERVISOR`:

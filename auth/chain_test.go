@@ -126,3 +126,23 @@ func TestBreakGlassIsDated(t *testing.T) {
 	_, err = c.Authenticate(ctx, hs)
 	wantRefused(t, "HS256 at the allowance's end", err, "allowance ended")
 }
+
+// TestEgressRoleReadsOnlyEgressPolicies (A-60): herd-egress's role reads an actor's egress policy and nothing else of
+// the space: no actor, template or tag read, no write; every other role reads egress policies too.
+func TestEgressRoleReadsOnlyEgressPolicies(t *testing.T) {
+	az := auth.SpaceRoles{}
+	eg := auth.Principal{Subject: "spiffe://herd.test/herd/egress/w1", Scheme: auth.SchemeX509SVID, Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleEgress}}
+	if err := az.Authorize(eg, "acme", auth.ActionReadEgress); err != nil {
+		t.Errorf("the egress role reading an egress policy: %v", err)
+	}
+	for _, a := range []auth.Action{auth.ActionRead, auth.ActionWrite} {
+		if err := az.Authorize(eg, "acme", a); err == nil {
+			t.Errorf("the egress role was allowed action %d", a)
+		}
+	}
+	for _, r := range []auth.Role{auth.RoleRead, auth.RoleWrite, auth.RoleOperator} {
+		if err := az.Authorize(auth.Principal{Spaces: map[string]auth.Role{"acme": r}}, "acme", auth.ActionReadEgress); err != nil {
+			t.Errorf("role %s reading an egress policy: %v", r, err)
+		}
+	}
+}

@@ -47,7 +47,7 @@ func (s *Server) egressTarget(ctx context.Context, actor *ateapi.ObjectRef, a au
 	if err != nil {
 		return store.Key{}, err
 	}
-	if a == auth.ActionRead {
+	if a != auth.ActionWrite {
 		if err := s.authorize(ctx, space, a); err != nil {
 			return store.Key{}, err
 		}
@@ -69,7 +69,8 @@ func (s *Server) egressTarget(ctx context.Context, actor *ateapi.ObjectRef, a au
 
 // GetActorEgressPolicy returns an actor's egress policy.
 func (s *Server) GetActorEgressPolicy(ctx context.Context, req *ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionRead)
+	// Reading an egress policy is herd-egress's whole grant (auth.RoleEgress); every reader of the space may too.
+	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionReadEgress)
 	if err != nil {
 		return nil, err
 	}
