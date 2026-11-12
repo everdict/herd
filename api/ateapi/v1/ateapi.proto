@@ -450,6 +450,18 @@ message Actor {
   //
   // +k8s:optional
   ActorStatus status = 5;
+
+  // herd addition (PLT-489): opaque bytes the creator attaches at
+  // CreateActor, at most 4096, stored verbatim and returned by GetActor and
+  // ListActors. Set once: an UpdateActor that carries other bytes here is
+  // refused InvalidArgument, and one that carries none leaves them as they
+  // are. herd never reads them; Everdict stores its provision grant here (a
+  // JWS the control plane signed after the session row was durable).
+  //
+  // +k8s:optional
+  // +k8s:maxLength=4096
+  // +k8s:immutable
+  bytes provenance = 1000;
 }
 
 // EgressPolicy is an egress policy resource nested under an Actor. An Actor has
@@ -816,6 +828,18 @@ message ActorStatus {
   // +k8s:minimum=0
   // +k8s:update=NoUnset
   int32 last_assigned_generation = 7;
+
+  // herd addition (PLT-489): who created the Actor, as herd-api
+  // authenticated the CreateActor call: the caller's SPIFFE ID
+  // ("spiffe://<trust domain>/<path>"), or "hs256:<sub>" for a break-glass
+  // HS256 bearer. Set by the server at CreateActor and immutable; whatever a
+  // request carries here is ignored. Empty for an actor created before
+  // PLT-489. A write on the actor (delete, suspend, resume, tag, egress
+  // policy, exec through the router) is allowed to this caller or to an
+  // operator (ADR 0001 A-60).
+  //
+  // +k8s:optional
+  string creator = 1000;
 }
 
 // ActorCrash describes the failure that moved an Actor to CRASHED.
