@@ -258,7 +258,7 @@ func (a *AllInOne) Run(ctx context.Context, ready func(Addrs)) error {
 		if err := ensureCA(caCert, caKey); err != nil {
 			return fmt.Errorf("herd-egress CA: %w", err)
 		}
-		eg := &Egress{API: addrs.API, Identity: Identity{Source: ids.egress}, Bindings: h.EgressBindings,
+		eg := &Egress{API: addrs.API, Identity: Identity{Source: ids.egress}, Worker: h.Worker, Bindings: h.EgressBindings,
 			CACert: caCert, CAKey: caKey, DNSAnswer: "198.18.0.1", Interval: time.Second,
 			Secrets: a.Secrets, AllowPrefixes: h.EgressAllow, NewGateway: a.NewGateway,
 			HostServicesFile: a.HostServicesFile, Routers: list{addrs.Router, addrs.Tunnel}}

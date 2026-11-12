@@ -507,6 +507,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		return err
 	}
 	defer h.closeID()
+	ctx, changed := pinIdentity(ctx, h.src, "herdlet")
 	if h.JoinOnly {
 		return nil
 	}
@@ -666,6 +667,9 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		return err
 	})
 	<-done
+	if cerr := changed(); cerr != nil {
+		return cerr
+	}
 	if refused != nil {
 		return fmt.Errorf("%w (this host's join grant: %s; remove it and join again with a new join token)", refused, StatePath(h.StateDir))
 	}

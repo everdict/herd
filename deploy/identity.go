@@ -91,6 +91,49 @@ func (i *Identity) Open(ctx context.Context, who string) (auth.Source, func(), e
 	return src, closer, nil
 }
 
+// IdentityCheck is how often a component checks that its SVID still names the identity it started as.
+var IdentityCheck = 5 * time.Second
+
+// ErrIdentityChanged is why a component stops when its Workload API rotates it to another SPIFFE ID.
+var ErrIdentityChanged = errors.New("the SPIFFE identity changed")
+
+// pinIdentity holds a component to the SPIFFE ID it started as (review 8): it checks src every IdentityCheck, and when
+// the SVID names another ID it logs why and cancels the returned context. changed answers the error the component
+// stops with then (nil while the identity holds), so it exits non-zero and its supervisor starts it again as what it
+// now is. A rotation of the same ID is the Workload API's normal stream.
+func pinIdentity(ctx context.Context, src auth.Source, who string) (context.Context, func() error) {
+	start, err := auth.Self(src)
+	ctx, cancel := context.WithCancelCause(ctx)
+	if err != nil {
+		cancel(err)
+		return ctx, func() error { return context.Cause(ctx) }
+	}
+	go func() {
+		t := time.NewTicker(IdentityCheck)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			now, err := auth.Self(src)
+			if err == nil && now != start {
+				err = fmt.Errorf("%w: %s started as %s, and the Workload API now names it %s; it stops so that it starts again as what it is", ErrIdentityChanged, who, start, now)
+				log.Printf("%v", err)
+				cancel(err)
+				return
+			}
+		}
+	}()
+	return ctx, func() error {
+		if err := context.Cause(ctx); errors.Is(err, ErrIdentityChanged) {
+			return err
+		}
+		return nil
+	}
+}
+
 // requireID refuses a component whose SVID is not the herd path its peers dial it as.
 func requireID(who string, src auth.Source, segs ...string) (spiffeid.ID, error) {
 	self, err := auth.Self(src)

@@ -38,7 +38,7 @@ func startEgress(t *testing.T) *egressUnderTest {
 	}
 	e := &egressUnderTest{bindings: filepath.Join(dir, "egress-bindings.json"), addr: ln.Addr().String()}
 	gw := make(chan *egress.Gateway, 1)
-	eg := &Egress{API: "127.0.0.1:1", Token: "t", Identity: testEgressIdentity(t), Bindings: e.bindings, CAOut: filepath.Join(dir, "ca.pem"),
+	eg := &Egress{API: "127.0.0.1:1", Token: "t", Identity: testEgressIdentity(t), Worker: "node-1", Bindings: e.bindings, CAOut: filepath.Join(dir, "ca.pem"),
 		DNSAnswer: "198.18.0.1", Interval: time.Hour,
 		NewGateway: func(c egress.Config) (*egress.Gateway, error) {
 			logged := c.OnEvent

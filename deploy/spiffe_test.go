@@ -2,14 +2,15 @@ package deploy_test
 
 import (
 	"context"
-	"flag"
 	"crypto/tls"
+	"flag"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +19,10 @@ import (
 	"github.com/everdict/herd/auth/localca"
 	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
+	"github.com/spiffe/go-spiffe/v2/bundle/jwtbundle"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -417,5 +421,59 @@ func TestHerdletRelinksWithItsCurrentSVID(t *testing.T) {
 			t.Fatalf("node-1 is not a live worker %s after it started, with SVIDs of %s", 4*ttl, ttl)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// switchable is an identity source whose SVID a test replaces.
+type switchable struct {
+	mu  sync.Mutex
+	cur auth.Static
+}
+
+func (s *switchable) set(v auth.Static) { s.mu.Lock(); s.cur = v; s.mu.Unlock() }
+func (s *switchable) get() auth.Static  { s.mu.Lock(); defer s.mu.Unlock(); return s.cur }
+func (s *switchable) GetX509SVID() (*x509svid.SVID, error) {
+	return s.get().GetX509SVID()
+}
+func (s *switchable) GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bundle.Bundle, error) {
+	return s.get().GetX509BundleForTrustDomain(td)
+}
+func (s *switchable) GetJWTBundleForTrustDomain(td spiffeid.TrustDomain) (*jwtbundle.Bundle, error) {
+	return s.get().GetJWTBundleForTrustDomain(td)
+}
+
+// TestRotationToAnotherIDStops (review 8): a Workload API that rotates a process to another SPIFFE ID is refused: the
+// process stops with an error naming both IDs, so its supervisor restarts it and it starts, or refuses to, as what it
+// now is.
+func TestRotationToAnotherIDStops(t *testing.T) {
+	prev := deploy.IdentityCheck
+	deploy.IdentityCheck = 100 * time.Millisecond
+	t.Cleanup(func() { deploy.IdentityCheck = prev })
+	sw := &switchable{}
+	sw.set(must(testCA(t).Source("spiffe://herd.test/herd/api", localca.Options{})))
+	a := &deploy.API{Identity: deploy.Identity{Source: sw}, Policy: noRules(t), Store: "memory", Snapshots: t.TempDir()}
+	done := runAPI(t, a, listen(t))
+	time.Sleep(500 * time.Millisecond)
+	sw.set(must(testCA(t).Source("spiffe://herd.test/herd/operator/someone", localca.Options{})))
+	err := waitErr(t, done, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "spiffe://herd.test/herd/api") || !strings.Contains(err.Error(), "spiffe://herd.test/herd/operator/someone") {
+		t.Errorf("herd-api rotated to another SPIFFE ID: %v; want it to stop with an error naming both", err)
+	}
+}
+
+// TestEgressRequiresItsOwnSVID (review 8): herd-egress runs only as herd-egress of this node's worker.
+func TestEgressRequiresItsOwnSVID(t *testing.T) {
+	for _, c := range []struct{ id, reason string }{
+		{"spiffe://herd.test/herd/node/w1", "not a herd-egress"},
+		{"spiffe://herd.test/herd/egress/w2", `worker "w2"`},
+	} {
+		eg := &deploy.Egress{API: "127.0.0.1:1", Worker: "w1", Identity: deploy.Identity{Source: source(t, c.id)},
+			Bindings: filepath.Join(t.TempDir(), "b.json"), CAOut: filepath.Join(t.TempDir(), "ca.pem"), DNSAnswer: "198.18.0.1"}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := eg.Run(ctx, listen(t), must(net.ListenPacket("udp", "127.0.0.1:0")))
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), c.reason) {
+			t.Errorf("herd-egress of w1 as %s: %v; want a refusal naming %q", c.id, err, c.reason)
+		}
 	}
 }

@@ -149,7 +149,7 @@ func TestHostServicesFileRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	gw := make(chan *egress.Gateway, 1)
-	eg := &Egress{API: "127.0.0.1:1", Token: "t", Identity: testEgressIdentity(t), Bindings: filepath.Join(dir, "bindings.json"), CAOut: filepath.Join(dir, "ca.pem"),
+	eg := &Egress{API: "127.0.0.1:1", Token: "t", Identity: testEgressIdentity(t), Worker: "node-1", Bindings: filepath.Join(dir, "bindings.json"), CAOut: filepath.Join(dir, "ca.pem"),
 		DNSAnswer: "198.18.0.1", Interval: 20 * time.Millisecond, HostServicesFile: path,
 		NewGateway: func(c egress.Config) (*egress.Gateway, error) {
 			g, err := egress.New(c)

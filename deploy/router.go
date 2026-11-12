@@ -57,6 +57,7 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 		return err
 	}
 	defer closeID()
+	ctx, changed := pinIdentity(ctx, src, "herd-router")
 	self, err := requireID("herd-router", src, "router")
 	if err != nil {
 		return err
@@ -110,5 +111,8 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 	g.Stop()
 	_ = hs.Close()
 	rt.Wait()
+	if cerr := changed(); cerr != nil {
+		return cerr
+	}
 	return err
 }

@@ -163,6 +163,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		return err
 	}
 	defer closeID()
+	ctx, changed := pinIdentity(ctx, src, "herd-api")
 	self, err := requireID("herd-api", src, "api")
 	if err != nil {
 		return err
@@ -272,6 +273,9 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	err = g.Serve(ln)
 	srv.Close()
 	srv.Wait()
+	if err := changed(); err != nil {
+		return err
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
