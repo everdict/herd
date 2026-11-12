@@ -3,10 +3,12 @@ package auth
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The counters of the allowances ADR 0001 A-60 keeps, served in the Prometheus text format (Meter.Handler).
@@ -24,8 +26,11 @@ var metricHelp = map[string]string{
 
 // Meter is a set of counters keyed by name and labels. A nil Meter counts nothing.
 type Meter struct {
-	mu sync.Mutex
-	c  map[string]map[string]uint64 // name → rendered labels → count
+	// Now is the clock the log limit reads (default time.Now).
+	Now  func() time.Time
+	mu   sync.Mutex
+	c    map[string]map[string]uint64 // name → rendered labels → count
+	logs map[string]*logWindow        // Note's limit per key
 }
 
 // NewMeter returns an empty meter; the A-60 counters are listed (at no samples) from the start.
@@ -111,3 +116,52 @@ func (m *Meter) Handler() http.Handler {
 		_ = m.WriteText(w)
 	})
 }
+
+// LogEvery is how often Note logs one summary line per key: a polling caller is counted exactly on the meter, while
+// the log carries its first call and then a sum per minute (ADR 0001 A-60).
+const LogEvery = time.Minute
+
+// logWindow is one key's log limit: when its last line was written and how many events came since.
+type logWindow struct {
+	since time.Time
+	n     int
+}
+
+// Note logs an event of key without flooding the log: the key's first event logs first at once; later ones are
+// summed, and the first event a LogEvery or more after the key's last line logs summary(n, elapsed), n being the
+// events since that line, this one included. Counting stays the caller's (Inc), exact per event. A key whose events
+// stop leaves its last sum unlogged; the counter has it. A nil Meter logs every event's first line.
+func (m *Meter) Note(key, first string, summary func(n int, elapsed time.Duration) string) {
+	if m == nil {
+		log.Print(first)
+		return
+	}
+	m.mu.Lock()
+	now := time.Now()
+	if m.Now != nil {
+		now = m.Now()
+	}
+	if m.logs == nil {
+		m.logs = map[string]*logWindow{}
+	}
+	w, seen := m.logs[key]
+	line := ""
+	switch {
+	case !seen:
+		m.logs[key] = &logWindow{since: now}
+		line = first
+	default:
+		w.n++
+		if d := now.Sub(w.since); d >= LogEvery {
+			line = summary(w.n, d)
+			w.since, w.n = now, 0
+		}
+	}
+	m.mu.Unlock()
+	if line != "" {
+		log.Print(line)
+	}
+}
+
+// Seconds renders an elapsed time for a summary line ("61s").
+func Seconds(d time.Duration) string { return fmt.Sprintf("%ds", int(d.Seconds())) }

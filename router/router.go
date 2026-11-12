@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -150,7 +149,12 @@ func (w *actorWrite) allow(space, name, creator string) *routeError {
 	w.decided = true
 	if a.Counted() {
 		w.rt.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
-		log.Printf("herd-router: actor %s/%s has no creator recorded; %s reaches it under the %s allowance (ADR 0001 A-60)", space, name, w.p.Creator(), a)
+		caller := w.p.Creator()
+		w.rt.cfg.Meter.Note("unowned "+string(a)+" "+caller,
+			fmt.Sprintf("herd-router: actor %s/%s has no creator recorded; %s reaches it under the %s allowance (ADR 0001 A-60); later such requests by it are summed once a minute", space, name, caller, a),
+			func(n int, d time.Duration) string {
+				return fmt.Sprintf("herd-router: %d requests by %s to actors with no creator recorded (%s) in the last %s", n, caller, a, auth.Seconds(d))
+			})
 	}
 	return nil
 }

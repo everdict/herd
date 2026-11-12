@@ -3,8 +3,8 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
+	"time"
 )
 
 // Chain is herd's authenticator since PLT-489 (ADR 0001 A-60): SPIFFE SVIDs, with HS256 shared-key bearers kept as
@@ -30,7 +30,11 @@ func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error
 			return Principal{}, err
 		}
 		c.Meter.Inc(MetricBreakGlassCalls, "subject", p.Subject)
-		log.Printf("auth: break-glass HS256 call by subject %q (ADR 0001 A-60)", p.Subject)
+		c.Meter.Note("break-glass "+p.Subject,
+			fmt.Sprintf("auth: break-glass HS256 call by subject %q (ADR 0001 A-60); its later calls are summed once a minute", p.Subject),
+			func(n int, d time.Duration) string {
+				return fmt.Sprintf("auth: %d break-glass HS256 calls by subject %q in the last %s", n, p.Subject, Seconds(d))
+			})
 		return p, nil
 	}
 	if c.SVID == nil {
