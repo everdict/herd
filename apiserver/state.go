@@ -9,6 +9,7 @@ import (
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/store"
+	"github.com/everdict/herd/vmm"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -52,6 +53,9 @@ type actorState struct {
 	// Instance is the herdlet process (link.Register.Instance) that answered the last start of the actor's VM done:
 	// the process that holds it. Empty: not known (a herdlet older than PLT-371), and then no restart is concluded.
 	Instance string `json:"instance,omitempty"`
+	// Restored is the fidelity the herdlet answered it restored the actor's VM at in its last start (RestoredFidelityHeader);
+	// unspecified for a cold boot or a herdlet that did not say.
+	Restored vmm.Fidelity `json:"restored,omitempty"`
 }
 
 type actorRec struct {
@@ -149,6 +153,16 @@ func showOwed(ctx context.Context, ar *actorRec) {
 	if o := ar.st.Owed; o != nil {
 		_ = grpc.SetTrailer(ctx, metadata.Pairs(OwedHeader, o.Op+": "+o.Reason))
 	}
+}
+
+// showRestored answers, for a running actor, the fidelity its VM was restored at (RestoredFidelityHeader).
+func showRestored(ctx context.Context, ar *actorRec) {
+	if ar.st.Restored == vmm.FidelityUnspecified || ar.actor.Status.GetState() != ateapi.ActorState_ACTOR_STATE_RUNNING {
+		return
+	}
+	md := metadata.Pairs(RestoredFidelityHeader, ateapi.SnapshotFidelity(ar.st.Restored).String())
+	_ = grpc.SetHeader(ctx, md)
+	_ = grpc.SetTrailer(ctx, md)
 }
 
 // vmID is the VM's id on its herdlet: the actor's uid.

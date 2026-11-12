@@ -435,6 +435,14 @@ func TestConcurrentMemoryForks(t *testing.T) {
 			t.Errorf("%s reads %q, %v after both wrote; want its own write", id, b, err)
 		}
 	}
+	// Each answers what it really restored at (PLT-496): the one with the memory MEMORY, the cold boot VOLUMES.
+	got := map[vmm.Fidelity]int{}
+	for _, id := range forks {
+		got[h.m.Restored(id)]++
+	}
+	if got[vmm.FidelityMemory] != 1 || got[vmm.FidelityVolumes] != 1 {
+		t.Errorf("forks restored at %v; want one MEMORY and one VOLUMES (the cold boot)", got)
+	}
 	h.vm.mu.Lock()
 	defer h.vm.mu.Unlock()
 	if len(h.vm.restored) != 1 || len(h.vm.booted) != 2 {

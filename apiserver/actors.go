@@ -186,7 +186,15 @@ func (s *Server) start(ctx context.Context, ar *actorRec, op string, failedState
 		}
 		ar.st.Owed, ar.st.Restore = nil, nil
 		ar.st.Instance = o.Instance
-		return s.save(ctx, ar)
+		ar.st.Restored = vmm.FidelityUnspecified
+		if w.Op == link.OpRestore {
+			ar.st.Restored = o.Restored
+		}
+		if err := s.save(ctx, ar); err != nil {
+			return err
+		}
+		showRestored(ctx, ar)
+		return nil
 	case link.ResultFailed:
 		ar.st.Worker, ar.st.Owed, ar.st.Restore = "", nil, nil
 		ar.setState(failedState)
@@ -345,6 +353,7 @@ func (s *Server) GetActor(ctx context.Context, req *ateapi.GetActorRequest) (*at
 		return nil, toStatus(err)
 	}
 	showOwed(ctx, ar)
+	showRestored(ctx, ar)
 	return ar.view(), nil
 }
 

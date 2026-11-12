@@ -245,6 +245,7 @@ func (s *Server) ResumeActor(ctx context.Context, req *ateapi.ResumeActorRequest
 	}
 	switch ar.actor.Status.GetState() {
 	case ateapi.ActorState_ACTOR_STATE_RUNNING:
+		showRestored(ctx, ar)
 		return &ateapi.ResumeActorResponse{Actor: ar.view(), Resumed: false}, nil
 	case ateapi.ActorState_ACTOR_STATE_RESUMING:
 		logBegun(ar, "resume")

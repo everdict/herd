@@ -43,6 +43,13 @@ const OwedHeader = "herd-owed"
 // names the record store herd-api answers from on every Control and Capabilities call (StoreID, PLT-458).
 const StoreIDHeader = "herd-store-id"
 
+// RestoredFidelityHeader is the response metadata (gRPC header, and trailer) that names the fidelity a running actor's VM
+// was really restored at, in Substrate's SnapshotFidelity names (SNAPSHOT_FIDELITY_MEMORY, _ROOTFS, _VOLUMES): on a
+// ResumeActor, on a CreateActor that restored from a tag, and on GetActor, so a resume whose answer was owed is read
+// there once it is settled. A MEMORY snapshot the herdlet cold-booted from its volume tree is VOLUMES. Absent for a
+// cold boot, and where the herdlet did not say (one older than PLT-496).
+const RestoredFidelityHeader = "herd-restored-fidelity"
+
 // Config wires a Server.
 type Config struct {
 	Store     store.Store

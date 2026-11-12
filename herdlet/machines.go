@@ -73,8 +73,9 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			return link.Outcome{Result: link.ResultFailed, Reason: "restore names no snapshot"}
 		}
 		if p, _ := m.Inspect(ctx, w.VM); p == vmm.PresencePresent {
+			// A restore repeated (its answer was lost): the fidelity this host restored the VM at, if it was this host.
 			a.reopen(w.VM)
-			return link.Outcome{Result: link.ResultDone}
+			return link.Outcome{Result: link.ResultDone, Restored: m.Restored(w.VM)}
 		}
 		rc, err := a.openSnapshot(ctx, *w.Snapshot)
 		if err != nil {
@@ -88,7 +89,7 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			return classify(err)
 		}
 		a.reopen(w.VM)
-		return link.Outcome{Result: link.ResultDone}
+		return link.Outcome{Result: link.ResultDone, Restored: m.Restored(w.VM)}
 	case link.OpDelete, link.OpInspect:
 		var p vmm.Presence
 		var err error
