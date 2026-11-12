@@ -3,6 +3,7 @@ package router_test
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -40,6 +41,19 @@ func wantCode(t *testing.T, what string, err error, c codes.Code) {
 	if got := status.Code(err); got != c {
 		t.Errorf("%s: code %v (%v), want %v", what, got, err, c)
 	}
+}
+
+// forge is tok with one byte in the middle of its signature flipped: a signature that decodes to other bytes. Changing
+// the last base64url characters is not one, since their low bits are padding a decoder may ignore.
+func forge(t *testing.T, tok string) string {
+	t.Helper()
+	i := strings.LastIndex(tok, ".")
+	sig, err := base64.RawURLEncoding.DecodeString(tok[i+1:])
+	if err != nil || len(sig) == 0 {
+		t.Fatalf("token signature: %v", err)
+	}
+	sig[len(sig)/2] ^= 0xff
+	return tok[:i+1] + base64.RawURLEncoding.EncodeToString(sig)
 }
 
 func listDir(ctx context.Context, c *client) (string, error) {
@@ -87,7 +101,7 @@ func TestRouteByName(t *testing.T) {
 		reason              router.Reason
 	}{
 		{"no token", space1 + "/a1", "", codes.Unauthenticated, router.ReasonUnauthenticated},
-		{"forged token", space1 + "/a1", tok[:len(tok)-2] + "xx", codes.Unauthenticated, router.ReasonUnauthenticated},
+		{"forged token", space1 + "/a1", forge(t, tok), codes.Unauthenticated, router.ReasonUnauthenticated},
 		{"read-only token", space1 + "/a1", s.token(map[string]auth.Role{space1: auth.RoleRead}, false, "ro"), codes.PermissionDenied, router.ReasonPermissionDenied},
 		{"herdlet credential", space1 + "/a1", s.token(map[string]auth.Role{auth.AllSpaces: auth.RoleWrite}, true, "h1"), codes.PermissionDenied, router.ReasonPermissionDenied},
 		{"no atespace", "a1", tok, codes.InvalidArgument, router.ReasonBadTarget},
