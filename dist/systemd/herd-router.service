@@ -6,6 +6,7 @@ Description=herd-router
 After=herd-api.service
 
 [Service]
+User=herd-router
 ExecStart=/usr/local/bin/herd-router -listen 0.0.0.0:8443 -tunnel-listen 0.0.0.0:7444 -api 127.0.0.1:7443
 Restart=on-failure
 RestartSec=2

@@ -15,7 +15,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/herd/herdlet.env
-ExecStart=[[.BinDir]]/herdlet run -api ${HERD_API} -state [[.HerdletStateDir]] \
+ExecStart=[[.BinDir]]/herdlet run -api ${HERD_API} -state [[.HerdletStateDir]] -egress-ca /var/lib/herd-egress/egress-ca.pem \
     -kernel [[.GuestDir]]/kernel -initrd [[.GuestDir]]/initrd.img \
     -virtiofsd [[.LibexecDir]]/virtiofsd -registry-auth /etc/herd/registry-auth.json
 Restart=on-failure

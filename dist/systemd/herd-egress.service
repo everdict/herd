@@ -6,9 +6,13 @@ Description=herd-egress
 After=herdlet.service
 
 [Service]
+# No root and no capability: ports above 1024, SO_ORIGINAL_DST on its own socket. The uid is its SPIRE entry's selector
+# (unix:uid); /run/herd (the bindings acknowledgements) and /var/lib/herd-egress (its CA) are its own.
+User=herd-egress
+StateDirectory=herd-egress
 EnvironmentFile=/etc/herd/herdlet.env
 ExecStart=/usr/local/bin/herd-egress -api ${HERD_API} \
-    -bindings /run/herd/egress-bindings.json -ca-out /var/lib/herdlet/egress-ca.pem
+    -bindings /run/herd/egress-bindings.json -ca-out /var/lib/herd-egress/egress-ca.pem
 RuntimeDirectory=herd
 RuntimeDirectoryPreserve=yes
 Restart=on-failure

@@ -10,6 +10,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# A uid of its own, the selector of its SPIRE entry (unix:uid); the data directory is its own.
+User=herd
+StateDirectory=herd
 EnvironmentFile=/etc/herd/herd-api.env
 ExecStart=[[.BinDir]]/herd-api -listen 0.0.0.0:7443 \
     -store bolt:[[.DataDir]]/herd.db -snapshots [[.SnapshotDir]] -advertise-tunnel ${HERD_ADVERTISE_TUNNEL} \

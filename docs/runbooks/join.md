@@ -10,13 +10,28 @@ Identity: every herd process is a SPIFFE identity it reads from the host's SPIRE
 first: a SPIRE server for the install's trust domain `<td>`, an agent on every host, and these registration entries
 (by the process's unix user or its unit, as the install attests workloads):
 
-| process | SPIFFE ID |
-|---|---|
-| herd-api | `spiffe://<td>/herd/api` |
-| herd-router | `spiffe://<td>/herd/router` |
-| herdlet on worker `<w>` | `spiffe://<td>/herd/node/<w>` (the worker name is the ID's) |
-| herd-egress on worker `<w>` | `spiffe://<td>/herd/egress/<w>` |
-| an operator's tools | `spiffe://<td>/herd/operator/<name>` |
+| process | runs as | SPIFFE ID | selector |
+|---|---|---|---|
+| herd-api | `herd` (uid 64441) | `spiffe://<td>/herd/api` | `unix:uid:64441` |
+| herd-router | `herd-router` (uid 64442) | `spiffe://<td>/herd/router` | `unix:uid:64442` |
+| herd-egress on worker `<w>` | `herd-egress` (uid 64443) | `spiffe://<td>/herd/egress/<w>` | `unix:uid:64443`, on `<w>`'s agent |
+| herdlet on worker `<w>` | root | `spiffe://<td>/herd/node/<w>` (the worker name is the ID's) | `unix:uid:0`, on `<w>`'s agent |
+| an operator's tools | the operator's user | `spiffe://<td>/herd/operator/<name>` | `unix:uid:<theirs>` |
+
+Each herd process runs as a uid of its own, so an agent tells them apart by uid alone (`unix:uid`, no `sys_ptrace`,
+which `unix:path` needs). Create the users on every host, with these uids, before the units start:
+
+```sh
+sudo useradd --system --uid 64441 --no-create-home --shell /usr/sbin/nologin herd
+sudo useradd --system --uid 64442 --no-create-home --shell /usr/sbin/nologin herd-router
+sudo useradd --system --uid 64443 --no-create-home --shell /usr/sbin/nologin herd-egress
+```
+
+herd-api needs only its ports (7443, 7449), its data directory and S3; the unit runs it as `herd` and gives it
+`/var/lib/herd` (`StateDirectory=herd`). herd-egress needs no root and no capability: its ports are above 1024 and the
+original destination of a redirected flow is a `getsockopt(SO_ORIGINAL_DST)` on its own socket; it owns `/run/herd`
+(where it acknowledges the herdlet's bindings) and `/var/lib/herd-egress` (its CA, which the herdlet hands the guests,
+`-egress-ca`). The herdlet stays root: `/dev/kvm`, TAP devices, nftables, conntrack and the VMs' cgroups need it.
 
 Nodes, herd-egress and operators need no grant: theirs are built in. The workloads that call herd (Everdict's
 herders, `spiffe://<td>/everdict/ws/<ws>/runner/<runner>`) get atespace roles from `/etc/herd/spiffe-policy.json` on

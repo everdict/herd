@@ -2,7 +2,8 @@
 # places the actors. The bbolt store allows one herd-api, so count = 1 on the node that holds the herd-data host
 # volume. Snapshots go to the S3 bucket named in the job's Nomad variable, which joins hand to every herdlet. Both
 # take their SPIFFE identity from the node's SPIRE agent (the spire-agent-socket host volume, ADR 0001 A-60): herd-api
-# is spiffe://<td>/herd/api, herd-router spiffe://<td>/herd/router; without the agent neither starts. The workloads'
+# is spiffe://<td>/herd/api (uid herd), herd-router spiffe://<td>/herd/router (uid herd-router); without the agent
+# neither starts. The workloads'
 # atespace grants are the job variable's spiffe_policy.
 # Rendered by deploy/artifacts; edit the template, not this file.
 # The base URL every client fetches herd_linux_<arch>.tar.gz from: a mirror of the release (docs/runbooks/nomad.md
@@ -54,8 +55,11 @@ job "herd-api" {
       provider = "nomad"
     }
 
+    # Each process runs as a uid of its own (docs/runbooks/nomad.md, Cluster prerequisites), the selector its SPIRE
+    # registration entry names (unix:uid): herd-api only needs its ports, the herd-data volume (owned by herd) and S3.
     task "herd-api" {
       driver = "exec"
+      user   = "herd"
 
       artifact {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
@@ -105,6 +109,7 @@ job "herd-api" {
 
     task "herd-router" {
       driver = "exec"
+      user   = "herd-router"
 
       artifact {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"

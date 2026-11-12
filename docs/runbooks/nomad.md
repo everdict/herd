@@ -16,6 +16,17 @@ reach it with no lab allowance and no address in a job file. An actor still need
   volume `spire-agent-socket` (`client { host_volume "spire-agent-socket" { path = "/run/spire/agent/sockets" read_only
   = true } }`), and the registration entries of join.md's Identity table. herd-api and herd-router read their SVIDs
   through it, herdlet and herd-egress (raw_exec) through the host's socket; none starts without one.
+- The users of join.md's Identity table on every client (`herd` 64441, `herd-router` 64442, `herd-egress` 64443): the
+  jobs run herd-api, herd-router and herd-egress as them (`user = ...`), the herdlet as root, so each agent selects them
+  by `unix:uid` without `sys_ptrace`. The `herd-data` host volume's directory is owned by `herd`. herd-egress's two
+  directories are its own; on every Linux client, `/etc/tmpfiles.d/herd.conf`:
+
+  ```
+  d /run/herd 0750 herd-egress herd-egress -
+  d /var/lib/herd-egress 0755 herd-egress herd-egress -
+  ```
+
+  then `sudo systemd-tmpfiles --create /etc/tmpfiles.d/herd.conf` (and at every boot by systemd).
 
 - Nomad 1.7+ (Nomad variables, `nomadService` templates), with the `exec` and `raw_exec` drivers enabled on the
   clients (`plugin "raw_exec" { config { enabled = true } }`): herdlet needs `/dev/kvm`, TAP devices and nftables on

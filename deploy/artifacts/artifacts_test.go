@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -528,5 +529,51 @@ func TestNoArtifactSetsTheCallTimeout(t *testing.T) {
 	}
 	if apis == 0 {
 		t.Fatal("no artifact runs herd-api: the test read nothing")
+	}
+}
+
+// TestEachProcessHasItsOwnUID (PLT-489, ADR 0001 A-60): on a node, SPIRE tells herd-api, herd-router, herd-egress and
+// the herdlet apart by uid (unix:uid selectors, no sys_ptrace), so each artifact runs herd-api as herd, herd-router as
+// herd-router and herd-egress as herd-egress, and the herdlet, which needs root for /dev/kvm, TAPs and nftables, as
+// root: every uid differs.
+func TestEachProcessHasItsOwnUID(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"herd-api": "herd", "herd-router": "herd-router", "herd-egress": "herd-egress", "herdlet": ""}
+	task := regexp.MustCompile(`(?s)task "([a-z-]+)" \{\s*driver = "[a-z_]+"\s*(?:user   = "([a-z-]+)")?`)
+	unit := regexp.MustCompile(`(?m)^User=(.+)$`)
+	seen := 0
+	for _, f := range files {
+		switch f.Kind {
+		case artifacts.Nomad:
+			for _, m := range task.FindAllSubmatch(f.Data, -1) {
+				name, user := string(m[1]), string(m[2])
+				if w, ok := want[name]; ok {
+					seen++
+					if user != w {
+						t.Errorf("%s: task %s runs as %q, want %q", f.Path, name, user, w)
+					}
+				}
+			}
+		case artifacts.Systemd:
+			name := strings.TrimSuffix(path.Base(f.Path), ".service")
+			w, ok := want[name]
+			if !ok {
+				continue
+			}
+			seen++
+			user := ""
+			if m := unit.FindSubmatch(f.Data); m != nil {
+				user = string(m[1])
+			}
+			if user != w {
+				t.Errorf("%s runs as %q, want %q", f.Path, user, w)
+			}
+		}
+	}
+	if seen != 8 {
+		t.Fatalf("checked %d herd-api, herd-router, herd-egress and herdlet tasks and units, want 8 (4 Nomad tasks, 4 units)", seen)
 	}
 }

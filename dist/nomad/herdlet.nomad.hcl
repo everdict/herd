@@ -68,6 +68,7 @@ job "herdlet" {
         args = [
           "run", "-api", "${HERD_API}",
           "-state", "/var/lib/herdlet",
+          "-egress-ca", "/var/lib/herd-egress/egress-ca.pem",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
@@ -78,8 +79,12 @@ job "herdlet" {
       }
     }
 
+    # herd-egress needs no root and no capability (its ports are above 1024, SO_ORIGINAL_DST is a getsockopt on its own
+    # socket): it runs as herd-egress, the uid its SPIRE entry selects, and keeps its CA in /var/lib/herd-egress and its
+    # bindings acknowledgements in /run/herd, both its own (the runbook's tmpfiles.d line). The herdlet stays root.
     task "herd-egress" {
       driver = "raw_exec"
+      user   = "herd-egress"
 
       artifact {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
@@ -106,7 +111,7 @@ job "herdlet" {
         args = [
           "-api", "${HERD_API}",
           "-bindings", "/run/herd/egress-bindings.json",
-          "-ca-out", "/var/lib/herdlet/egress-ca.pem",
+          "-ca-out", "/var/lib/herd-egress/egress-ca.pem",
           "-host-services-file", "local/host-services",
           "-router", "${HERD_ROUTER}",
           "-egress-allow-prefix", "${var.egress_allow_prefix}",
