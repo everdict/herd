@@ -1,9 +1,27 @@
 # Runbook: several hosts, no cluster tool (`herdlet join`)
 
-One control host runs herd-api and herd-router; every other host runs a herdlet and herd-egress and joins with one
-token herd-api minted (ADR 0001 A-20). Hosts need only a network path to the control host's ports 7443 (herd-api) and
+One control host runs herd-api and herd-router; every other host runs a herdlet and herd-egress and joins as its
+SPIFFE identity (ADR 0001 A-20, A-60). Hosts need only a network path to the control host's ports 7443 (herd-api) and
 7444 (router tunnel): herdlets dial out, nothing dials a node. The commands below are checked by
 `docs/runbooks/runbooks_test.go`.
+
+Identity: every herd process is a SPIFFE identity it reads from the host's SPIRE agent (the Workload API at
+`$SPIFFE_ENDPOINT_SOCKET`, else `unix:///run/spire/agent/sockets/api.sock`), and none starts without one. SPIRE comes
+first: a SPIRE server for the install's trust domain `<td>`, an agent on every host, and these registration entries
+(by the process's unix user or its unit, as the install attests workloads):
+
+| process | SPIFFE ID |
+|---|---|
+| herd-api | `spiffe://<td>/herd/api` |
+| herd-router | `spiffe://<td>/herd/router` |
+| herdlet on worker `<w>` | `spiffe://<td>/herd/node/<w>` (the worker name is the ID's) |
+| herd-egress on worker `<w>` | `spiffe://<td>/herd/egress/<w>` |
+| an operator's tools | `spiffe://<td>/herd/operator/<name>` |
+
+Nodes, herd-egress and operators need no grant: theirs are built in. The workloads that call herd (Everdict's
+herders, `spiffe://<td>/everdict/ws/<ws>/runner/<runner>`) get atespace roles from `/etc/herd/spiffe-policy.json` on
+the control host. On a cluster without a Workload API, `-tls-cert`, `-tls-key` and `-spiffe-bundle` give each process
+its SVID and the bundle as files instead.
 
 Snapshots: herd-api keeps them in an S3-compatible bucket (MinIO, AWS S3, ...) and hands that store — endpoint, bucket
 and credentials — to every herdlet in its join grant, so herdlets write and read snapshots there and no host mounts
@@ -24,12 +42,13 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    sudo install -d /etc/herd /var/lib/herd/snapshots
    ```
 
-2. Create the signing key and tell herd-api the router tunnel address herdlets dial (`<control-host>` is this host's
-   address as the nodes reach it) and the snapshot bucket (`<s3-endpoint>` is the S3 endpoint as herd-api and every
-   node reach it, e.g. `http://minio.example:9000`):
+2. Write the workloads' grants, and tell herd-api the router tunnel address herdlets dial (`<control-host>` is this
+   host's address as the nodes reach it) and the snapshot bucket (`<s3-endpoint>` is the S3 endpoint as herd-api and
+   every node reach it, e.g. `http://minio.example:9000`). herd-api and herd-router refuse to start without the policy
+   file; `{"rules": []}` admits only herd's own nodes, egress and operators:
 
    ```sh
-   sudo herd-api keygen -out /etc/herd/jwt.key
+   echo '{"rules": [{"prefix": "spiffe://<td>/everdict/ws/team-a/", "spaces": {"team-a": "write"}}]}' | sudo tee /etc/herd/spiffe-policy.json
    echo "HERD_ADVERTISE_TUNNEL=<control-host>:7444" | sudo tee /etc/herd/herd-api.env
    echo "HERD_S3=s3://herd-snapshots" | sudo tee -a /etc/herd/herd-api.env
    echo "HERD_S3_ENDPOINT=<s3-endpoint>" | sudo tee -a /etc/herd/herd-api.env
@@ -46,12 +65,6 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    sudo systemctl enable --now herd-api herd-router
    ```
 
-4. Mint the join token (valid 24 h; any number of hosts may join with it while it is valid):
-
-   ```sh
-   sudo herd-api join-token -key-file /etc/herd/jwt.key -ttl 24h
-   ```
-
 ## On each Ubuntu node
 
 1. Install Cloud Hypervisor and herd (with its virtiofsd) as in all-in-one.md steps 1–2 (no snapshot directory to
@@ -62,18 +75,16 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    sudo herdlet doctor
    ```
 
-2. Give the node herd-api's address and the join token:
+2. Give the node herd-api's address (the SPIRE agent on the node gives it its identity):
 
    ```sh
    sudo install -d /etc/herd
    echo "HERD_API=<control-host>:7443" | sudo tee /etc/herd/herdlet.env
-   echo "<join token>" | sudo tee /etc/herd/join.token
-   sudo chmod 0600 /etc/herd/join.token
    ```
 
 3. Install and start herdlet and herd-egress (`dist/systemd/herdlet.service`, `dist/systemd/herd-egress.service`). The
-   first start joins: it exchanges the token for this worker's credential, the egress credential and herd-api's
-   snapshot store, and keeps them in `/var/lib/herdlet`; later starts reuse them, so the token may expire.
+   first start joins as the node's SVID: herd-api grants it its snapshot store and the router tunnel address, which
+   it keeps in `/var/lib/herdlet`; later starts reuse them.
 
    ```sh
    sudo install -m 0644 herd/dist/systemd/herdlet.service herd/dist/systemd/herd-egress.service /etc/systemd/system/
@@ -84,7 +95,7 @@ keeps snapshots in `/var/lib/herd/snapshots`, which only hosts that share that d
    The same join by hand, in the foreground:
 
    ```sh
-   sudo herdlet join <control-host>:7443 --token "<join token>"
+   sudo herdlet join <control-host>:7443
    ```
 
 4. Optional: private images. The unit passes `-registry-auth /etc/herd/registry-auth.json`: write the node's registry
@@ -103,13 +114,12 @@ sudo install -d /usr/local/share/herd /usr/local/etc/herd /usr/local/var/herdlet
 sudo install -d -m 0700 /usr/local/etc/herd/secrets
 sudo install -m 0644 herd/kernel herd/initrd.img /usr/local/share/herd/
 herdlet doctor
-echo "<join token>" | sudo tee /usr/local/etc/herd/join.token
 sed 's/@HERD_API@/<control-host>:7443/' herd/dist/launchd/com.everdict.herdlet.plist | sudo tee /Library/LaunchDaemons/com.everdict.herdlet.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.everdict.herdlet.plist
 ```
 
 On a Mac the herdlet runs herd-egress itself, in-process (each VM's network device is a file handle into its own
-userspace stack, ADR A-21), with the egress credential the join granted. It resolves an egress policy's
+userspace stack, ADR A-21), as the node's SVID. It resolves an egress policy's
 `ate-secret://dir/<name>/<tail>` from its `-secrets` directory, which the launchd daemon sets to
 `/usr/local/etc/herd/secrets` (put the file `<name>/<tail>` there, mode 0600); without `-secrets` it refuses every
 request whose credential it must inject. The daemon also passes `-registry-auth
@@ -123,11 +133,11 @@ within 30 s (ADR A-22).
 
 ## Check the pool
 
-On the control host, every joined node is listed with what it declared:
+On the control host, as an operator's SVID (the agent's entry for the operator's unix user), every joined node is
+listed with what it declared:
 
 ```sh
-TOKEN=$(sudo herd-api token -key-file /etc/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
-herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
+herd-api workers -api 127.0.0.1:7443
 ```
 
 A Substrate-API client (Everdict's herder) reads the same records with `Control.ListWorkers`: each node is a
@@ -135,5 +145,10 @@ A Substrate-API client (Everdict's herder) reads the same records with `Control.
 `allocated`, and its declared
 fidelity and restore family as its runtime's compat attributes (ADR 0001 A-4).
 
-A join is refused with a token herd-api did not sign, an expired one, or any credential that is not a join token; a
+A join is refused to any caller that is not the node SVID of the worker it names (another node's, an operator's); a
 join cannot take the name of a worker that is connected.
+
+Break-glass: until every caller has an SVID, herd-api and herd-router accept HS256 bearers signed with `-key-file` only
+with `-break-glass-hs256-until <YYYY-MM-DD>` (each call counted on `herd_auth_breakglass_calls_total` at
+`http://<host>:7449/metrics`), and refuse to start once that day has passed. Under it a host may still join with a
+join token (`herd-api join-token -key-file ...`, `herdlet join --token`), on top of its node SVID.

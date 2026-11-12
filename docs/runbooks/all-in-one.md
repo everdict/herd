@@ -56,16 +56,19 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    sudo systemctl enable --now herd
    ```
 
-5. Check the pool. The process wrote its signing key to `/var/lib/herd/jwt.key`; mint a client token with it and list
-   the workers — this host's name appears, with platform `PLATFORM_LINUX_CLOUD_HYPERVISOR`:
+5. Check the pool. The all-in-one is its own SPIFFE issuer (trust domain `herd.local`, ADR 0001 A-60): it keeps a local
+   CA in `/var/lib/herd/identity`, issues its components their SVIDs, and writes an operator's SVID there
+   (`operator.pem`, `operator-key.pem`, `spiffe://herd.local/herd/operator/local`) with the bundle (`bundle.pem`).
+   List the workers as that operator — this host's name appears, with platform `PLATFORM_LINUX_CLOUD_HYPERVISOR`:
 
    ```sh
-   TOKEN=$(sudo herd-api token -key-file /var/lib/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
-   herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
+   sudo herd-api workers -api 127.0.0.1:7443 -tls-cert /var/lib/herd/identity/operator.pem -tls-key /var/lib/herd/identity/operator-key.pem -spiffe-bundle /var/lib/herd/identity/bundle.pem
    ```
 
-   Clients use herd-api at `<host>:7443` (Substrate Control API) and herd-router at `<host>:8443` with that token.
-   Both serve cleartext HTTP/2: put a TLS terminator in front before exposing them beyond the host (ADR A-12).
+   Clients use herd-api at `<host>:7443` (Substrate Control API) and herd-router at `<host>:8443`, both over TLS with
+   SVIDs of `herd.local` (they name `localhost` and `127.0.0.1` too, for a client that checks a host name against
+   `bundle.pem`): herd-api takes a client X.509-SVID or a JWT-SVID bearer for `spiffe://herd.local/herd/api`,
+   herd-router the JWT-SVID. `/var/lib/herd/identity/spiffe-policy.json` grants other workloads atespace roles.
 
 6. Optional: credentials for egress policies. An `EgressPolicy` whose `replace_headers` names
    `ate-secret://dir/<name>/<tail>` has herd-egress inject the file `<name>/<tail>` of its secrets directory (the
@@ -154,8 +157,7 @@ that herd-api with a token the process mints (ADR 0001 A-11, A-20). The commands
    proved it can save machine state, R-D9):
 
    ```sh
-   TOKEN=$(sudo herd-api token -key-file /usr/local/var/herd/jwt.key -sub everdict -space team-a=write -ttl 720h)
-   herd-api workers -api 127.0.0.1:7443 -token "$TOKEN"
+   sudo herd-api workers -api 127.0.0.1:7443 -tls-cert /usr/local/var/herd/identity/operator.pem -tls-key /usr/local/var/herd/identity/operator-key.pem -spiffe-bundle /usr/local/var/herd/identity/bundle.pem
    ```
 
 5. Optional: private images. The launchd job passes `-registry-auth /usr/local/etc/herd/registry-auth.json`; write
