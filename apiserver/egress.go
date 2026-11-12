@@ -53,7 +53,7 @@ type egressState struct {
 }
 
 // egressFor is the policy record of the actor uid holds, or ErrNotFound: a record bound to another uid is an earlier
-// actor's, left by a write that raced its delete. A record written before the binding (no uid) is the actor's.
+// actor's, left by a write that raced its delete. A record with no uid is no actor's: herd-api bound those at its start.
 func (s *Server) egressFor(ctx context.Context, k store.Key, uid string) (store.Record, error) {
 	r, err := s.cfg.Store.Get(ctx, k)
 	if err != nil {

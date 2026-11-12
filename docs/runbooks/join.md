@@ -170,6 +170,10 @@ fidelity and restore family as its runtime's compat attributes (ADR 0001 A-4).
 A join is refused to any caller that is not the node SVID of the worker it names (another node's, an operator's); a
 join cannot take the name of a worker that is connected.
 
+SVID rotation needs no restart and cuts no work: a connection is authenticated at its handshake and drains before the
+client's SVID ends, and a herdlet opens a new link and tunnel with its rotated SVID before it lets the old ones go.
+A registration entry removed while a connection is up lasts until that connection drains, at most one SVID lifetime.
+
 Fallback, break-glass only: until every caller has an SVID, herd-api and herd-router accept HS256 bearers signed with
 `-key-file` only with `-break-glass-hs256-until <YYYY-MM-DD>` (each call counted on `herd_auth_breakglass_calls_total`
 at `http://127.0.0.1:7449/metrics` on the host), and refuse to start once that day has passed or with a date more than
