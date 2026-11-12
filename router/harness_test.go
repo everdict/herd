@@ -68,11 +68,11 @@ type stack struct {
 	tunnels    *tunnel.Server
 	vms        *fakeguest.VMM
 	// exited holds the VMs whose hypervisor the herdlet is told exited (VM id → true).
-	exited     sync.Map
-	tun        *herdlet.Tunnel
-	dials      atomic.Int64 // tunnel dials the router made
-	resumes    atomic.Int64 // ResumeActor calls the router made
-	checks     atomic.Int64 // CheckActorWrite calls the router made
+	exited  sync.Map
+	tun     *herdlet.Tunnel
+	dials   atomic.Int64 // tunnel dials the router made
+	resumes atomic.Int64 // ResumeActor calls the router made
+	checks  atomic.Int64 // CheckActorWrite calls the router made
 	// afterCheck, if set, runs after each CheckActorWrite answers (a test re-creating the actor in between).
 	afterCheck atomic.Pointer[func()]
 	guestDials atomic.Int64 // guest connections the herdlet made
