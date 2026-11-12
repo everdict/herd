@@ -25,6 +25,7 @@ import (
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/router"
 	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/store"
 	"github.com/everdict/herd/store/memstore"
 	"github.com/everdict/herd/tunnel"
 	"github.com/everdict/herd/vmm"
@@ -57,7 +58,9 @@ const (
 type stack struct {
 	t          *testing.T
 	key        []byte
-	api        *conformance.Client // writes in both spaces
+	api        *conformance.Client // writes in both spaces, as the subject "client" (the creator of every actor createActor makes)
+	records    store.Store
+	meter      *auth.Meter
 	apiAddr    string
 	routerAddr string
 	tunnelAddr string
@@ -155,7 +158,8 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
 	snaps.NoSync = true
 	hub := link.NewHub()
-	api, err := apiserver.New(apiserver.Config{Store: memstore.New(), Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{},
+	s.records, s.meter = memstore.New(), auth.NewMeter()
+	api, err := apiserver.New(apiserver.Config{Store: s.records, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{},
 		CallTimeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +191,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	}
 	s.rt, err = router.New(router.Config{
 		Control: countingControl{s, router.GRPCControl{CC: apiCC}}, Tunnels: countingTunnels{s, s.tunnels},
-		Authn: authn, Authz: auth.SpaceRoles{}, DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
+		Authn: authn, Authz: auth.SpaceRoles{}, Meter: s.meter, DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +220,8 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	go func() { defer close(linkDone); _ = agent.Run(ctx, linkCC) }()
 	s.startTunnel(herdletCred)
 
-	s.api = conformance.NewClient(s.apiAddr, s.token(map[string]auth.Role{space1: auth.RoleWrite, space2: auth.RoleWrite}, false, "admin"))
+	// The same subject as clientToken: an actor is written, and reached through the router, by its creator (A-60).
+	s.api = conformance.NewClient(s.apiAddr, s.token(map[string]auth.Role{space1: auth.RoleWrite, space2: auth.RoleWrite}, false, "client"))
 	t.Cleanup(func() {
 		s.api.Close()
 		_ = hs.Close()

@@ -47,10 +47,21 @@ func (s *Server) egressTarget(ctx context.Context, actor *ateapi.ObjectRef, a au
 	if err != nil {
 		return store.Key{}, err
 	}
-	if err := s.authorize(ctx, space, a); err != nil {
+	if a == auth.ActionRead {
+		if err := s.authorize(ctx, space, a); err != nil {
+			return store.Key{}, err
+		}
+		if _, err := s.cfg.Store.Get(ctx, actorKey(space, name)); err != nil {
+			return store.Key{}, toStatus(err)
+		}
+		return egressKey(space, name), nil
+	}
+	// An actor's egress policy is a write on the actor: its creator's or an operator's (A-60).
+	ctx, err = s.authorizeActorWrite(ctx, space, name)
+	if err != nil {
 		return store.Key{}, err
 	}
-	if _, err := s.cfg.Store.Get(ctx, actorKey(space, name)); err != nil {
+	if _, err := s.loadActorToWrite(ctx, space, name); err != nil {
 		return store.Key{}, toStatus(err)
 	}
 	return egressKey(space, name), nil

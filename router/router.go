@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -86,6 +87,8 @@ type Config struct {
 	Tunnels Tunnels
 	Authn   auth.Authenticator
 	Authz   auth.Authorizer
+	// Meter counts the requests to actors with no creator recorded (auth.MetricUnownedActorWrites); nil counts nothing.
+	Meter *auth.Meter
 	// DefaultPort is the guest port ordinary requests go to (herd-guest's API, 8080).
 	DefaultPort uint32
 	// ParkingBudget bounds how long a request waits for its actor to become reachable (default 30 s). It bounds
@@ -126,6 +129,30 @@ func New(cfg Config) (*Router, error) {
 		cfg.ResumeTimeout = 2 * time.Minute
 	}
 	return &Router{cfg: cfg}, nil
+}
+
+// actorWrite decides one request's write on its actor (auth.ActorWriter), once: a parked request reads the actor
+// again on every poll, and its creator cannot change.
+type actorWrite struct {
+	rt      *Router
+	p       auth.Principal
+	decided bool
+}
+
+func (w *actorWrite) allow(space, name, creator string) *routeError {
+	if w.decided {
+		return nil
+	}
+	a, err := auth.ActorWriter(w.p, space, creator)
+	if err != nil {
+		return &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, fmt.Sprintf("actor %s/%s: %v", space, name, err)}
+	}
+	w.decided = true
+	if a.Counted() {
+		w.rt.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
+		log.Printf("herd-router: actor %s/%s has no creator recorded; %s reaches it under the %s allowance (ADR 0001 A-60)", space, name, w.p.Creator(), a)
+	}
+	return nil
 }
 
 // Parked is how many requests are waiting for their actor right now.
@@ -199,7 +226,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The parking budget bounds only the wait for a connection, never the request once delivered.
 	pctx, cancel := context.WithTimeout(r.Context(), rt.cfg.ParkingBudget)
-	conn, rerr := rt.connect(pctx, token, space, name, port)
+	conn, rerr := rt.connect(pctx, p, token, space, name, port)
 	cancel()
 	if rerr != nil {
 		fail(w, r, rerr)
@@ -214,7 +241,8 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // connect resolves the actor (parking while it is not running) and opens a connection to port through its worker's
 // tunnel, retrying until ctx (the parking budget) ends.
-func (rt *Router) connect(ctx context.Context, token, space, name string, port uint32) (net.Conn, *routeError) {
+func (rt *Router) connect(ctx context.Context, p auth.Principal, token, space, name string, port uint32) (net.Conn, *routeError) {
+	w := &actorWrite{rt: rt, p: p}
 	parked := false
 	defer func() {
 		if parked {
@@ -223,7 +251,7 @@ func (rt *Router) connect(ctx context.Context, token, space, name string, port u
 	}()
 	var last, lastAPI string
 	for {
-		worker, vm, why, rerr := rt.resolve(ctx, token, space, name)
+		worker, vm, why, rerr := rt.resolve(ctx, w, token, space, name)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -279,7 +307,7 @@ func (rt *Router) budgetError(space, name, last, lastAPI string) *routeError {
 
 // resolve looks the actor up once. It answers its worker and VM when the actor runs; otherwise why it cannot be
 // reached yet (and it starts a resume of a suspended actor), or a terminal refusal.
-func (rt *Router) resolve(ctx context.Context, token, space, name string) (worker, vm, why string, _ *routeError) {
+func (rt *Router) resolve(ctx context.Context, wr *actorWrite, token, space, name string) (worker, vm, why string, _ *routeError) {
 	a, err := rt.cfg.Control.GetActor(ctx, token, space, name)
 	if err != nil {
 		switch status.Code(err) {
@@ -289,6 +317,11 @@ func (rt *Router) resolve(ctx context.Context, token, space, name string) (worke
 			return "", "", "", &routeError{http.StatusForbidden, codes.PermissionDenied, ReasonPermissionDenied, status.Convert(err).Message()}
 		}
 		return "", "", "herd-api: " + err.Error(), nil
+	}
+	// A request to an actor (an exec, a stream, a resume on request) is a write on it: its creator's or an
+	// operator's, before anything is resumed or reached (ADR 0001 A-60).
+	if rerr := wr.allow(space, name, a.GetStatus().GetCreator()); rerr != nil {
+		return "", "", "", rerr
 	}
 	st := a.GetStatus().GetState()
 	k := space + "/" + name

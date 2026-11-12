@@ -8,7 +8,6 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
-	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/store"
@@ -58,11 +57,11 @@ func (s *Server) SuspendActor(ctx context.Context, req *ateapi.SuspendActorReque
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	if ctx, err = s.authorizeActorWrite(ctx, space, name); err != nil {
 		return nil, err
 	}
 	unlock := s.lock(actorKey(space, name))
-	ar, err := s.loadActor(ctx, space, name)
+	ar, err := s.loadActorToWrite(ctx, space, name)
 	if err != nil {
 		unlock()
 		return nil, toStatus(err)
@@ -234,12 +233,12 @@ func (s *Server) ResumeActor(ctx context.Context, req *ateapi.ResumeActorRequest
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	if ctx, err = s.authorizeActorWrite(ctx, space, name); err != nil {
 		return nil, err
 	}
 	unlock := s.lock(actorKey(space, name))
 	defer unlock()
-	ar, err := s.loadActor(ctx, space, name)
+	ar, err := s.loadActorToWrite(ctx, space, name)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -311,17 +310,18 @@ func (s *Server) DeleteActor(ctx context.Context, req *ateapi.DeleteActorRequest
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	if ctx, err = s.authorizeActorWrite(ctx, space, name); err != nil {
 		return nil, err
 	}
 	return s.deleteActor(ctx, space, name, req.GetOptions().GetUid(), req.GetOptions().GetVersion())
 }
 
-// deleteActor is DeleteActor once the caller is authorized.
+// deleteActor is DeleteActor once the caller is authorized for the space; the caller's own right to the actor is
+// checked at its load (loadActorToWrite).
 func (s *Server) deleteActor(ctx context.Context, space, name, uid string, version int64) (*ateapi.Actor, error) {
 	unlock := s.lock(actorKey(space, name))
 	defer unlock()
-	ar, err := s.loadActor(ctx, space, name)
+	ar, err := s.loadActorToWrite(ctx, space, name)
 	if err != nil {
 		return nil, toStatus(err)
 	}

@@ -41,7 +41,7 @@ func (e *Env) serve(t testing.TB, ln net.Listener) {
 	var err error
 	e.Server, err = apiserver.New(apiserver.Config{
 		Store: endedRecords{Store: e.Store, p: p}, Snapshots: endedSnapshots{Store: e.Snapshots, p: p}, Hub: e.Hub,
-		Authn: auth.StaticKey{Key: e.Key}, Authz: auth.SpaceRoles{},
+		Authn: Authn(e.Key, e.Meter), Authz: auth.SpaceRoles{}, Meter: e.Meter,
 		CallTimeout:          CallTimeout,
 		ReconcileCallTimeout: ReconcileCallTimeout,
 		GoldenWarmup:         GoldenWarmup,

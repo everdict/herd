@@ -61,6 +61,13 @@ func (s *Server) CreateTag(ctx context.Context, req *ateapi.CreateTagRequest) (*
 	if err := s.authorize(ctx, in.GetMetadata().GetAtespace(), auth.ActionWrite); err != nil {
 		return nil, err
 	}
+	// A tag of an actor is a write on it (the first half of a fork from it): its creator's or an operator's (A-60).
+	if src := in.GetSourceActor(); src.GetAtespace() != "" && src.GetName() != "" {
+		var err error
+		if ctx, err = s.authorizeActorWrite(ctx, src.GetAtespace(), src.GetName()); err != nil {
+			return nil, err
+		}
+	}
 	return s.createTag(ctx, in, ateapi.TagScope_TAG_SCOPE_ATESPACE)
 }
 
@@ -90,7 +97,7 @@ func (s *Server) createTagAt(ctx context.Context, in *ateapi.Tag, scope ateapi.T
 	defer unlock()
 	ctx, moved := snapstore.WithMeter(ctx)
 	start := time.Now()
-	ar, err := s.loadActor(ctx, aspace, aname)
+	ar, err := s.loadActorToWrite(ctx, aspace, aname)
 	if err != nil {
 		return nil, toStatus(err)
 	}

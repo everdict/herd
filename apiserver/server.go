@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,8 @@ type Config struct {
 	Hub       *link.Hub
 	Authn     auth.Authenticator
 	Authz     auth.Authorizer
+	// Meter counts the writes on actors with no creator recorded (auth.MetricUnownedActorWrites); nil counts nothing.
+	Meter *auth.Meter
 	// CallTimeout bounds each call to a herdlet (default 30 s), and each snapshot store call of a workflow that moves no
 	// object bytes (a resume's Stat, a delete's Delete: storeCall).
 	CallTimeout time.Duration
@@ -279,6 +282,51 @@ func (s *Server) authorizeAs(ctx context.Context, space string, a auth.Action) (
 		return auth.Principal{}, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
 	return p, nil
+}
+
+// writerKey carries the caller authorized to write one actor (asWriter).
+type writerKey struct{}
+
+type writer struct {
+	p   auth.Principal
+	key store.Key
+}
+
+// authorizeActorWrite authorizes a write on the existing actor space/name (W4, ADR 0001 A-60): the space must admit
+// the write, and the returned context carries the caller so that the workflow, loading the actor under its lock
+// (loadActorToWrite), allows it only to the actor's creator or an operator. A write role on the space no longer
+// suffices.
+func (s *Server) authorizeActorWrite(ctx context.Context, space, name string) (context.Context, error) {
+	p, err := s.authorizeAs(ctx, space, auth.ActionWrite)
+	if err != nil {
+		return ctx, err
+	}
+	return context.WithValue(ctx, writerKey{}, writer{p: p, key: actorKey(space, name)}), nil
+}
+
+// loadActorToWrite loads the actor a write acts on. When ctx carries the caller authorized to write this actor
+// (authorizeActorWrite), the caller must be its creator or an operator, and a write on an actor with no creator
+// recorded is counted under its allowance; herd-api's own workflows (Reconcile, golden builds, a template's delete
+// of its golden actor) carry none for the actor they load.
+func (s *Server) loadActorToWrite(ctx context.Context, space, name string) (*actorRec, error) {
+	ar, err := s.loadActor(ctx, space, name)
+	if err != nil {
+		return nil, err
+	}
+	w, ok := ctx.Value(writerKey{}).(writer)
+	if !ok || w.key != ar.rec.Key {
+		return ar, nil
+	}
+	creator := ar.actor.GetStatus().GetCreator()
+	a, err := auth.ActorWriter(w.p, space, creator)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "actor %s/%s: %v", space, name, err)
+	}
+	if a.Counted() {
+		s.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
+		log.Printf("herd-api: actor %s/%s has no creator recorded; %s writes it under the %s allowance (ADR 0001 A-60)", space, name, w.p.Creator(), a)
+	}
+	return ar, nil
 }
 
 // status maps a domain error to a gRPC status.

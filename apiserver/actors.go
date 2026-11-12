@@ -408,12 +408,13 @@ func (s *Server) ListActors(ctx context.Context, req *ateapi.ListActorsRequest) 
 func (s *Server) UpdateActor(ctx context.Context, req *ateapi.UpdateActorRequest) (*ateapi.Actor, error) {
 	in := req.GetActor()
 	space, name := in.GetMetadata().GetAtespace(), in.GetMetadata().GetName()
-	if err := s.authorize(ctx, space, auth.ActionWrite); err != nil {
+	ctx, err := s.authorizeActorWrite(ctx, space, name)
+	if err != nil {
 		return nil, err
 	}
 	unlock := s.lock(actorKey(space, name))
 	defer unlock()
-	ar, err := s.loadActor(ctx, space, name)
+	ar, err := s.loadActorToWrite(ctx, space, name)
 	if err != nil {
 		return nil, toStatus(err)
 	}
