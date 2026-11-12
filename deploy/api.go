@@ -307,7 +307,7 @@ func (t *Token) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&t.Audience, "audience", "", "audience")
 	fs.DurationVar(&t.TTL, "ttl", 24*time.Hour, "lifetime")
 	fs.BoolVar(&t.Herdlet, "herdlet", false, "a herdlet credential (may open the link, nothing else)")
-	fs.Func("space", "atespace=read|write|operator (repeatable; * for every space; operator may also write actors it did not create)", func(v string) error {
+	fs.Func("space", "atespace=read|write|operator|egress (repeatable; * for every space; operator may also write actors it did not create; egress reads egress policies only)", func(v string) error {
 		t.Spaces = append(t.Spaces, v)
 		return nil
 	})
@@ -322,8 +322,13 @@ func (t *Token) Mint() (string, error) {
 	c := auth.Claims{Subject: t.Subject, Audience: t.Audience, ExpiresAt: time.Now().Add(t.TTL).Unix(), Herdlet: t.Herdlet, Spaces: map[string]auth.Role{}}
 	for _, s := range t.Spaces {
 		name, role, ok := strings.Cut(s, "=")
-		if !ok || (role != string(auth.RoleRead) && role != string(auth.RoleWrite) && role != string(auth.RoleOperator)) {
-			return "", fmt.Errorf("-space %q: want atespace=read|write|operator", s)
+		switch auth.Role(role) {
+		case auth.RoleRead, auth.RoleWrite, auth.RoleOperator, auth.RoleEgress:
+		default:
+			ok = false
+		}
+		if !ok {
+			return "", fmt.Errorf("-space %q: want atespace=read|write|operator|egress", s)
 		}
 		c.Spaces[name] = auth.Role(role)
 	}

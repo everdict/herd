@@ -137,7 +137,7 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 			return nil, status.Errorf(codes.Internal, "join: %v", err)
 		}
 		egress, err := auth.Sign(s.Key, auth.Claims{Subject: "herd-egress@" + req.Worker, ExpiresAt: exp,
-			Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleRead}})
+			Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleEgress}})
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "join: %v", err)
 		}

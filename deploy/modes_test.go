@@ -312,6 +312,10 @@ func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
 	if p, err := (auth.StaticKey{Key: key}).Authenticate(ctxT(t), g.Credential); err != nil || !p.Herdlet || p.HerdletWorker() != "node-x" {
 		t.Errorf("the granted credential is %+v, %v; want node-x's herdlet credential", p, err)
 	}
+	// Its egress credential reads egress policies and nothing else (review 3).
+	if p, err := (auth.StaticKey{Key: key}).Authenticate(ctxT(t), g.EgressCredential); err != nil || len(p.Spaces) != 1 || p.Spaces[auth.AllSpaces] != auth.RoleEgress {
+		t.Errorf("the granted egress credential is %+v, %v; want the egress role in every space and nothing else", p, err)
+	}
 	if svid, err := joinGrant(t, b.addr, node1, "", "node-1"); err != nil || svid.Credential != "" {
 		t.Errorf("a join by node SVID under the break-glass: %+v, %v; want a grant with no credential", svid, err)
 	}
@@ -341,5 +345,21 @@ func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
 	}
 	if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("link opened with a join token: %v", err)
+	}
+}
+
+// TestTokenMintsEgress (review 3): `herd-api token -space '*=egress'` mints the egress role.
+func TestTokenMintsEgress(t *testing.T) {
+	kf := filepath.Join(t.TempDir(), "k")
+	key, err := deploy.EnsureKey(kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := (&deploy.Token{KeyFile: kf, Subject: "herd-egress@w1", TTL: time.Hour, Spaces: []string{"*=egress"}}).Mint()
+	if err != nil {
+		t.Fatalf("minting an egress token: %v", err)
+	}
+	if p, err := (auth.StaticKey{Key: key}).Authenticate(ctxT(t), tok); err != nil || p.Spaces[auth.AllSpaces] != auth.RoleEgress {
+		t.Errorf("minted %+v, %v; want the egress role in every space", p, err)
 	}
 }
