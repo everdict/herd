@@ -14,6 +14,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Root with the primary group herd-node (gid 64440), no supplementary groups: its SPIRE entry selects unix:uid:0 and
+# unix:gid:64440, which no other root process on the host has (ADR 0001 A-60).
+Group=herd-node
+SupplementaryGroups=
 EnvironmentFile=/etc/herd/herdlet.env
 ExecStart=/usr/local/bin/herdlet run -api ${HERD_API} -state /var/lib/herdlet -egress-ca /var/lib/herd-egress/egress-ca.pem \
     -kernel /usr/local/share/herd/kernel -initrd /usr/local/share/herd/initrd.img \

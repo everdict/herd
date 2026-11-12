@@ -112,6 +112,9 @@ func Render(p Params) ([]File, error) {
 type Invocation struct {
 	Binary string
 	Args   []string
+	// Group is the primary group a `setpriv --regid <group> --clear-groups --` wrapper starts Binary with (the
+	// herdlet's, ADR 0001 A-60); empty without one.
+	Group string
 }
 
 // Invocations extracts the command lines f runs: ExecStart= of a unit, ProgramArguments of a plist, and each task's
@@ -132,7 +135,33 @@ func invocation(argv []string) (Invocation, error) {
 	if len(argv) == 0 {
 		return Invocation{}, fmt.Errorf("artifacts: empty command line")
 	}
-	return Invocation{Binary: path.Base(argv[0]), Args: argv[1:]}, nil
+	group := ""
+	if path.Base(argv[0]) == "setpriv" {
+		// setpriv --regid <group> --clear-groups -- <binary> <args>: the only wrapper an artifact uses.
+		end := -1
+		clear := false
+		for i := 1; i < len(argv); i++ {
+			switch {
+			case argv[i] == "--":
+				end = i
+			case argv[i] == "--regid" && i+1 < len(argv):
+				group = argv[i+1]
+				i++
+			case argv[i] == "--clear-groups":
+				clear = true
+			default:
+				return Invocation{}, fmt.Errorf("artifacts: setpriv option %q is not one the artifacts use", argv[i])
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 || end+1 >= len(argv) || group == "" || !clear {
+			return Invocation{}, fmt.Errorf("artifacts: setpriv must be --regid <group> --clear-groups -- <command>: %q", argv)
+		}
+		argv = argv[end+1:]
+	}
+	return Invocation{Binary: path.Base(argv[0]), Args: argv[1:], Group: group}, nil
 }
 
 func systemdInvocations(s string) ([]Invocation, error) {

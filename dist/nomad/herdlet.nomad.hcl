@@ -63,9 +63,13 @@ job "herdlet" {
         perms       = "0600"
       }
 
+      # The herdlet is root (uid 0) with the primary group herd-node (gid 64440) and no supplementary groups: its SPIRE
+      # entry selects unix:uid:0 and unix:gid:64440, which no other root process on the node (the Nomad client among
+      # them) has. A supplementary group would not do: children inherit those.
       config {
-        command = "local/herdlet"
+        command = "/usr/bin/setpriv"
         args = [
+          "--regid", "herd-node", "--clear-groups", "--", "local/herdlet",
           "run", "-api", "${HERD_API}",
           "-state", "/var/lib/herdlet",
           "-egress-ca", "/var/lib/herd-egress/egress-ca.pem",

@@ -16,9 +16,11 @@ reach it with no lab allowance and no address in a job file. An actor still need
   volume `spire-agent-socket` (`client { host_volume "spire-agent-socket" { path = "/run/spire/agent/sockets" read_only
   = true } }`), and the registration entries of join.md's Identity table. herd-api and herd-router read their SVIDs
   through it, herdlet and herd-egress (raw_exec) through the host's socket; none starts without one.
-- The users of join.md's Identity table on every client (`herd` 64441, `herd-router` 64442, `herd-egress` 64443): the
-  jobs run herd-api, herd-router and herd-egress as them (`user = ...`), the herdlet as root, so each agent selects them
-  by `unix:uid` without `sys_ptrace`. The `herd-data` host volume's directory is owned by `herd`. herd-egress's two
+- The group and users of join.md's Identity table on every client (`herd-node` gid 64440; `herd` 64441,
+  `herd-router` 64442, `herd-egress` 64443) and `setpriv` (util-linux) at `/usr/bin/setpriv`: the jobs run herd-api,
+  herd-router and herd-egress as their users (`user = ...`), and the herdlet as root under `setpriv --regid herd-node
+  --clear-groups`, so each agent selects them by `unix:uid` (the herdlet by `unix:uid:0` and `unix:gid:64440`) without
+  `sys_ptrace`. The `herd-data` host volume's directory is owned by `herd`. herd-egress's two
   directories are its own; on every Linux client, `/etc/tmpfiles.d/herd.conf`:
 
   ```

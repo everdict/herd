@@ -26,6 +26,11 @@
 		<string>-registry-auth</string>
 		<string>/usr/local/etc/herd/registry-auth.json</string>
 	</array>
+	<!-- Root with the primary group herd-node (gid 64440): its SPIRE entry selects unix:uid:0 and unix:gid:64440. -->
+	<key>GroupName</key>
+	<string>herd-node</string>
+	<key>InitGroups</key>
+	<false/>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

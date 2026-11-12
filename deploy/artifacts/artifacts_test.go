@@ -533,9 +533,10 @@ func TestNoArtifactSetsTheCallTimeout(t *testing.T) {
 }
 
 // TestEachProcessHasItsOwnUID (PLT-489, ADR 0001 A-60): on a node, SPIRE tells herd-api, herd-router, herd-egress and
-// the herdlet apart by uid (unix:uid selectors, no sys_ptrace), so each artifact runs herd-api as herd, herd-router as
-// herd-router and herd-egress as herd-egress, and the herdlet, which needs root for /dev/kvm, TAPs and nftables, as
-// root: every uid differs.
+// the herdlet apart by uid and gid (unix:uid, unix:gid selectors, no sys_ptrace), so each artifact runs herd-api as
+// herd, herd-router as herd-router and herd-egress as herd-egress, and the herdlet, which needs root for /dev/kvm, TAPs
+// and nftables, as root with the primary group herd-node and no supplementary groups: uid 0 alone would hand the node
+// SVID to every root process.
 func TestEachProcessHasItsOwnUID(t *testing.T) {
 	files, err := artifacts.Render(artifacts.Defaults)
 	if err != nil {
@@ -575,5 +576,45 @@ func TestEachProcessHasItsOwnUID(t *testing.T) {
 	}
 	if seen != 8 {
 		t.Fatalf("checked %d herd-api, herd-router, herd-egress and herdlet tasks and units, want 8 (4 Nomad tasks, 4 units)", seen)
+	}
+	// The herdlet's primary group: setpriv --regid herd-node --clear-groups in Nomad, Group= with no supplementary
+	// groups in systemd, GroupName without InitGroups in launchd.
+	groups := 0
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range invs {
+			if inv.Binary != "herdlet" {
+				continue
+			}
+			groups++
+			g := inv.Group
+			switch f.Kind {
+			case artifacts.Systemd:
+				g = ""
+				if m := regexp.MustCompile(`(?m)^Group=(.+)$`).FindSubmatch(f.Data); m != nil {
+					g = string(m[1])
+				}
+				if !regexp.MustCompile(`(?m)^SupplementaryGroups=$`).Match(f.Data) {
+					t.Errorf("%s does not clear the herdlet's supplementary groups", f.Path)
+				}
+			case artifacts.Launchd:
+				g = ""
+				if m := regexp.MustCompile(`<key>GroupName</key>\s*<string>([^<]+)</string>`).FindSubmatch(f.Data); m != nil {
+					g = string(m[1])
+				}
+				if !regexp.MustCompile(`<key>InitGroups</key>\s*<false/>`).Match(f.Data) {
+					t.Errorf("%s does not keep the herdlet out of its user's groups (InitGroups false)", f.Path)
+				}
+			}
+			if g != "herd-node" {
+				t.Errorf("%s starts the herdlet with primary group %q, want herd-node", f.Path, g)
+			}
+		}
+	}
+	if groups != 3 {
+		t.Fatalf("checked %d herdlet artifacts, want 3 (Nomad, systemd, launchd)", groups)
 	}
 }

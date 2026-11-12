@@ -15,13 +15,19 @@ first: a SPIRE server for the install's trust domain `<td>`, an agent on every h
 | herd-api | `herd` (uid 64441) | `spiffe://<td>/herd/api` | `unix:uid:64441` |
 | herd-router | `herd-router` (uid 64442) | `spiffe://<td>/herd/router` | `unix:uid:64442` |
 | herd-egress on worker `<w>` | `herd-egress` (uid 64443) | `spiffe://<td>/herd/egress/<w>` | `unix:uid:64443`, on `<w>`'s agent |
-| herdlet on worker `<w>` | root | `spiffe://<td>/herd/node/<w>` (the worker name is the ID's) | `unix:uid:0`, on `<w>`'s agent |
+| herdlet on worker `<w>` | root, primary group `herd-node` (gid 64440) | `spiffe://<td>/herd/node/<w>` (the worker name is the ID's) | `unix:uid:0` and `unix:gid:64440`, on `<w>`'s agent |
 | an operator's tools | the operator's user | `spiffe://<td>/herd/operator/<name>` | `unix:uid:<theirs>` |
 
-Each herd process runs as a uid of its own, so an agent tells them apart by uid alone (`unix:uid`, no `sys_ptrace`,
-which `unix:path` needs). Create the users on every host, with these uids, before the units start:
+Each herd process runs as a uid of its own, so an agent tells them apart by uid (`unix:uid`, no `sys_ptrace`, which
+`unix:path` needs). The herdlet is root, so its entry also selects its primary group: `unix:uid:0` alone would hand the
+node SVID to every root process on the host (the Nomad client among them). The artifacts start it with the primary
+group `herd-node` and no supplementary groups (`Group=herd-node` and an empty `SupplementaryGroups=` in systemd,
+`setpriv --regid herd-node --clear-groups --` in Nomad, `GroupName` without `InitGroups` in launchd); never select a
+supplementary group, which every child inherits. Create the group and the users on every host, with these ids, before
+the units start (on a Mac, the group with `sudo dscl . -create /Groups/herd-node PrimaryGroupID 64440`):
 
 ```sh
+sudo groupadd --system --gid 64440 herd-node
 sudo useradd --system --uid 64441 --no-create-home --shell /usr/sbin/nologin herd
 sudo useradd --system --uid 64442 --no-create-home --shell /usr/sbin/nologin herd-router
 sudo useradd --system --uid 64443 --no-create-home --shell /usr/sbin/nologin herd-egress
