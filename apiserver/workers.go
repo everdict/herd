@@ -164,6 +164,16 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 	if !p.Herdlet {
 		return status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
+	if !p.SVID() {
+		// A worker a node SVID registered is that node's: an HS256 credential cannot link as it (re-review 5).
+		id, err := s.WorkerIdentity(ctx, p.HerdletWorker())
+		if err != nil {
+			return status.Errorf(codes.Unavailable, "%v", err)
+		}
+		if id != "" {
+			return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot link as it", p.HerdletWorker(), id)
+		}
+	}
 	lctx := context.WithValue(ctx, herdletKey{}, p.HerdletWorker())
 	if p.SVID() {
 		lctx = context.WithValue(lctx, herdletSVIDKey{}, p.Subject)

@@ -54,7 +54,12 @@ func TestOnlyItsOwnHerdletOpensATunnel(t *testing.T) {
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
 	}
-	srv := &tunnel.Server{Authn: auth.StaticKey{Key: key}}
+	srv := &tunnel.Server{Authn: auth.StaticKey{Key: key}, WorkerIdentity: func(_ context.Context, w string) (string, error) {
+		if w == "svid-node" {
+			return "spiffe://herd.test/herd/node/svid-node", nil
+		}
+		return "", nil
+	}}
 	g := grpc.NewServer()
 	srv.Register(g)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -97,6 +102,10 @@ func TestOnlyItsOwnHerdletOpensATunnel(t *testing.T) {
 	}
 	if err := hello("h1", true, "h1"); err != nil {
 		t.Errorf("herdlet h1 opening its tunnel: %v", err)
+	}
+	// A worker a node SVID registered is that node's (re-review 5).
+	if err := hello("svid-node", true, "svid-node"); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("an HS256 tunnel for a worker a node SVID registered: %v, want PermissionDenied", err)
 	}
 	_, err = srv.Dial(ctx, "h9", "vm-1", 8080)
 	if te, ok := err.(*tunnel.Error); !ok || te.Reason != tunnel.ReasonNodeUnreachable {

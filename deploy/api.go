@@ -177,12 +177,14 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		meter = auth.NewMeter()
 	}
 	// A JWT-SVID for herd-api names herd-api's own SPIFFE ID as its audience.
+	var isRouter func(context.Context) bool
 	authn, key, err := authenticator("herd-api", src, self, policy, &a.BreakGlass, meter)
 	if err == nil {
 		// A call herd-router forwards for its client was counted where the client called (CheckActorWrite).
 		router := auth.HerdID(self.TrustDomain(), "router")
 		sv := authn.SVID.(*auth.SPIFFE)
-		authn.Forwarded = func(ctx context.Context) bool { id, ok := sv.PeerID(ctx); return ok && id == router }
+		isRouter = func(ctx context.Context) bool { id, ok := sv.PeerID(ctx); return ok && id == router }
+		authn.Forwarded = isRouter
 	}
 	if err == nil && self.TrustDomain().Name() == LocalTrustDomain && !a.LocalCA {
 		err = fmt.Errorf("herd-api: its SVID %s is of %s, herd all-in-one's local development CA; a herd-api that is not all-in-one does not start on it", self, LocalTrustDomain)
@@ -210,7 +212,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	}
 	hub := link.NewHub()
 	srv, err := apiserver.New(apiserver.Config{
-		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: meter, CallTimeout: a.CallTimeout,
+		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: meter, IsRouter: isRouter, CallTimeout: a.CallTimeout,
 		RestoreBandwidth: int64(a.RestoreBandwidthMiB * (1 << 20)), GoldenWarmup: a.GoldenWarmup,
 		SnapshotStore: SnapshotStoreName(s3cfg),
 	})

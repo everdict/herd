@@ -25,6 +25,9 @@ type Server struct {
 	Authn auth.Authenticator
 	// OpenTimeout bounds how long Dial waits for the herdlet to answer an Open (default 10 s).
 	OpenTimeout time.Duration
+	// WorkerIdentity, if set, answers the node SVID that registered a worker at herd-api ("" if none did): an HS256
+	// tunnel for such a worker is refused.
+	WorkerIdentity func(ctx context.Context, worker string) (string, error)
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -108,6 +111,16 @@ func (s *Server) serveControl(ss grpc.ServerStream) error {
 	p, err := s.herdletPrincipal(ss.Context())
 	if err != nil {
 		return err
+	}
+	if !p.SVID() && s.WorkerIdentity != nil {
+		// A worker a node SVID registered is that node's: an HS256 tunnel cannot claim or replace it (re-review 5).
+		id, err := s.WorkerIdentity(ss.Context(), p.HerdletWorker())
+		if err != nil {
+			return status.Errorf(codes.Unavailable, "tunnel: %v", err)
+		}
+		if id != "" {
+			return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot open its tunnel", p.HerdletWorker(), id)
+		}
 	}
 	// A tunnel ends with the credential that opened it (review 2).
 	return auth.ServeUntil(p.HardEnd, func() error { return s.control(ss, p.HerdletWorker()) })

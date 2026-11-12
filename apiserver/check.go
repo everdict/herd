@@ -39,22 +39,25 @@ func (s *Server) CheckActorWrite(ctx context.Context, req *CheckActorWriteReques
 	if err != nil {
 		return nil, err
 	}
+	// The call herd-router forwards for a break-glass bearer is counted here, once and before the decision (a
+	// refused one too), for herd-router; a direct caller's was counted by herd-api's authenticator (re-review 6a, 6c).
+	if p.Scheme == auth.SchemeHS256 && s.cfg.IsRouter != nil && s.cfg.IsRouter(ctx) {
+		auth.CountBreakGlass(s.cfg.Meter, "herd-router", p.Subject)
+	}
 	if p.Herdlet || p.Join {
 		return nil, status.Errorf(codes.PermissionDenied, "%q: a herdlet or join credential cannot reach actors", p.Subject)
 	}
 	if req.Atespace == "" || req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "an actor reference needs an atespace and a name")
 	}
-	wctx, err := s.authorizeActorWrite(ctx, req.Atespace, req.Name)
+	// A decision writes nothing: the write it allows is counted where it happens (re-review 6b).
+	wctx, err := s.actorWriteAs(ctx, p, req.Atespace, req.Name, true)
 	if err != nil {
 		return nil, err
 	}
 	ar, err := s.loadActorToWrite(wctx, req.Atespace, req.Name)
 	if err != nil {
 		return nil, toStatus(err)
-	}
-	if p.Scheme == auth.SchemeHS256 {
-		auth.CountBreakGlass(s.cfg.Meter, "herd-router", p.Subject)
 	}
 	resp := &CheckActorWriteResponse{UID: ar.rec.UID}
 	// A stream the router carries is bounded only by an HS256 bearer's break-glass end; a JWT-SVID authorizes the
@@ -63,6 +66,31 @@ func (s *Server) CheckActorWrite(ctx context.Context, req *CheckActorWriteReques
 		resp.Expires = p.HardEnd.Unix()
 	}
 	return resp, nil
+}
+
+// WorkerIdentityMethod answers herd-router the node SVID that registered a worker (re-review 5).
+const WorkerIdentityMethod = "/" + AuthzService + "/WorkerIdentity"
+
+// WorkerIdentityRequest names a worker; WorkerIdentityResponse is the node SVID that registered it ("" if none did).
+type WorkerIdentityRequest struct {
+	Worker string `json:"worker"`
+}
+
+type WorkerIdentityResponse struct {
+	Identity string `json:"identity,omitempty"`
+}
+
+// WorkerIdentityCall answers herd-router alone (IsRouter): its tunnel server refuses an HS256 tunnel for a worker a
+// node SVID registered.
+func (s *Server) WorkerIdentityCall(ctx context.Context, req *WorkerIdentityRequest) (*WorkerIdentityResponse, error) {
+	if s.cfg.IsRouter == nil || !s.cfg.IsRouter(ctx) {
+		return nil, status.Errorf(codes.PermissionDenied, "only herd-router asks a worker's identity")
+	}
+	id, err := s.WorkerIdentity(ctx, req.Worker)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &WorkerIdentityResponse{Identity: id}, nil
 }
 
 var authzServiceDesc = grpc.ServiceDesc{
@@ -74,6 +102,12 @@ var authzServiceDesc = grpc.ServiceDesc{
 			return nil, err
 		}
 		return srv.(*Server).CheckActorWrite(ctx, &req)
+	}}, {MethodName: "WorkerIdentity", Handler: func(srv any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+		var req WorkerIdentityRequest
+		if err := dec(&req); err != nil {
+			return nil, err
+		}
+		return srv.(*Server).WorkerIdentityCall(ctx, &req)
 	}}},
 }
 

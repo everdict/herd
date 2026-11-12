@@ -177,6 +177,8 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	hub := link.NewHub()
 	s.records, s.meter = memstore.New(), auth.NewMeter()
 	api, err := apiserver.New(apiserver.Config{Store: s.records, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: s.meter,
+		// Every CheckActorWrite in this stack comes from its router.
+		IsRouter: func(context.Context) bool { return true },
 		CallTimeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)

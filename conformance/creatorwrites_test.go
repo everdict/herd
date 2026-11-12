@@ -2,6 +2,7 @@ package conformance_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -276,4 +277,37 @@ func TestEgressPolicyIsTheActorsByUID(t *testing.T) {
 	if err != nil || p.GetRules()[0].GetHttps().GetHostnames()[0] != "new.example.com" {
 		t.Errorf("the new a1's egress policy: %v, %v; want its own", p, err)
 	}
+}
+
+// TestUidlessEgressPoliciesAreBoundAtStart (re-review 6d): an egress-policy record written before policies were bound
+// to the actor uid is bound, at herd-api's start, to the actor of its name, or deleted if there is none; after that,
+// no record without a uid is honoured.
+func TestUidlessEgressPoliciesAreBoundAtStart(t *testing.T) {
+	e := conformance.Start(t, conformance.HerdletSpec{Name: "h1", Slots: 2})
+	ctx := ctxT(t)
+	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	mkActor(t, e, "a1", "tpl", nil)
+	mkActor(t, e, "a2", "tpl", nil)
+	data, err := proto.Marshal(&ateapi.EgressPolicy{Rules: []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"old.example.com"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := func(n string) store.Key { return store.Key{Kind: store.KindEgressPolicy, Space: e.Space, Name: n} }
+	for _, n := range []string{"a1", "ghost"} {
+		if _, err := e.Store.Create(ctx, store.Record{Key: key(n), Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.RestartAPI(t)
+	if _, err := e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a1")}); err != nil {
+		t.Errorf("a1's uid-less policy after the start bound it: %v", err)
+	}
+	if _, err := e.Store.Get(ctx, key("ghost")); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the uid-less policy of no actor after the start: %v, want deleted", err)
+	}
+	if _, err := e.Store.Create(ctx, store.Record{Key: key("a2"), Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a2")})
+	wantCode(t, "a uid-less policy written after the start", err, codes.NotFound)
 }

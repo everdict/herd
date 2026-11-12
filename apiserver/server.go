@@ -58,6 +58,9 @@ type Config struct {
 	Authz     auth.Authorizer
 	// Meter counts the writes on actors with no creator recorded (auth.MetricUnownedActorWrites); nil counts nothing.
 	Meter *auth.Meter
+	// IsRouter reports a call from herd-router itself (its verified peer SVID): it may ask a worker's identity, and a
+	// CheckActorWrite it makes is counted for it. Nil: no caller is.
+	IsRouter func(ctx context.Context) bool
 	// CallTimeout bounds each call to a herdlet (default 30 s), and each snapshot store call of a workflow that moves no
 	// object bytes (a resume's Stat, a delete's Delete: storeCall).
 	CallTimeout time.Duration
@@ -149,6 +152,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}, storeID: id}
+	if err := s.bindEgressPolicies(context.Background()); err != nil {
+		return nil, fmt.Errorf("apiserver: binding egress policies to their actors: %w", err)
+	}
 	cfg.Hub.StoreID = id
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
@@ -291,6 +297,8 @@ type writerKey struct{}
 type writer struct {
 	p   auth.Principal
 	key store.Key
+	// dry marks a decision that writes nothing (CheckActorWrite): it counts no write (re-review 6b).
+	dry bool
 }
 
 // authorizeActorWrite authorizes a write on the existing actor space/name (W4, ADR 0001 A-60): the space must admit
@@ -303,6 +311,14 @@ func (s *Server) authorizeActorWrite(ctx context.Context, space, name string) (c
 		return ctx, err
 	}
 	return context.WithValue(ctx, writerKey{}, writer{p: p, key: actorKey(space, name)}), nil
+}
+
+// actorWriteAs is authorizeActorWrite for a caller already authenticated as p (one call is authenticated once).
+func (s *Server) actorWriteAs(ctx context.Context, p auth.Principal, space, name string, dry bool) (context.Context, error) {
+	if err := s.cfg.Authz.Authorize(p, space, auth.ActionWrite); err != nil {
+		return ctx, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
+	return context.WithValue(ctx, writerKey{}, writer{p: p, key: actorKey(space, name), dry: dry}), nil
 }
 
 // loadActorToWrite loads the actor a write acts on. When ctx carries the caller authorized to write this actor
@@ -323,7 +339,7 @@ func (s *Server) loadActorToWrite(ctx context.Context, space, name string) (*act
 	if err != nil {
 		return nil, status.Errorf(codes.PermissionDenied, "actor %s/%s: %v", space, name, err)
 	}
-	if a.Counted() {
+	if a.Counted() && !w.dry {
 		s.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
 		caller := w.p.Creator()
 		s.cfg.Meter.Note("unowned "+string(a)+" "+caller,

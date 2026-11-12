@@ -65,8 +65,9 @@ func TestRequestsAreTheCreators(t *testing.T) {
 	if _, err := listDir(ctx, s.client(space1+"/legacy", intruder)); err != nil {
 		t.Fatalf("a break-glass request to an actor with no creator: %v", err)
 	}
-	if n := s.meter.Value(auth.MetricUnownedActorWrites, "allowance", string(auth.AllowUnownedBreakGlass), "caller", "hs256:intruder"); n != 1 {
-		t.Errorf("%s{allowance=%s,caller=hs256:intruder} = %d after one request, want 1", auth.MetricUnownedActorWrites, auth.AllowUnownedBreakGlass, n)
+	// The router's question writes nothing, so it counts no write (re-review 6b).
+	if n := s.meter.Value(auth.MetricUnownedActorWrites, "allowance", string(auth.AllowUnownedBreakGlass), "caller", "hs256:intruder"); n != 0 {
+		t.Errorf("%s{allowance=%s,caller=hs256:intruder} = %d after one request, which writes nothing; want 0", auth.MetricUnownedActorWrites, auth.AllowUnownedBreakGlass, n)
 	}
 }
 
@@ -176,5 +177,19 @@ func TestStreamEndsAtBreakGlassEnd(t *testing.T) {
 	s.createActor(space1, "a1")
 	if spliceOpenFor(t, s, s.clientToken(), 6*time.Second) {
 		t.Error("an HS256 splice is still open 3 s after the break-glass allowance ended")
+	}
+}
+
+// TestRefusedRequestIsCounted (re-review 6a): a break-glass request herd-api refuses is still counted, once, for
+// herd-router.
+func TestRefusedRequestIsCounted(t *testing.T) {
+	s := startStack(t, stackOpts{budget: time.Second})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	intruder := s.token(map[string]auth.Role{space1: auth.RoleWrite}, false, "intruder")
+	_, err := listDir(ctx, s.client(space1+"/a1", intruder))
+	wantCode(t, "another writer's request", err, codes.PermissionDenied)
+	if n := s.meter.Value(auth.MetricBreakGlassCalls, "component", "herd-router", "subject", "intruder"); n != 1 {
+		t.Errorf("%s{component=herd-router,subject=intruder} = %d after one refused request, want 1", auth.MetricBreakGlassCalls, n)
 	}
 }

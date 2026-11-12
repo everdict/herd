@@ -85,7 +85,16 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 		return err
 	}
 	defer cc.Close()
-	tunnels := &tunnel.Server{Authn: authn}
+	tunnels := &tunnel.Server{Authn: authn, WorkerIdentity: func(ctx context.Context, worker string) (string, error) {
+		// herd-api answers as herd-router itself, with no client's bearer.
+		var resp struct {
+			Identity string `json:"identity"`
+		}
+		err := cc.Invoke(ctx, "/herd.ext.v1.Authz/WorkerIdentity", &struct {
+			Worker string `json:"worker"`
+		}{worker}, &resp, grpc.CallContentSubtype("json"))
+		return resp.Identity, err
+	}}
 	rt, err := router.New(router.Config{
 		Control: router.GRPCControl{CC: cc}, Tunnels: tunnels,
 		DefaultPort: uint32(r.DefaultPort), ParkingBudget: r.ParkingBudget,

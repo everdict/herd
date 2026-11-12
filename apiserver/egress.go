@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -64,10 +65,49 @@ func (s *Server) egressFor(ctx context.Context, k store.Key, uid string) (store.
 			return r, fmt.Errorf("apiserver: %v: state: %w", k, err)
 		}
 	}
-	if st.ActorUID != "" && st.ActorUID != uid {
-		return r, fmt.Errorf("%w: %v belongs to an earlier actor (uid %s), not %s", store.ErrNotFound, k, st.ActorUID, uid)
+	if st.ActorUID != uid {
+		// Records written before the binding were bound at herd-api's start (bindEgressPolicies): one with no uid now
+		// is no actor's.
+		return r, fmt.Errorf("%w: %v belongs to actor uid %q, not %s", store.ErrNotFound, k, st.ActorUID, uid)
 	}
 	return r, nil
+}
+
+// bindEgressPolicies binds each egress-policy record written before policies carried the actor uid to the actor of
+// its name now, or deletes it when there is none, each logged (re-review 6d). herd-api runs it at its start.
+func (s *Server) bindEgressPolicies(ctx context.Context) error {
+	recs, err := s.cfg.Store.List(ctx, store.KindEgressPolicy, "")
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		var st egressState
+		if len(r.State) > 0 {
+			if err := json.Unmarshal(r.State, &st); err != nil {
+				return fmt.Errorf("apiserver: %v: state: %w", r.Key, err)
+			}
+		}
+		if st.ActorUID != "" {
+			continue
+		}
+		ar, err := s.loadActor(ctx, r.Space, r.Name)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
+				return err
+			}
+			log.Printf("herd-api: egress policy %s/%s had no actor uid and no actor of its name: deleted", r.Space, r.Name)
+		case err != nil:
+			return err
+		default:
+			r.State, _ = json.Marshal(egressState{ActorUID: ar.rec.UID})
+			if _, err := s.cfg.Store.Update(ctx, r); err != nil {
+				return err
+			}
+			log.Printf("herd-api: egress policy %s/%s had no actor uid: bound to the actor of its name, uid %s", r.Space, r.Name, ar.rec.UID)
+		}
+	}
+	return nil
 }
 
 // egressTarget authorizes an egress-policy call on actor and answers its policy key and the actor's uid. A write runs

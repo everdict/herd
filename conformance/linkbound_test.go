@@ -1,8 +1,15 @@
 package conformance_test
 
 import (
+	"encoding/json"
 	"testing"
+
 	"time"
+
+	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/store"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	"github.com/everdict/herd/auth"
 	"github.com/everdict/herd/conformance"
@@ -37,4 +44,24 @@ func TestLinkEndsWithItsCredential(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// TestHS256CannotTakeAnSVIDWorker (re-review 5): a worker a node SVID registered is that node's: an HS256 herdlet
+// credential naming it is refused its link.
+func TestHS256CannotTakeAnSVIDWorker(t *testing.T) {
+	e := conformance.Start(t)
+	ctx := ctxT(t)
+	st, _ := json.Marshal(map[string]string{"identity": "spiffe://herd.test/herd/node/h1"})
+	if _, err := e.Store.Create(ctx, store.Record{Key: store.Key{Kind: store.KindWorker, Name: "h1"}, State: st}); err != nil {
+		t.Fatal(err)
+	}
+	c := conformance.NewClient(e.Addr, e.TokenFor(t, "h1", nil, true))
+	defer c.Close()
+	cs, err := c.Conn().NewStream(ctx, &link.StreamDesc, link.LinkMethod, grpc.CallContentSubtype(link.CodecName))
+	if err == nil {
+		_ = cs.SendMsg(map[string]any{"register": map[string]any{"worker": "h1"}})
+		var m map[string]any
+		err = cs.RecvMsg(&m)
+	}
+	wantCode(t, "an HS256 herdlet linking as h1, which a node SVID registered", err, codes.PermissionDenied)
 }
