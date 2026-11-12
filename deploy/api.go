@@ -34,6 +34,7 @@ import (
 	"github.com/everdict/herd/store/boltstore"
 	"github.com/everdict/herd/store/memstore"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -103,6 +104,21 @@ type API struct {
 	// -snapshot-sweep, 0: never); the first pass runs SnapshotSweepDelay after start.
 	SnapshotSweep      time.Duration
 	SnapshotSweepDelay time.Duration
+	// Identity authenticates callers by SPIFFE SVIDs beside HS256 break-glass (ADR 0001 A-60).
+	Identity Identity
+	// TLSListen, with TLSCert and TLSKey (herd-api's own X.509-SVID, PEM), serves the same API over mTLS, where a
+	// caller with no bearer is its client certificate's X.509-SVID (-tls-listen). Listen stays cleartext for
+	// bearers (JWT-SVID or HS256) and herdlets.
+	TLSListen string
+	TLSCert   string
+	TLSKey    string
+	// MetricsListen serves the A-60 allowance counters at /metrics (-metrics-listen; empty: not served).
+	MetricsListen string
+	// TLSListener and MetricsListener, if set, are used instead of TLSListen and MetricsListen (tests).
+	TLSListener     net.Listener
+	MetricsListener net.Listener
+	// Meter, if set, is the meter herd-api counts on instead of a new one (tests).
+	Meter *auth.Meter
 
 	// Key, if set, is used instead of KeyFile (all-in-one reads or creates its own).
 	Key []byte
@@ -126,6 +142,11 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&a.AdvertiseTunnel, "advertise-tunnel", "", "herd-router tunnel address handed to herdlets that join")
 	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
 	fs.DurationVar(&a.GoldenWarmup, "golden-warmup", DefaultGoldenWarmup, goldenWarmupUsage)
+	a.Identity.Flags(fs)
+	fs.StringVar(&a.TLSListen, "tls-listen", "", "also serve over mTLS here: a caller without a bearer is its client certificate's X.509-SVID (needs -tls-cert, -tls-key and -spiffe-trust-domain)")
+	fs.StringVar(&a.TLSCert, "tls-cert", "", "herd-api's own certificate chain for -tls-listen (PEM, e.g. its X.509-SVID); read again when it changes")
+	fs.StringVar(&a.TLSKey, "tls-key", "", "the private key of -tls-cert (PEM); read again when it changes")
+	fs.StringVar(&a.MetricsListen, "metrics-listen", "", "serve the authentication allowance counters (break-glass HS256 calls, writes on actors with no creator) at http://<addr>/metrics")
 	fs.DurationVar(&a.SnapshotSweep, "snapshot-sweep", DefaultSnapshotSweep, "how often to remove the snapshot objects no actor, tag or template record names (older than an hour) and abort writes unfinished for a day; the first pass runs 10 minutes after start (0: never)")
 }
 
@@ -159,10 +180,39 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	if err != nil {
 		return err
 	}
-	authn := auth.StaticKey{Key: key, Audience: a.Audience}
+	meter := a.Meter
+	if meter == nil {
+		meter = auth.NewMeter()
+	}
+	authn, err := a.Identity.Authenticator(key, a.Audience, meter)
+	if err != nil {
+		return err
+	}
+	tln := a.TLSListener
+	if tln == nil && a.TLSListen != "" {
+		if !a.Identity.Enabled() {
+			return errors.New("-tls-listen needs -spiffe-trust-domain: a client certificate is verified as an X.509-SVID")
+		}
+		if tln, err = net.Listen("tcp", a.TLSListen); err != nil {
+			return err
+		}
+	}
+	var kp *keyPair
+	if tln != nil {
+		defer tln.Close()
+		if kp, err = loadKeyPair(a.TLSCert, a.TLSKey); err != nil {
+			return err
+		}
+	}
+	mln := a.MetricsListener
+	if mln == nil && a.MetricsListen != "" {
+		if mln, err = net.Listen("tcp", a.MetricsListen); err != nil {
+			return err
+		}
+	}
 	hub := link.NewHub()
 	srv, err := apiserver.New(apiserver.Config{
-		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, CallTimeout: a.CallTimeout,
+		Store: st, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: meter, CallTimeout: a.CallTimeout,
 		RestoreBandwidth: int64(a.RestoreBandwidthMiB * (1 << 20)), GoldenWarmup: a.GoldenWarmup,
 		SnapshotStore: SnapshotStoreName(s3cfg),
 	})
@@ -170,7 +220,8 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		return err
 	}
 	log.Printf("herd-api: record store %s, store id %s", a.Store, srv.StoreID())
-	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
+	// A join token is HS256 by construction (join.MintToken): the join service keeps the shared key's authenticator.
+	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: auth.StaticKey{Key: key, Audience: a.Audience}, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {
 				if c.Worker == w {
@@ -183,6 +234,13 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	g := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
 	srv.Register(g)
 	js.Register(g)
+	var tg *grpc.Server
+	if tln != nil {
+		tg = grpc.NewServer(grpc.Creds(credentials.NewTLS(mtlsConfig(kp))),
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+		srv.Register(tg)
+		log.Printf("herd-api serving mTLS on %s", tln.Addr())
+	}
 	every := a.Reconcile
 	if every <= 0 {
 		every = 10 * time.Second
@@ -212,11 +270,25 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		}
 		go sweepSnapshots(ctx, srv, delay, a.SnapshotSweep)
 	}
+	if mln != nil {
+		go serveMetrics(ctx, mln, meter, "herd-api")
+	}
 	log.Printf("herd-api serving on %s", ln.Addr())
 	go func() {
 		<-ctx.Done()
 		g.Stop()
+		if tg != nil {
+			tg.Stop()
+		}
 	}()
+	if tg != nil {
+		go func() {
+			if err := tg.Serve(tln); err != nil && ctx.Err() == nil {
+				log.Printf("herd-api: mTLS listener: %v", err)
+				cancel()
+			}
+		}()
+	}
 	err = g.Serve(ln)
 	srv.Close()
 	srv.Wait()
@@ -261,7 +333,7 @@ func (t *Token) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&t.Audience, "audience", "", "audience")
 	fs.DurationVar(&t.TTL, "ttl", 24*time.Hour, "lifetime")
 	fs.BoolVar(&t.Herdlet, "herdlet", false, "a herdlet credential (may open the link, nothing else)")
-	fs.Func("space", "atespace=read|write (repeatable; * for every space)", func(v string) error {
+	fs.Func("space", "atespace=read|write|operator (repeatable; * for every space; operator may also write actors it did not create)", func(v string) error {
 		t.Spaces = append(t.Spaces, v)
 		return nil
 	})
@@ -276,8 +348,8 @@ func (t *Token) Mint() (string, error) {
 	c := auth.Claims{Subject: t.Subject, Audience: t.Audience, ExpiresAt: time.Now().Add(t.TTL).Unix(), Herdlet: t.Herdlet, Spaces: map[string]auth.Role{}}
 	for _, s := range t.Spaces {
 		name, role, ok := strings.Cut(s, "=")
-		if !ok || (role != string(auth.RoleRead) && role != string(auth.RoleWrite)) {
-			return "", fmt.Errorf("-space %q: want atespace=read|write", s)
+		if !ok || (role != string(auth.RoleRead) && role != string(auth.RoleWrite) && role != string(auth.RoleOperator)) {
+			return "", fmt.Errorf("-space %q: want atespace=read|write|operator", s)
 		}
 		c.Spaces[name] = auth.Role(role)
 	}
