@@ -220,6 +220,9 @@ type Outcome struct {
 	Presence string `json:"presence,omitempty"`
 	// Snapshot is what OpSnapshot wrote.
 	Snapshot *SnapshotRef `json:"snapshot,omitempty"`
+	// Restored is the fidelity a done OpRestore really restored the VM at: the snapshot's, or VOLUMES where a MEMORY
+	// snapshot cold-booted from its volume tree. Unspecified: not known (a herdlet older than PLT-496).
+	Restored vmm.Fidelity `json:"restored,omitempty"`
 	Reason   string       `json:"reason,omitempty"`
 	// Code, if set, is what kind of failure a failed outcome is (Code* constants), for herd-api to answer by.
 	Code string `json:"code,omitempty"`
