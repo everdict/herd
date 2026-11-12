@@ -249,9 +249,10 @@ func (s *Server) principal(ctx context.Context) (auth.Principal, error) {
 		}
 	}
 	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok || tok == "" {
-		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no bearer token")
+	if (!ok || tok == "") && len(auth.PeerChain(ctx)) == 0 {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no bearer token and no client certificate")
 	}
+	// No bearer: the caller is its mTLS client certificate, an X.509-SVID the authenticator verifies (ADR 0001 A-60).
 	p, err := s.cfg.Authn.Authenticate(ctx, tok)
 	if err != nil {
 		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)

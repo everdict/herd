@@ -24,6 +24,9 @@ const (
 	RoleWrite Role = "write"
 	// RoleHerdlet may connect as a herdlet; it grants nothing on the Control API.
 	RoleHerdlet Role = "herdlet"
+	// RoleOperator may write in the space as RoleWrite does, and also act on actors it did not create (and on the
+	// actors created before herd recorded creators): ADR 0001 A-60.
+	RoleOperator Role = "operator"
 )
 
 // AllSpaces in a principal's Spaces grants its role in every space.
@@ -44,6 +47,9 @@ type Principal struct {
 	Spaces map[string]Role
 	// Herdlet is set for a herdlet's credential.
 	Herdlet bool
+	// Worker is the worker a herdlet SVID names (spiffe://<td>/herd/node/<worker>); empty for an HS256 herdlet
+	// credential, whose Subject is the worker (HerdletWorker).
+	Worker string
 	// Join is set for a join token: it may only be exchanged for a herdlet credential (package join).
 	Join bool
 	// Scheme is how the caller was authenticated. The zero value is SchemeHS256, the shared-key bearer.
@@ -61,6 +67,14 @@ const (
 	// SchemeJWTSVID is a JWT-SVID presented as the bearer.
 	SchemeJWTSVID Scheme = "jwt-svid"
 )
+
+// HerdletWorker is the worker a herdlet credential speaks for.
+func (p Principal) HerdletWorker() string {
+	if p.Worker != "" {
+		return p.Worker
+	}
+	return p.Subject
+}
 
 // SVID reports whether p was authenticated by a SPIFFE verifiable identity document.
 func (p Principal) SVID() bool { return p.Scheme == SchemeX509SVID || p.Scheme == SchemeJWTSVID }
@@ -100,7 +114,7 @@ func (SpaceRoles) Authorize(p Principal, space string, a Action) error {
 		return fmt.Errorf("%w: no atespace named", ErrPermissionDenied)
 	}
 	for _, r := range []Role{p.Spaces[space], p.Spaces[AllSpaces]} {
-		if r == RoleWrite || (r == RoleRead && a == ActionRead) {
+		if r == RoleWrite || r == RoleOperator || (r == RoleRead && a == ActionRead) {
 			return nil
 		}
 	}

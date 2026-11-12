@@ -1,0 +1,113 @@
+package auth
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// The counters of the allowances ADR 0001 A-60 keeps, served in the Prometheus text format (Meter.Handler).
+const (
+	// MetricBreakGlassCalls counts the calls an HS256 bearer authenticated, by subject.
+	MetricBreakGlassCalls = "herd_auth_breakglass_calls_total"
+	// MetricUnownedActorWrites counts the writes on actors with no creator recorded, by allowance and caller.
+	MetricUnownedActorWrites = "herd_auth_unowned_actor_writes_total"
+)
+
+var metricHelp = map[string]string{
+	MetricBreakGlassCalls:    "Calls authenticated by an HS256 shared-key bearer (break-glass, ADR 0001 A-60), by subject.",
+	MetricUnownedActorWrites: "Writes on actors with no creator recorded, allowed to an operator or to break-glass (ADR 0001 A-60).",
+}
+
+// Meter is a set of counters keyed by name and labels. A nil Meter counts nothing.
+type Meter struct {
+	mu sync.Mutex
+	c  map[string]map[string]uint64 // name → rendered labels → count
+}
+
+// NewMeter returns an empty meter; the A-60 counters are listed (at no samples) from the start.
+func NewMeter() *Meter { return &Meter{c: map[string]map[string]uint64{}} }
+
+// labels renders label pairs (k1, v1, k2, v2, …) as Prometheus does.
+func labels(kv []string) string {
+	if len(kv) == 0 {
+		return ""
+	}
+	var parts []string
+	for i := 0; i+1 < len(kv); i += 2 {
+		v := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(kv[i+1])
+		parts = append(parts, fmt.Sprintf("%s=%q", kv[i], v))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// Inc adds one to the counter name with the label pairs kv.
+func (m *Meter) Inc(name string, kv ...string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.c[name] == nil {
+		m.c[name] = map[string]uint64{}
+	}
+	m.c[name][labels(kv)]++
+}
+
+// Value is the counter name with the label pairs kv.
+func (m *Meter) Value(name string, kv ...string) uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.c[name][labels(kv)]
+}
+
+// WriteText writes every counter in the Prometheus text exposition format.
+func (m *Meter) WriteText(w io.Writer) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(metricHelp))
+	for n := range metricHelp {
+		names = append(names, n)
+	}
+	for n := range m.c {
+		if _, ok := metricHelp[n]; !ok {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if h := metricHelp[n]; h != "" {
+			if _, err := fmt.Fprintf(w, "# HELP %s %s\n", n, h); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(w, "# TYPE %s counter\n", n); err != nil {
+			return err
+		}
+		ls := make([]string, 0, len(m.c[n]))
+		for l := range m.c[n] {
+			ls = append(ls, l)
+		}
+		sort.Strings(ls)
+		for _, l := range ls {
+			if _, err := fmt.Fprintf(w, "%s%s %d\n", n, l, m.c[n][l]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Handler serves the meter at any path, in the Prometheus text format.
+func (m *Meter) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_ = m.WriteText(w)
+	})
+}

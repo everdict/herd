@@ -92,7 +92,7 @@ func (s *Server) herdlet(ctx context.Context) (string, error) {
 	if !p.Herdlet {
 		return "", status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	return p.Subject, nil
+	return p.HerdletWorker(), nil
 }
 
 func (s *Server) serveControl(ss grpc.ServerStream) error {

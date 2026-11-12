@@ -118,7 +118,7 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 	if !p.Herdlet {
 		return status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	return s.cfg.Hub.Serve(context.WithValue(ctx, herdletKey{}, p.Subject), link.NewGRPCStream(ss))
+	return s.cfg.Hub.Serve(context.WithValue(ctx, herdletKey{}, p.HerdletWorker()), link.NewGRPCStream(ss))
 }
 
 // CompatSchema is the schema_version of the compat attributes ListWorkers reports for a worker's sandbox runtime:
