@@ -182,6 +182,12 @@ func TestRouterNeverDialsNodes(t *testing.T) {
 		for _, p := range pkgs {
 			for name, f := range p.Files {
 				ast.Inspect(f, func(n ast.Node) bool {
+					if c, ok := n.(*ast.CallExpr); ok && strings.HasSuffix(dir, "deploy/router.go") {
+						// deploy's dial: a gRPC client over TLS as herd-router (ADR 0001 A-60).
+						if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "dial" {
+							newClients++ // the connection to herd-api
+						}
+					}
 					sel, ok := n.(*ast.SelectorExpr)
 					if !ok {
 						return true

@@ -31,15 +31,11 @@ func TestHerdAPISweepsItsBucket(t *testing.T) {
 	srv.Plant("/herd/snapshots/space-1/actors/ghost/u/2", []byte("written a moment ago"), "sha256:00", "", 0)
 
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	if _, err := deploy.EnsureKey(keyFile); err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &deploy.API{KeyFile: keyFile, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
 		S3Endpoint: ts.URL, S3Credentials: creds, CallTimeout: 5 * time.Second, Reconcile: time.Second,
 		SnapshotSweep: time.Hour, SnapshotSweepDelay: 50 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())

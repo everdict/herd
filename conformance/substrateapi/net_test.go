@@ -26,7 +26,6 @@ import (
 	"github.com/everdict/herd/egress/gvstack/gvvm"
 	"github.com/everdict/herd/link"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // The fake hypervisor's VMs run their processes on this host, so for the egress cases each VM gets a network of its
@@ -269,7 +268,7 @@ func (n *vmNet) gateway() *egress.Gateway {
 
 // sync reads policies from herd-api at api with tok, as herd-egress does with its egress credential.
 func (n *vmNet) sync(api, tok string) {
-	cc, err := grpc.NewClient("passthrough:///"+api, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+	cc, err := grpc.NewClient("passthrough:///"+api, tlsDial(n.t, api), grpc.WithPerRPCCredentials(auth.Bearer(tok)))
 	if err != nil {
 		n.t.Fatal(err)
 	}

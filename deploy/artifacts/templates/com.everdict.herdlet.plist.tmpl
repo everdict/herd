@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- herdlet on a joined Mac (docs/runbooks/join.md): replace @HERD_API@ with herd-api's host:port. -secrets is the
+<!-- herdlet on a joined Mac (docs/runbooks/join.md): replace @HERD_API@ with herd-api's host:port. It joins as the
+     Mac's SPIFFE identity from its SPIRE agent (spiffe://<td>/herd/node/<worker>, ADR 0001 A-60). -secrets is the
      directory its in-process herd-egress resolves ate-secret://dir/<name>/<tail> credentials from, and
      registry-auth.json (0600, a docker config file) the registry logins for private template images; without it pulls
      are anonymous. Rendered by deploy/artifacts; edit the template. -->
@@ -13,8 +14,6 @@
 		<string>[[.MacBinDir]]/herdlet</string>
 		<string>join</string>
 		<string>@HERD_API@</string>
-		<string>-token-file</string>
-		<string>[[.MacEtcDir]]/join.token</string>
 		<string>-state</string>
 		<string>[[.MacHerdletStateDir]]</string>
 		<string>-kernel</string>

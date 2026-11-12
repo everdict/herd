@@ -103,14 +103,15 @@ func withVarDefaults(f artifacts.File, args []string) []string {
 	return out
 }
 
-// TestNomadJobPair: herd-api is a service job and herdlet a system job; the herdlet job joins with the token in its
-// Nomad variable.
+// TestNomadJobPair: herd-api is a service job and herdlet a system job; the herdlet job reads its Nomad variable
+// (registry logins) and finds herd-api by its Nomad service, and herd-api mounts the SPIRE agent's socket.
 func TestNomadJobPair(t *testing.T) {
 	for _, c := range []struct{ file, want string }{
 		{"nomad/herd-api.nomad.hcl", `type = "service"`},
 		{"nomad/herdlet.nomad.hcl", `type = "system"`},
 		{"nomad/herdlet.nomad.hcl", `nomadVar \"nomad/jobs/herdlet\"`},
 		{"nomad/herdlet.nomad.hcl", `nomadService \"herd-api\"`},
+		{"nomad/herd-api.nomad.hcl", `source    = "spire-agent-socket"`},
 	} {
 		b, err := os.ReadFile(filepath.Join(dist, c.file))
 		if err != nil {
@@ -123,7 +124,7 @@ func TestNomadJobPair(t *testing.T) {
 }
 
 // TestMacHerdletJoinsLikeLinux (criterion launchd-install): the launchd daemon a Mac installs runs the same command
-// as the systemd unit on Linux — `herdlet join <herd-api>` with the join token file, the state directory and the
+// as the systemd unit on Linux — `herdlet join <herd-api>` as its SPIFFE identity, with the state directory and the
 // guest kernel and initramfs — and no flag the Linux unit does not pass; only paths differ. It is a launchd daemon
 // that starts at load and is kept alive, Interactive, with room for a host of VMs' files.
 func TestMacHerdletJoinsLikeLinux(t *testing.T) {
@@ -164,7 +165,7 @@ func TestMacHerdletJoinsLikeLinux(t *testing.T) {
 	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "join" || ls != "join" {
 		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet join", mac.Binary, mac.Args, linux.Binary, linux.Args)
 	}
-	for _, f := range []string{"token-file", "state", "kernel", "initrd"} {
+	for _, f := range []string{"state", "kernel", "initrd"} {
 		if !mf[f] || !lf[f] {
 			t.Errorf("-%s: Mac %v, Linux %v; both joins pass it", f, mf[f], lf[f])
 		}
@@ -232,7 +233,7 @@ func TestMacPlistsPassSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@", "-token-file", "/usr/local/etc/herd/join.token",
+		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@",
 			"-state", "/usr/local/var/herdlet", "-kernel", "/usr/local/share/herd/kernel",
 			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets",
 			"-registry-auth", "/usr/local/etc/herd/registry-auth.json"},

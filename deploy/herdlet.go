@@ -35,9 +35,9 @@ import (
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/cloudhypervisor"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 )
@@ -135,6 +135,11 @@ type Herdlet struct {
 	NewGateway func(egress.Config) (*egress.Gateway, error)
 	// Retry is how long the herdlet waits before it dials again after its link or tunnel broke (default 2 s).
 	Retry time.Duration
+	// Identity is the node's SPIFFE identity, spiffe://<td>/herd/node/<worker> (the Workload API's by default): the
+	// herdlet joins, links to herd-api and opens its tunnel to herd-router over TLS as it (ADR 0001 A-60).
+	Identity Identity
+	src      auth.Source
+	closeID  func()
 
 	// granted, if set, is the snapshot store herd-api hands out at join now (nil inside: a directory): a grant in the
 	// state directory that names another is replaced by a new join (an all-in-one, where both are known, PLT-382).
@@ -143,7 +148,8 @@ type Herdlet struct {
 
 // HostFlags registers the flags every herdlet command shares: the host, its hypervisor and its VMs.
 func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
-	fs.StringVar(&h.Worker, "worker", defaultWorker(), "worker name (a DNS label; default: this host's name)")
+	fs.StringVar(&h.Worker, "worker", "", "worker name (a DNS label; default: the one the node's SVID names, spiffe://<td>/herd/node/<worker>)")
+	h.Identity.Flags(fs)
 	fs.StringVar(&h.Labels, "labels", "", "worker labels, k=v,k=v")
 	fs.IntVar(&h.Slots, "slots", 0, "actors this host holds at most (0: no count ceiling; its cpu and memory decide)")
 	fs.Int64Var(&h.ReserveCPU, "reserve-cpu", 1000, "millicores of this host kept from VMs")
@@ -183,14 +189,14 @@ func (h *Herdlet) HostFlags(fs *flag.FlagSet) {
 func (h *Herdlet) RunFlags(fs *flag.FlagSet) {
 	h.HostFlags(fs)
 	fs.StringVar(&h.API, "api", "", "herd-api address (with -token-file; default: the one the join recorded)")
-	fs.StringVar(&h.CredentialFile, "token-file", "", "herdlet credential (herd-api token -herdlet); without it, the grant an earlier join left in -state")
+	fs.StringVar(&h.CredentialFile, "token-file", "", "break-glass only: an HS256 herdlet credential (herd-api token -herdlet); without it, the grant an earlier join left in -state")
 }
 
 // JoinFlags registers `herdlet join`'s flags: the host flags plus the join token.
 func (h *Herdlet) JoinFlags(fs *flag.FlagSet) {
 	h.HostFlags(fs)
-	fs.StringVar(&h.Token, "token", "", "join token from `herd-api join-token`")
-	fs.StringVar(&h.TokenFile, "token-file", "", "file holding the join token")
+	fs.StringVar(&h.Token, "token", "", "break-glass only: a join token from `herd-api join-token` (a node joins by its SVID otherwise)")
+	fs.StringVar(&h.TokenFile, "token-file", "", "break-glass only: a file holding the join token")
 	fs.BoolVar(&h.JoinOnly, "join-only", false, "join, write the grant to the state directory and exit")
 }
 
@@ -244,9 +250,51 @@ func writeState(dir string, s State) error {
 	return os.Rename(StatePath(dir)+".tmp", StatePath(dir))
 }
 
+// identity opens the node's SPIFFE identity once: it must be a node SVID, and the worker is the one it names
+// (-worker, if given, must agree).
+func (h *Herdlet) identity(ctx context.Context) (auth.Source, error) {
+	if h.src != nil {
+		return h.src, nil
+	}
+	src, closer, err := h.Identity.Open(ctx, "herdlet")
+	if err != nil {
+		return nil, err
+	}
+	self, err := auth.Self(src)
+	if err == nil {
+		var id auth.Identity
+		if id, err = auth.ParseID(self); err == nil && id.Kind != auth.KindNode {
+			err = fmt.Errorf("the herdlet's SVID %s is not a node's (spiffe://%s/herd/node/<worker>)", self, self.TrustDomain().Name())
+		} else if err == nil && h.Worker != "" && h.Worker != id.Worker {
+			err = fmt.Errorf("-worker %q, but the node's SVID %s is worker %q's", h.Worker, self, id.Worker)
+		} else if err == nil {
+			h.Worker = id.Worker
+		}
+	}
+	if err != nil {
+		closer()
+		return nil, fmt.Errorf("herdlet: %w", err)
+	}
+	h.src, h.closeID = src, closer
+	return src, nil
+}
+
+// apiID is the SPIFFE ID the herdlet dials herd-api as.
+func apiID(src auth.Source) (spiffeid.ID, error) {
+	self, err := auth.Self(src)
+	if err != nil {
+		return spiffeid.ID{}, err
+	}
+	return auth.HerdID(self.TrustDomain(), "api"), nil
+}
+
 // Join returns this host's grant: the one a previous join of the same worker to the same herd-api left in the state
-// directory, or a new one for the join token.
+// directory, or a new one, asked for as the node's SVID (or, under the break-glass, with a join token).
 func (h *Herdlet) Join(ctx context.Context) (State, error) {
+	src, err := h.identity(ctx)
+	if err != nil {
+		return State{}, err
+	}
 	if err := join.ValidWorker(h.Worker); err != nil {
 		return State{}, fmt.Errorf("-worker: %w", err)
 	}
@@ -260,7 +308,7 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	if h.API == "" {
-		return State{}, errors.New("not joined yet: run `herdlet join <herd-api> --token <t>`")
+		return State{}, errors.New("not joined yet: run `herdlet join <herd-api>`")
 	}
 	tok := h.Token
 	if tok == "" && h.TokenFile != "" {
@@ -270,10 +318,11 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 		}
 		tok = strings.TrimSpace(string(b))
 	}
-	if tok == "" {
-		return State{}, errors.New("a join needs --token or --token-file")
+	api, err := apiID(src)
+	if err != nil {
+		return State{}, err
 	}
-	cc, err := grpc.NewClient("passthrough:///"+h.API, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cc, err := dial(h.API, src, api)
 	if err != nil {
 		return State{}, err
 	}
@@ -293,6 +342,9 @@ func (h *Herdlet) Join(ctx context.Context) (State, error) {
 // credentials returns what the herdlet dials with: a herdlet credential file given on the command line (no join), or
 // the join grant.
 func (h *Herdlet) credentials(ctx context.Context) (State, error) {
+	if _, err := h.identity(ctx); err != nil {
+		return State{}, err
+	}
 	if h.CredentialFile == "" {
 		return h.Join(ctx)
 	}
@@ -451,6 +503,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer h.closeID()
 	if h.JoinOnly {
 		return nil
 	}
@@ -519,7 +572,19 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	if tunnelAddr == "" {
 		tunnelAddr = st.Grant.Tunnel
 	}
-	cred := grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.Credential))
+	src, err := h.identity(ctx)
+	if err != nil {
+		return err
+	}
+	api, err := apiID(src)
+	if err != nil {
+		return err
+	}
+	// The herdlet is its node's SVID; an HS256 credential (a break-glass join or -token-file) rides on top of it.
+	var creds []grpc.DialOption
+	if st.Grant.Credential != "" {
+		creds = append(creds, grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.Credential)))
+	}
 	// herd-api and herd-router permit keepalive pings every 10 s; they keep a link behind NAT open.
 	keep := grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true})
 	ctx, cancel := context.WithCancel(ctx)
@@ -527,7 +592,7 @@ func (h *Herdlet) Run(ctx context.Context) error {
 	done := make(chan struct{})
 	if tunnelAddr != "" && guests != nil {
 		agent.Tunnel = &herdlet.Tunnel{Worker: st.Grant.Worker, Guests: guests}
-		tc, err := grpc.NewClient("passthrough:///"+tunnelAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), cred, keep)
+		tc, err := dial(tunnelAddr, src, auth.HerdID(api.TrustDomain(), "router"), append(creds, keep)...)
 		if err != nil {
 			return err
 		}
@@ -540,17 +605,19 @@ func (h *Herdlet) Run(ctx context.Context) error {
 		close(done)
 		log.Printf("herdlet: no herd-router tunnel (none advertised, or no guest dialer)")
 	}
-	cc, err := grpc.NewClient("passthrough:///"+st.API, grpc.WithTransportCredentials(insecure.NewCredentials()), cred, keep)
+	cc, err := dial(st.API, src, api, append(creds, keep)...)
 	if err != nil {
 		return err
 	}
 	defer cc.Close()
 	if host.Serve != nil {
-		if st.Grant.EgressCredential == "" {
-			log.Printf("herdlet: no egress credential (a -token-file run): every actor on this host stays deny-all")
+		// The in-process herd-egress reads the egress policies as the node (its SVID's built-in grant), or with the
+		// break-glass egress credential a token join granted.
+		eopts := []grpc.DialOption{keep}
+		if st.Grant.EgressCredential != "" {
+			eopts = append(eopts, grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.EgressCredential)))
 		}
-		ec, err := grpc.NewClient("passthrough:///"+st.API, grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithPerRPCCredentials(auth.Bearer(st.Grant.EgressCredential)), keep)
+		ec, err := dial(st.API, src, api, eopts...)
 		if err != nil {
 			return err
 		}

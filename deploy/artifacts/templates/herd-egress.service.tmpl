@@ -1,4 +1,5 @@
-# herd-egress on a joined host (docs/runbooks/join.md): its credential is the one `herdlet join` wrote.
+# herd-egress on a joined host (docs/runbooks/join.md): it is its SPIFFE identity from the host's SPIRE agent
+# (spiffe://<td>/herd/egress/<worker>, ADR 0001 A-60).
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herd-egress
@@ -6,7 +7,7 @@ After=herdlet.service
 
 [Service]
 EnvironmentFile=/etc/herd/herdlet.env
-ExecStart=[[.BinDir]]/herd-egress -api ${HERD_API} -token-file [[.HerdletStateDir]]/egress.token \
+ExecStart=[[.BinDir]]/herd-egress -api ${HERD_API} \
     -bindings /run/herd/egress-bindings.json -ca-out [[.HerdletStateDir]]/egress-ca.pem
 RuntimeDirectory=herd
 RuntimeDirectoryPreserve=yes

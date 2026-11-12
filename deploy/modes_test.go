@@ -2,7 +2,6 @@ package deploy_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ import (
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/auth"
-	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/imagetest"
@@ -22,9 +20,10 @@ import (
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
@@ -51,19 +50,10 @@ func registry() *imagetest.Registry {
 // test registry: templates become VMs through the same machines a real host has.
 func herdletOn(t *testing.T, worker string, store *fake.Store) deploy.Herdlet {
 	state := filepath.Join(t.TempDir(), "state")
-	return deploy.Herdlet{Worker: worker, StateDir: state, Slots: 1, Kernel: "vmlinux",
+	return deploy.Herdlet{Worker: worker, Identity: nodeIdentity(t, worker), StateDir: state, Slots: 1, Kernel: "vmlinux",
 		VCPUs: 1, MemoryMiB: 512, VMM: fake.New(chCaps(), store), Retry: 50 * time.Millisecond,
 		Images: &image.Cache{Dir: filepath.Join(state, "images"), Source: registry(), Builder: &imagetest.Builder{},
 			Platform: image.Platform{OS: "linux", Architecture: "amd64"}}}
-}
-
-func writeToken(t *testing.T, key []byte) string {
-	tok, err := auth.Sign(key, auth.Claims{Subject: "everdict", ExpiresAt: time.Now().Add(time.Hour).Unix(),
-		Spaces: map[string]auth.Role{space: auth.RoleWrite}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tok
 }
 
 // coldBoot is the golden snapshot config of these tests' templates: they count placements, which a template's golden
@@ -78,8 +68,11 @@ func ctxT(t *testing.T) context.Context {
 
 // workers lists the workers herd-api has registrations of.
 func workers(ctx context.Context, t *testing.T, addr, tok string) []string {
-	cc, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+	opts := []grpc.DialOption{transportFor(t, addr)}
+	if tok != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+	}
+	cc, err := grpc.NewClient("passthrough:///"+addr, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +106,7 @@ func waitWorkers(t *testing.T, addr, tok string, n int) []string {
 // pool creates a template and n actors through the Control API and returns the workers they were placed on.
 func pool(t *testing.T, addr, tok string, n int) []string {
 	t.Helper()
-	c := conformance.NewClient(addr, tok)
+	c := client(t, addr, tok)
 	defer c.Close()
 	ctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
@@ -168,11 +161,8 @@ func TestAllInOneJoinsItsOwnHerdlet(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("all-in-one not ready")
 	}
-	key, err := deploy.ReadKey(filepath.Join(data, "jwt.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok := writeToken(t, key)
+	localOperator(t, data, addrs.API)
+	tok := ""
 	waitWorkers(t, addrs.API, tok, 1)
 	if got := pool(t, addrs.API, tok, 1); got[0] != "aio" {
 		t.Errorf("actor placed on %q, want aio", got[0])
@@ -201,20 +191,23 @@ type api struct {
 	dir  string
 }
 
-func startAPI(t *testing.T) api {
+// startAPI runs herd-api on the tests' CA's SVID with a policy of no rules (its callers are nodes and operators).
+func startAPI(t *testing.T) api { return startAPIWith(t, nil) }
+
+// startAPIWith is startAPI with the HS256 break-glass on, until tomorrow, when breakGlass: its key is api.key.
+func startAPIWith(t *testing.T, configure func(*deploy.API)) api {
 	t.Helper()
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	key, err := deploy.EnsureKey(keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &deploy.API{KeyFile: keyFile, Store: "bolt:" + filepath.Join(dir, "herd.db"), Snapshots: filepath.Join(dir, "snapshots"),
-		CallTimeout: 5 * time.Second, Reconcile: time.Second}
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "bolt:" + filepath.Join(dir, "herd.db"),
+		Snapshots: filepath.Join(dir, "snapshots"), CallTimeout: 5 * time.Second, Reconcile: time.Second}
+	if configure != nil {
+		configure(a)
+	}
+	key := a.BreakGlass.Key
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx, ln) }()
@@ -239,75 +232,88 @@ func runHerdlet(t *testing.T, h deploy.Herdlet) <-chan error {
 	return done
 }
 
-// TestTwoHerdletsJoinOneToken: two hosts join one herd-api with one join token minted by `herd-api join-token`,
-// each becomes a worker, and actors are placed on both.
-func TestTwoHerdletsJoinOneToken(t *testing.T) {
+// TestTwoHerdletsJoinBySVID (ADR 0001 A-60): two hosts join one herd-api, each by its node SVID with no token, each
+// becomes a worker, and actors are placed on both.
+func TestTwoHerdletsJoinBySVID(t *testing.T) {
 	a := startAPI(t)
-	jt := &deploy.JoinToken{KeyFile: filepath.Join(a.dir, "jwt.key"), TTL: time.Hour}
-	tok, err := jt.Mint()
-	if err != nil {
-		t.Fatal(err)
-	}
 	shared := fake.NewStore()
 	for _, w := range []string{"node-1", "node-2"} {
 		h := herdletOn(t, w, shared)
-		h.API, h.Token, h.Snapshots = a.addr, tok, filepath.Join(a.dir, "snapshots")
+		h.API, h.Snapshots = a.addr, filepath.Join(a.dir, "snapshots")
 		runHerdlet(t, h)
 	}
-	ctl := writeToken(t, a.key)
-	waitWorkers(t, a.addr, ctl, 2)
-	got := pool(t, a.addr, ctl, 2)
+	waitWorkers(t, a.addr, "", 2)
+	got := pool(t, a.addr, "", 2)
 	if !((got[0] == "node-1" && got[1] == "node-2") || (got[0] == "node-2" && got[1] == "node-1")) {
 		t.Errorf("actors placed on %v, want one on each joined node", got)
 	}
 }
 
-// TestJoinRefusesAnInvalidToken: a join with a token herd-api did not sign, an expired join token, or a credential
-// that is not a join token gets no grant and no worker; and a join token cannot itself open a herdlet link.
-func TestJoinRefusesAnInvalidToken(t *testing.T) {
-	a := startAPI(t)
-	other := make([]byte, 32)
-	forged, _ := join.MintToken(other, time.Hour)
-	expired, _ := auth.Sign(a.key, auth.Claims{Subject: "join-old", ExpiresAt: time.Now().Add(-time.Minute).Unix(), Join: true})
-	herdletCred, _ := auth.Sign(a.key, auth.Claims{Subject: "node-x", ExpiresAt: time.Now().Add(time.Hour).Unix(), Herdlet: true})
-	control := writeToken(t, a.key)
-	for _, c := range []struct {
-		name, tok string
-		code      codes.Code
-	}{
-		{"forged", forged, codes.Unauthenticated},
-		{"expired", expired, codes.Unauthenticated},
-		{"herdlet-credential", herdletCred, codes.PermissionDenied},
-		{"control-token", control, codes.PermissionDenied},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			h := herdletOn(t, "node-x", nil)
-			h.API, h.Token = a.addr, c.tok
-			var err error
-			select {
-			case err = <-runHerdlet(t, h):
-			case <-time.After(5 * time.Second):
-				t.Fatalf("join with a %s token was accepted: the herdlet is still running", c.name)
-			}
-			if err == nil {
-				t.Fatalf("join with a %s token succeeded", c.name)
-			}
-			var se interface{ GRPCStatus() *status.Status }
-			if !errors.As(err, &se) || se.GRPCStatus().Code() != c.code {
-				t.Errorf("join with a %s token: %v, want %v", c.name, err, c.code)
-			}
-			if _, err := os.Stat(deploy.StatePath(h.StateDir)); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("a refused join left a grant: %v", err)
-			}
-		})
+// joinAs asks herd-api at addr for worker's grant, dialing as src with tok as its bearer if set.
+func joinAs(t *testing.T, addr string, src auth.Source, tok, worker string) error {
+	t.Helper()
+	cfg, err := auth.ClientTLS(src, auth.HerdID(spiffeid.RequireTrustDomainFromString(testTD), "api"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ws := workers(ctxT(t), t, a.addr, control); len(ws) != 0 {
-		t.Errorf("workers after refused joins: %v", ws)
+	cc, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	_, err = join.Call(ctxT(t), cc, tok, worker)
+	return err
+}
+
+// TestJoinRefusesWhatIsNotItsNode (A-60): a join is granted to the node SVID of the worker it names. Another node's
+// SVID, an operator's, and a join token while the HS256 break-glass is off get no grant; under the break-glass a join
+// token is still refused when forged or expired, and a join token cannot itself open a herdlet link.
+func TestJoinRefusesWhatIsNotItsNode(t *testing.T) {
+	a := startAPI(t)
+	node1 := source(t, "spiffe://"+testTD+"/herd/node/node-1")
+	if err := joinAs(t, a.addr, node1, "", "node-1"); err != nil {
+		t.Fatalf("node-1's SVID joining as node-1: %v", err)
+	}
+	key := make([]byte, 32)
+	jt, _ := join.MintToken(key, time.Hour)
+	for _, c := range []struct {
+		name   string
+		src    auth.Source
+		tok    string
+		code   codes.Code
+		reason string
+	}{
+		{"another node's SVID", node1, "", codes.PermissionDenied, `worker "node-1"'s`},
+		{"an operator's SVID", source(t, operatorID), "", codes.PermissionDenied, "neither a node SVID nor a join token"},
+		{"a join token without the break-glass", node1, jt, codes.Unauthenticated, "no break-glass allowance"},
+	} {
+		err := joinAs(t, a.addr, c.src, c.tok, "node-x")
+		if status.Code(err) != c.code || !strings.Contains(err.Error(), c.reason) {
+			t.Errorf("join of node-x with %s: %v, want %v naming %q", c.name, err, c.code, c.reason)
+		}
+	}
+
+	b := startAPIWith(t, func(a *deploy.API) {
+		a.BreakGlass = deploy.BreakGlass{Until: time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02"), Key: key}
+	})
+	good, _ := join.MintToken(key, time.Hour)
+	if err := joinAs(t, b.addr, node1, good, "node-x"); err != nil {
+		t.Errorf("a join token under the break-glass: %v", err)
+	}
+	forged, _ := join.MintToken([]byte("ffffffffffffffffffffffffffffffff"), time.Hour)
+	expired, _ := auth.Sign(key, auth.Claims{Subject: "join-old", ExpiresAt: time.Now().Add(-time.Minute).Unix(), Join: true})
+	for name, tok := range map[string]string{"forged": forged, "expired": expired} {
+		if err := joinAs(t, b.addr, node1, tok, "node-y"); status.Code(err) != codes.Unauthenticated {
+			t.Errorf("a %s join token under the break-glass: %v, want Unauthenticated", name, err)
+		}
 	}
 	// A join token is not a herdlet credential.
-	jt, _ := join.MintToken(a.key, time.Hour)
-	cc, err := grpc.NewClient("passthrough:///"+a.addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(auth.Bearer(jt)))
+	cfg, err := auth.ClientTLS(source(t, operatorID), auth.HerdID(spiffeid.RequireTrustDomainFromString(testTD), "api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, err := grpc.NewClient("passthrough:///"+b.addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)),
+		grpc.WithPerRPCCredentials(auth.Bearer(good)))
 	if err != nil {
 		t.Fatal(err)
 	}

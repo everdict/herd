@@ -1,6 +1,8 @@
 # herd-api for multi-host join (docs/runbooks/join.md). In /etc/herd/herd-api.env, HERD_ADVERTISE_TUNNEL is the
 # herd-router tunnel address herdlets dial (host:7444); HERD_S3 (s3://bucket[/prefix]) and HERD_S3_ENDPOINT, with
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, keep snapshots in that bucket (empty HERD_S3: the -snapshots directory).
+# herd-api is spiffe://<td>/herd/api from the host's SPIRE agent, and the workloads' atespace grants are
+# /etc/herd/spiffe-policy.json; without either it does not start (ADR 0001 A-60).
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herd-api
@@ -9,7 +11,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/herd/herd-api.env
-ExecStart=[[.BinDir]]/herd-api -listen 0.0.0.0:7443 -key-file /etc/herd/jwt.key \
+ExecStart=[[.BinDir]]/herd-api -listen 0.0.0.0:7443 \
     -store bolt:[[.DataDir]]/herd.db -snapshots [[.SnapshotDir]] -advertise-tunnel ${HERD_ADVERTISE_TUNNEL} \
     -s3 ${HERD_S3} -s3-endpoint ${HERD_S3_ENDPOINT}
 Restart=on-failure

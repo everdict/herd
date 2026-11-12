@@ -4,9 +4,9 @@
 // into them, and the all-in-one binary (cmd/herd) runs the same four in one process. A mode is configuration:
 //
 //   - all-in-one: `herd -data DIR` — herd-api on a bbolt store, herd-router, herd-egress and a herdlet that joins
-//     that herd-api over loopback with a join token the process mints;
-//   - multi-host join: herd-api (+ herd-router) on one host, `herdlet join <herd-api> --token <t>` and herd-egress on
-//     each node;
+//     that herd-api over loopback as the node SVID its local CA issues (ADR 0001 A-60);
+//   - multi-host join: herd-api (+ herd-router) on one host, `herdlet join <herd-api>` (as the node's SVID) and
+//     herd-egress on each node;
 //   - Nomad: the same binaries as a herd-api service job and a herdlet system job (dist/nomad).
 package deploy
 
@@ -34,7 +34,6 @@ import (
 	"github.com/everdict/herd/store/boltstore"
 	"github.com/everdict/herd/store/memstore"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -82,8 +81,6 @@ func OpenStore(spec string) (store.Store, error) {
 // API is herd-api's configuration.
 type API struct {
 	Listen    string
-	KeyFile   string
-	Audience  string
 	Store     string
 	Snapshots string
 	// S3 (s3://bucket[/prefix]), if set, keeps snapshots in that bucket at S3Endpoint instead of the Snapshots
@@ -104,33 +101,28 @@ type API struct {
 	// -snapshot-sweep, 0: never); the first pass runs SnapshotSweepDelay after start.
 	SnapshotSweep      time.Duration
 	SnapshotSweepDelay time.Duration
-	// Identity authenticates callers by SPIFFE SVIDs beside HS256 break-glass (ADR 0001 A-60).
+	// Identity is herd-api's own SPIFFE identity (ADR 0001 A-60): the Workload API's by default. Listen serves
+	// gRPC over TLS with it; a caller is its client X.509-SVID, or the JWT-SVID it carries as its bearer.
 	Identity Identity
-	// TLSListen, with TLSCert and TLSKey (herd-api's own X.509-SVID, PEM), serves the same API over mTLS, where a
-	// caller with no bearer is its client certificate's X.509-SVID (-tls-listen). Listen stays cleartext for
-	// bearers (JWT-SVID or HS256) and herdlets.
-	TLSListen string
-	TLSCert   string
-	TLSKey    string
-	// MetricsListen serves the A-60 allowance counters at /metrics (-metrics-listen; empty: not served).
+	// Policy grants workloads atespace roles (-spiffe-policy, default DefaultPolicy, which must exist).
+	Policy string
+	// BreakGlass is the dated HS256 allowance (-break-glass-hs256-until, -key-file, -audience): off by default.
+	BreakGlass BreakGlass
+	// MetricsListen serves the A-60 allowance counters at /metrics (-metrics-listen, default DefaultAPIMetrics in
+	// the flags; empty: not served).
 	MetricsListen string
-	// TLSListener and MetricsListener, if set, are used instead of TLSListen and MetricsListen (tests).
-	TLSListener     net.Listener
+	// MetricsListener, if set, is used instead of MetricsListen (tests).
 	MetricsListener net.Listener
 	// Meter, if set, is the meter herd-api counts on instead of a new one (tests).
 	Meter *auth.Meter
 
-	// Key, if set, is used instead of KeyFile (all-in-one reads or creates its own).
-	Key []byte
 	// OnJoin, if set, sees every join herd-api granted.
 	OnJoin func(join.Grant)
 }
 
 // Flags registers herd-api's flags on fs.
 func (a *API) Flags(fs *flag.FlagSet) {
-	fs.StringVar(&a.Listen, "listen", "127.0.0.1:7443", "address to serve gRPC (cleartext HTTP/2) on")
-	fs.StringVar(&a.KeyFile, "key-file", "", "HS256 signing key for bearer tokens (at least 32 bytes)")
-	fs.StringVar(&a.Audience, "audience", "", "required JWT audience, if any")
+	fs.StringVar(&a.Listen, "listen", "127.0.0.1:7443", "address to serve gRPC over TLS on, with herd-api's SVID: a caller is its client X.509-SVID or its JWT-SVID bearer")
 	fs.StringVar(&a.Store, "store", "memory", "record store: memory or bolt:<path> (one herd-api per file)")
 	fs.StringVar(&a.Snapshots, "snapshots", "", "snapshot store directory (all-in-one, or hosts that share it; see -s3)")
 	fs.StringVar(&a.S3, "s3", "", "keep snapshots in this bucket instead, s3://bucket[/prefix]; joins hand herdlets the store (credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
@@ -143,10 +135,9 @@ func (a *API) Flags(fs *flag.FlagSet) {
 	fs.DurationVar(&a.CredentialTTL, "credential-ttl", 365*24*time.Hour, "lifetime of the credentials a join grants")
 	fs.DurationVar(&a.GoldenWarmup, "golden-warmup", DefaultGoldenWarmup, goldenWarmupUsage)
 	a.Identity.Flags(fs)
-	fs.StringVar(&a.TLSListen, "tls-listen", "", "also serve over mTLS here: a caller without a bearer is its client certificate's X.509-SVID (needs -tls-cert, -tls-key and -spiffe-trust-domain)")
-	fs.StringVar(&a.TLSCert, "tls-cert", "", "herd-api's own certificate chain for -tls-listen (PEM, e.g. its X.509-SVID); read again when it changes")
-	fs.StringVar(&a.TLSKey, "tls-key", "", "the private key of -tls-cert (PEM); read again when it changes")
-	fs.StringVar(&a.MetricsListen, "metrics-listen", "", "serve the authentication allowance counters (break-glass HS256 calls, writes on actors with no creator) at http://<addr>/metrics")
+	a.BreakGlass.Flags(fs)
+	fs.StringVar(&a.Policy, "spiffe-policy", "", "JSON policy granting workloads (SPIFFE IDs, exact or by path prefix) atespace roles read|write|operator (default "+DefaultPolicy+", which must exist; herd's own nodes, egress and operators are built in); read again when it changes")
+	fs.StringVar(&a.MetricsListen, "metrics-listen", DefaultAPIMetrics, "serve the authentication allowance counters at http://<addr>/metrics (empty: not served)")
 	fs.DurationVar(&a.SnapshotSweep, "snapshot-sweep", DefaultSnapshotSweep, "how often to remove the snapshot objects no actor, tag or template record names (older than an hour) and abort writes unfinished for a day; the first pass runs 10 minutes after start (0: never)")
 }
 
@@ -164,12 +155,27 @@ const goldenWarmupUsage = "how long a template's golden actor runs before its go
 
 // Run serves herd-api on ln until ctx ends. It never dials a herdlet.
 func (a *API) Run(ctx context.Context, ln net.Listener) error {
-	key := a.Key
-	if key == nil {
-		var err error
-		if key, err = ReadKey(a.KeyFile); err != nil {
-			return err
-		}
+	src, closeID, err := a.Identity.Open(ctx, "herd-api")
+	if err != nil {
+		return err
+	}
+	defer closeID()
+	self, err := requireID("herd-api", src, "api")
+	if err != nil {
+		return err
+	}
+	policy, err := policyFile("herd-api", a.Policy)
+	if err != nil {
+		return err
+	}
+	meter := a.Meter
+	if meter == nil {
+		meter = auth.NewMeter()
+	}
+	// A JWT-SVID for herd-api names herd-api's own SPIFFE ID as its audience.
+	authn, key, err := authenticator("herd-api", src, self, policy, &a.BreakGlass, meter)
+	if err != nil {
+		return err
 	}
 	st, err := OpenStore(a.Store)
 	if err != nil {
@@ -179,30 +185,6 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	snaps, s3cfg, err := a.snapshots()
 	if err != nil {
 		return err
-	}
-	meter := a.Meter
-	if meter == nil {
-		meter = auth.NewMeter()
-	}
-	authn, err := a.Identity.Authenticator(key, a.Audience, meter)
-	if err != nil {
-		return err
-	}
-	tln := a.TLSListener
-	if tln == nil && a.TLSListen != "" {
-		if !a.Identity.Enabled() {
-			return errors.New("-tls-listen needs -spiffe-trust-domain: a client certificate is verified as an X.509-SVID")
-		}
-		if tln, err = net.Listen("tcp", a.TLSListen); err != nil {
-			return err
-		}
-	}
-	var kp *keyPair
-	if tln != nil {
-		defer tln.Close()
-		if kp, err = loadKeyPair(a.TLSCert, a.TLSKey); err != nil {
-			return err
-		}
 	}
 	mln := a.MetricsListener
 	if mln == nil && a.MetricsListen != "" {
@@ -220,8 +202,8 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 		return err
 	}
 	log.Printf("herd-api: record store %s, store id %s", a.Store, srv.StoreID())
-	// A join token is HS256 by construction (join.MintToken): the join service keeps the shared key's authenticator.
-	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: auth.StaticKey{Key: key, Audience: a.Audience}, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
+	// A node joins by its SVID; a join token is HS256, so only under the break-glass allowance (key set).
+	js := &join.Server{OnGrant: a.OnJoin, Key: key, Authn: authn, Tunnel: a.AdvertiseTunnel, Snapshots: s3cfg, TTL: a.CredentialTTL,
 		Connected: func(w string) bool {
 			for _, c := range hub.Workers() {
 				if c.Worker == w {
@@ -231,16 +213,9 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 			return false
 		}}
 	// Herdlets behind NAT keep their link alive with pings (every 15 s); allow them every 10 s, as herd-router does.
-	g := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(serverCreds(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
 	srv.Register(g)
 	js.Register(g)
-	var tg *grpc.Server
-	if tln != nil {
-		tg = grpc.NewServer(grpc.Creds(credentials.NewTLS(mtlsConfig(kp))),
-			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
-		srv.Register(tg)
-		log.Printf("herd-api serving mTLS on %s", tln.Addr())
-	}
 	every := a.Reconcile
 	if every <= 0 {
 		every = 10 * time.Second
@@ -273,22 +248,11 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	if mln != nil {
 		go serveMetrics(ctx, mln, meter, "herd-api")
 	}
-	log.Printf("herd-api serving on %s", ln.Addr())
+	log.Printf("herd-api serving gRPC over TLS as %s on %s", self, ln.Addr())
 	go func() {
 		<-ctx.Done()
 		g.Stop()
-		if tg != nil {
-			tg.Stop()
-		}
 	}()
-	if tg != nil {
-		go func() {
-			if err := tg.Serve(tln); err != nil && ctx.Err() == nil {
-				log.Printf("herd-api: mTLS listener: %v", err)
-				cancel()
-			}
-		}()
-	}
 	err = g.Serve(ln)
 	srv.Close()
 	srv.Wait()

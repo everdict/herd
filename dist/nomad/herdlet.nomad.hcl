@@ -1,12 +1,13 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
-# herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
-# keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
+# herdlet joins herd-api once as its node's SPIFFE identity, spiffe://<td>/herd/node/<worker>, from the node's SPIRE
+# agent (ADR 0001 A-60; herd-egress is spiffe://<td>/herd/egress/<worker>, or the node's), and reuses its grant after
+# that; without the agent neither starts. It keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
 # docker config file, is the node's registry logins for private template images (-registry-auth, rendered 0600).
 # insecure_registries are registry hosts it pulls from over plain HTTP (-insecure-registry, comma-separated; ""
 # names none), a node-level fallback that defaults to none: a template's golden pull names its own plain-HTTP hosts
 # (image_plain_http_hosts), the store and its token realm, so no job holds a cluster's address.
 # The resources are the herdlet's own: each VM's cloud-hypervisor and virtiofsd run in a cgroup of the VM's own under
-# /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (ADR A-54), not the task's.
+# /sys/fs/cgroup/herd (-vm-cgroup), outside this task's, so the VMs' memory is herd's capacity (-slots), not the task's.
 # Rendered by deploy/artifacts; edit the template, not this file.
 # The base URL every client fetches herd_linux_<arch>.tar.gz from: a mirror of the release (docs/runbooks/nomad.md
 # step 3). No default: everdict/herd is private, and its GitHub release URL answers 404 to an artifact, which
@@ -54,12 +55,6 @@ job "herdlet" {
         env         = true
       }
 
-      template {
-        data        = "{{ with nomadVar \"nomad/jobs/herdlet\" }}{{ .join_token }}{{ end }}"
-        destination = "secrets/join.token"
-        perms       = "0600"
-      }
-
       # The node's registry logins for private template images (-registry-auth): the variable's registry_auth, a docker
       # config file; without it the file is empty and pulls are anonymous.
       template {
@@ -72,7 +67,6 @@ job "herdlet" {
         command = "local/herdlet"
         args = [
           "join", "${HERD_API}",
-          "-token-file", "secrets/join.token",
           "-state", "/var/lib/herdlet",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
@@ -111,7 +105,6 @@ job "herdlet" {
         command = "local/herd-egress"
         args = [
           "-api", "${HERD_API}",
-          "-token-file", "/var/lib/herdlet/egress.token",
           "-bindings", "/run/herd/egress-bindings.json",
           "-ca-out", "/var/lib/herdlet/egress-ca.pem",
           "-host-services-file", "local/host-services",

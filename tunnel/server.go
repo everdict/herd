@@ -82,9 +82,10 @@ func (s *Server) herdlet(ctx context.Context) (string, error) {
 		}
 	}
 	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok || tok == "" {
-		return "", status.Errorf(codes.Unauthenticated, "no bearer token")
+	if (!ok || tok == "") && len(auth.PeerChain(ctx)) == 0 {
+		return "", status.Errorf(codes.Unauthenticated, "no node SVID and no bearer token")
 	}
+	// No bearer: the tunnel is its node's X.509-SVID over mTLS (ADR 0001 A-60).
 	p, err := s.Authn.Authenticate(ctx, tok)
 	if err != nil {
 		return "", status.Errorf(codes.Unauthenticated, "%v", err)

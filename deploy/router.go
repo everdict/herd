@@ -12,7 +12,6 @@ import (
 	"github.com/everdict/herd/router"
 	"github.com/everdict/herd/tunnel"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -21,47 +20,56 @@ type Router struct {
 	Listen        string
 	TunnelListen  string
 	API           string
-	KeyFile       string
-	Audience      string
 	ParkingBudget time.Duration
 	DefaultPort   uint
-	// Identity authenticates clients by JWT-SVID bearers beside HS256 break-glass (ADR 0001 A-60). The router
-	// forwards the client's bearer to herd-api, so a client is a bearer here: X.509-SVIDs are herd-api's -tls-listen.
+	// Identity is herd-router's own SPIFFE identity (spiffe://<td>/herd/router), the Workload API's by default. Both
+	// listeners serve TLS with it, and it dials herd-api as itself. A client is the bearer it carries (a JWT-SVID for
+	// herd-api, which the router forwards); a herdlet's tunnel is its node's X.509-SVID.
 	Identity Identity
-	// MetricsListen serves the router's allowance counters at /metrics (empty: not served).
+	// Policy grants workloads atespace roles (-spiffe-policy, default DefaultPolicy, which must exist).
+	Policy string
+	// BreakGlass is the dated HS256 allowance, as herd-api's.
+	BreakGlass BreakGlass
+	// MetricsListen serves the router's allowance counters at /metrics (default DefaultRouterMetrics in the flags;
+	// empty: not served).
 	MetricsListen string
-
-	// Key, if set, is used instead of KeyFile.
-	Key []byte
 }
 
 // Flags registers herd-router's flags on fs.
 func (r *Router) Flags(fs *flag.FlagSet) {
-	fs.StringVar(&r.Listen, "listen", "127.0.0.1:8443", "address clients connect to (HTTP/1.1 and h2c)")
-	fs.StringVar(&r.TunnelListen, "tunnel-listen", "127.0.0.1:7444", "address herdlets open their tunnels to (gRPC)")
-	fs.StringVar(&r.API, "api", "127.0.0.1:7443", "herd-api address")
-	fs.StringVar(&r.KeyFile, "key-file", "", "HS256 key bearer tokens are signed with (herd-api's)")
-	fs.StringVar(&r.Audience, "audience", "", "required JWT audience, if any")
+	fs.StringVar(&r.Listen, "listen", "127.0.0.1:8443", "address clients connect to (HTTP/1.1 and HTTP/2 over TLS, with herd-router's SVID)")
+	fs.StringVar(&r.TunnelListen, "tunnel-listen", "127.0.0.1:7444", "address herdlets open their tunnels to (gRPC over TLS; a tunnel is its node's X.509-SVID)")
+	fs.StringVar(&r.API, "api", "127.0.0.1:7443", "herd-api address (dialed over TLS as herd-router, expecting spiffe://<td>/herd/api)")
 	fs.DurationVar(&r.ParkingBudget, "parking-budget", 30*time.Second, "how long a request waits for its actor to become reachable")
 	fs.UintVar(&r.DefaultPort, "default-port", 8080, "guest port ordinary requests go to (herd-guest's API)")
 	r.Identity.Flags(fs)
-	fs.StringVar(&r.MetricsListen, "metrics-listen", "", "serve the authentication allowance counters at http://<addr>/metrics")
+	r.BreakGlass.Flags(fs)
+	fs.StringVar(&r.Policy, "spiffe-policy", "", "JSON policy granting workloads atespace roles, as herd-api's (default "+DefaultPolicy+", which must exist)")
+	fs.StringVar(&r.MetricsListen, "metrics-listen", DefaultRouterMetrics, "serve the authentication allowance counters at http://<addr>/metrics (empty: not served)")
 }
 
 // Run serves clients on cl and herdlets' tunnels on tl until ctx ends. Its one outbound connection is to herd-api.
 func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
-	key := r.Key
-	if key == nil {
-		var err error
-		if key, err = ReadKey(r.KeyFile); err != nil {
-			return err
-		}
-	}
 	if r.DefaultPort == 0 || r.DefaultPort > 65535 {
 		return fmt.Errorf("-default-port %d", r.DefaultPort)
 	}
+	src, closeID, err := r.Identity.Open(ctx, "herd-router")
+	if err != nil {
+		return err
+	}
+	defer closeID()
+	self, err := requireID("herd-router", src, "router")
+	if err != nil {
+		return err
+	}
+	policy, err := policyFile("herd-router", r.Policy)
+	if err != nil {
+		return err
+	}
 	meter := auth.NewMeter()
-	authn, err := r.Identity.Authenticator(key, r.Audience, meter)
+	// The router forwards a client's bearer to herd-api, so the JWT-SVID it checks is one for herd-api.
+	apiID := auth.HerdID(self.TrustDomain(), "api")
+	authn, _, err := authenticator("herd-router", src, apiID, policy, &r.BreakGlass, meter)
 	if err != nil {
 		return err
 	}
@@ -72,13 +80,12 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 		}
 		go serveMetrics(ctx, mln, meter, "herd-router")
 	}
-	cc, err := grpc.NewClient("passthrough:///"+r.API, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cc, err := dial(r.API, src, apiID)
 	if err != nil {
 		return err
 	}
 	defer cc.Close()
-	// A herdlet's tunnel credential is the HS256 one its join granted (link credentials are W-5's to move to SVIDs).
-	tunnels := &tunnel.Server{Authn: auth.StaticKey{Key: key, Audience: r.Audience}}
+	tunnels := &tunnel.Server{Authn: authn}
 	rt, err := router.New(router.Config{
 		Control: router.GRPCControl{CC: cc}, Tunnels: tunnels, Authn: authn, Authz: auth.SpaceRoles{}, Meter: meter,
 		DefaultPort: uint32(r.DefaultPort), ParkingBudget: r.ParkingBudget,
@@ -87,12 +94,15 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 		return err
 	}
 	// Herdlets behind NAT keep their tunnel alive with pings; allow them every 10 s even with no stream open.
-	g := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(serverCreds(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
 	tunnels.Register(g)
 	hs := router.NewHTTPServer(rt)
+	hs.Protocols.SetHTTP2(true)
+	hs.TLSConfig = auth.ServerTLS(src)
+	hs.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
 	errc := make(chan error, 2)
 	go func() { errc <- g.Serve(tl) }()
-	go func() { errc <- hs.Serve(cl) }()
+	go func() { errc <- hs.ServeTLS(cl, "", "") }()
 	log.Printf("herd-router: clients on %s, herdlet tunnels on %s, herd-api at %s", cl.Addr(), tl.Addr(), r.API)
 	select {
 	case <-ctx.Done():

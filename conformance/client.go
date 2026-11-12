@@ -21,9 +21,15 @@ type Client struct {
 	err error
 }
 
-// NewClient dials addr with a bearer token (empty for none).
+// NewClient dials addr in cleartext with a bearer token (empty for none): the harness's in-process herd-api.
 func NewClient(addr, token string) *Client {
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	return NewClientOpts(addr, token, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
+
+// NewClientOpts dials addr with a bearer token (empty for none) and the dial options given, which name the transport
+// (herd-api serves TLS: deploy's tests dial it with an SVID).
+func NewClientOpts(addr, token string, transport ...grpc.DialOption) *Client {
+	opts := append([]grpc.DialOption{}, transport...)
 	if token != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(auth.Bearer(token)))
 	}

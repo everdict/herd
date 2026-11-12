@@ -1,6 +1,9 @@
 # herd-api and herd-router as a Nomad service job (docs/runbooks/nomad.md). Nomad supervises the processes; herd
 # places the actors. The bbolt store allows one herd-api, so count = 1 on the node that holds the herd-data host
-# volume. Snapshots go to the S3 bucket named in the job's Nomad variable, which joins hand to every herdlet.
+# volume. Snapshots go to the S3 bucket named in the job's Nomad variable, which joins hand to every herdlet. Both
+# take their SPIFFE identity from the node's SPIRE agent (the spire-agent-socket host volume, ADR 0001 A-60): herd-api
+# is spiffe://<td>/herd/api, herd-router spiffe://<td>/herd/router; without the agent neither starts. The workloads'
+# atespace grants are the job variable's spiffe_policy.
 # Rendered by deploy/artifacts; edit the template, not this file.
 # The base URL every client fetches herd_linux_<arch>.tar.gz from: a mirror of the release (docs/runbooks/nomad.md
 # step 3). No default: everdict/herd is private, and its GitHub release URL answers 404 to an artifact, which
@@ -32,6 +35,13 @@ job "herd-api" {
       source = "herd-data"
     }
 
+    # The SPIRE agent's Workload API socket directory, a host volume of every node that runs herd.
+    volume "spire-agent" {
+      type      = "host"
+      source    = "spire-agent-socket"
+      read_only = true
+    }
+
     service {
       name     = "herd-api"
       port     = "api"
@@ -56,10 +66,15 @@ job "herd-api" {
         destination = "/var/lib/herd"
       }
 
+      volume_mount {
+        volume      = "spire-agent"
+        destination = "/run/spire/agent/sockets"
+        read_only   = true
+      }
+
       template {
-        data        = "{{ with nomadVar \"nomad/jobs/herd-api\" }}{{ .jwt_key }}{{ end }}"
-        destination = "secrets/jwt.key"
-        perms       = "0600"
+        data        = "{{ with nomadVar \"nomad/jobs/herd-api\" }}{{ .spiffe_policy }}{{ end }}"
+        destination = "local/spiffe-policy.json"
       }
 
       template {
@@ -78,7 +93,7 @@ job "herd-api" {
         command = "local/herd-api"
         args = [
           "-listen", "0.0.0.0:${NOMAD_PORT_api}",
-          "-key-file", "secrets/jwt.key",
+          "-spiffe-policy", "local/spiffe-policy.json",
           "-store", "bolt:/var/lib/herd/herd.db",
           "-snapshots", "/var/lib/herd/snapshots",
           "-advertise-tunnel", "${NOMAD_ADDR_tunnel}",
@@ -95,10 +110,15 @@ job "herd-api" {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
       }
 
+      volume_mount {
+        volume      = "spire-agent"
+        destination = "/run/spire/agent/sockets"
+        read_only   = true
+      }
+
       template {
-        data        = "{{ with nomadVar \"nomad/jobs/herd-api\" }}{{ .jwt_key }}{{ end }}"
-        destination = "secrets/jwt.key"
-        perms       = "0600"
+        data        = "{{ with nomadVar \"nomad/jobs/herd-api\" }}{{ .spiffe_policy }}{{ end }}"
+        destination = "local/spiffe-policy.json"
       }
 
       config {
@@ -107,7 +127,7 @@ job "herd-api" {
           "-listen", "0.0.0.0:${NOMAD_PORT_router}",
           "-tunnel-listen", "0.0.0.0:${NOMAD_PORT_tunnel}",
           "-api", "${NOMAD_ADDR_api}",
-          "-key-file", "secrets/jwt.key",
+          "-spiffe-policy", "local/spiffe-policy.json",
         ]
       }
     }

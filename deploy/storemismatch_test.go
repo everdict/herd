@@ -13,8 +13,6 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
-	"github.com/everdict/herd/auth"
-	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/snapstore/s3"
@@ -68,9 +66,9 @@ func runAllInOne(t *testing.T, a *deploy.AllInOne) (deploy.Addrs, func()) {
 // it proved the herdlet's snapshot object in its own store.
 func suspendOne(t *testing.T, addr string, key []byte) error {
 	t.Helper()
-	ctl := writeToken(t, key)
+	ctl := ""
 	waitWorkers(t, addr, ctl, 1)
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
@@ -133,11 +131,8 @@ func TestAllInOneRestartedWithAnotherStoreUsesIt(t *testing.T) {
 			log.SetOutput(io.MultiWriter(&logs, out))
 			t.Cleanup(func() { log.SetOutput(out) })
 			addrs, _ := runAllInOne(t, herd(tc.second))
-			key, err := deploy.ReadKey(filepath.Join(data, "jwt.key"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := suspendOne(t, addrs.API, key); err != nil {
+			localOperator(t, data, addrs.API)
+			if err := suspendOne(t, addrs.API, nil); err != nil {
 				t.Errorf("SuspendActor after the restart: %v", err)
 			}
 			inBucket := len(srv.Keys()) > 0
@@ -168,13 +163,12 @@ func TestJoinedHerdletWithAnotherStoreRefusesToLink(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var addr string
-			var key []byte
 			var bucket *s3.Config
 			if tc.apiS3 {
-				_, _, addr, key, _ = s3HerdAPI(t)
+				_, _, addr, _, _ = s3HerdAPI(t)
 			} else {
 				a := startAPI(t)
-				addr, key = a.addr, a.key
+				addr = a.addr
 				ts := s3test.Start(t, s3test.New("us-east-1", creds))
 				bucket = &s3.Config{Endpoint: ts.URL, Region: "us-east-1", Bucket: "herd", Prefix: "snapshots",
 					AccessKeyID: creds.AccessKeyID, SecretAccessKey: creds.SecretAccessKey}
@@ -186,11 +180,8 @@ func TestJoinedHerdletWithAnotherStoreRefusesToLink(t *testing.T) {
 
 			h := herdletOn(t, "node-1", nil)
 			h.Snapshots = filepath.Join(t.TempDir(), "snapshots")
-			cred, err := auth.Sign(key, auth.Claims{Subject: "node-1", ExpiresAt: time.Now().Add(time.Hour).Unix(), Herdlet: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			st := deploy.State{API: addr, Grant: join.Grant{Worker: "node-1", Credential: cred, Snapshots: bucket}}
+			// The grant an earlier join by the node's SVID left: no credential, the node is its SVID.
+			st := deploy.State{API: addr, Grant: join.Grant{Worker: "node-1", Snapshots: bucket}}
 			b, err := json.Marshal(st)
 			if err != nil {
 				t.Fatal(err)

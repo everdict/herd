@@ -20,7 +20,6 @@ import (
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/mkfs"
 	ociregistry "github.com/everdict/herd/image/registry"
-	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/snapstore/s3/s3test"
 	"github.com/everdict/herd/vmm"
@@ -107,10 +106,7 @@ func TestRealHostMemoryAcrossHerdlets(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	key, err := deploy.EnsureKey(filepath.Join(dir, "jwt.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	herd := newTestHerd(t)
 	bucket, endpoint := env("HERD_REAL_S3", "s3://herd-snapshots"), os.Getenv("HERD_REAL_S3_ENDPOINT")
 	creds := s3.Credentials{AccessKeyID: os.Getenv("AWS_ACCESS_KEY_ID"), SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY")}
 	if endpoint == "" {
@@ -131,15 +127,11 @@ func TestRealHostMemoryAcrossHerdlets(t *testing.T) {
 		go func() { c <- f() }()
 	}
 	apiLn, cl, tl := listen(t), listen(t), listen(t)
-	api := &deploy.API{Key: key, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: bucket, S3Endpoint: endpoint,
+	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: bucket, S3Endpoint: endpoint,
 		S3Credentials: creds, CallTimeout: 2 * time.Minute, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Key: key, API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), Policy: herd.policy, API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
-	jt, err := join.MintToken(key, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	builder, why, err := mkfs.Detect(ctx, mkfs.Exec{})
 	if err != nil {
 		t.Fatalf("rootfs builder: %s: %v", why, err)
@@ -153,7 +145,7 @@ func TestRealHostMemoryAcrossHerdlets(t *testing.T) {
 		nodes[w] = v
 		h := deploy.Herdlet{Worker: w, Labels: "pool=" + w, StateDir: state, Slots: 4, Kernel: kernel, Initrd: initrd,
 			VCPUs: 1, MemoryMiB: 512, GuestPort: 8080, VMM: v, Guests: v, Retry: 200 * time.Millisecond,
-			API: apiLn.Addr().String(), Token: jt,
+			API: apiLn.Addr().String(), Identity: herd.id(t, "/herd/node/"+w),
 			Images: &image.Cache{Dir: filepath.Join(state, "images"), Source: &ociregistry.Client{}, Builder: builder,
 				Platform: image.Platform{OS: "linux", Architecture: runtime.GOARCH}}}
 		if w == "herdlet-n" {
@@ -163,9 +155,9 @@ func TestRealHostMemoryAcrossHerdlets(t *testing.T) {
 		}
 		serve(func() error { return h.Run(ctx) })
 	}
-	tok := token(t, key)
+	tok := herd.token(t, apiLn.Addr().String(), cl.Addr().String())
 	waitWorkers(t, apiLn.Addr().String(), tok, 3)
-	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: apiLn.Addr().String()}, tok)
+	c, err := substrateapi.DialControl(ep(apiLn.Addr().String()), tok)
 	if err != nil {
 		t.Fatal(err)
 	}
