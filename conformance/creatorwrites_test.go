@@ -239,3 +239,41 @@ func TestUnownedActorWrites(t *testing.T) {
 		}
 	}
 }
+
+// TestEgressPolicyIsTheActorsByUID (review 5): an egress policy belongs to the actor uid it was written for. A policy
+// record of an earlier actor of the same name (what a write racing that actor's delete leaves) is not the new actor's:
+// GetActorEgressPolicy answers NotFound, and the new actor's own create replaces it.
+func TestEgressPolicyIsTheActorsByUID(t *testing.T) {
+	e := conformance.Start(t, conformance.HerdletSpec{Name: "h1", Slots: 2})
+	ctx := ctxT(t)
+	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	mkActor(t, e, "a1", "tpl", nil)
+	rule := []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"old.example.com"}}}}
+	if _, err := e.Client.CreateActorEgressPolicy(ctx, &ateapi.CreateActorEgressPolicyRequest{Actor: oref(e, "a1"), EgressPolicy: &ateapi.EgressPolicy{Rules: rule}}); err != nil {
+		t.Fatal(err)
+	}
+	k := store.Key{Kind: store.KindEgressPolicy, Space: e.Space, Name: "a1"}
+	left, err := e.Store.Get(ctx, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Client.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: oref(e, "a1")}); err != nil {
+		t.Fatal(err)
+	}
+	// The racing write lands after the delete removed the policy.
+	left.UID, left.Version = "", 0
+	if _, err := e.Store.Create(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	mkActor(t, e, "a1", "tpl", nil)
+	_, err = e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a1")})
+	wantCode(t, "the new a1's egress policy, with the earlier a1's record left", err, codes.NotFound)
+	if _, err := e.Client.CreateActorEgressPolicy(ctx, &ateapi.CreateActorEgressPolicyRequest{Actor: oref(e, "a1"),
+		EgressPolicy: &ateapi.EgressPolicy{Rules: []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"new.example.com"}}}}}}); err != nil {
+		t.Fatalf("the new a1's own create over the earlier a1's record: %v", err)
+	}
+	p, err := e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a1")})
+	if err != nil || p.GetRules()[0].GetHttps().GetHostnames()[0] != "new.example.com" {
+		t.Errorf("the new a1's egress policy: %v, %v; want its own", p, err)
+	}
+}
