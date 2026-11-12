@@ -139,9 +139,7 @@ func (c *ca) jwks(t *testing.T) []byte {
 
 const policy = `{"rules": [
   {"id": "spiffe://herd.test/everdict/ws/acme/runner/r1", "spaces": {"acme": "write"}},
-  {"prefix": "spiffe://herd.test/everdict/ws/acme/", "spaces": {"acme": "read"}},
-  {"prefix": "spiffe://herd.test/herd/node/", "herdlet": true},
-  {"id": "spiffe://herd.test/herd/operator/alice", "spaces": {"*": "operator"}}
+  {"prefix": "spiffe://herd.test/everdict/ws/acme/", "spaces": {"acme": "read"}}
 ]}`
 
 func write(t *testing.T, dir, name string, b []byte) string {
@@ -180,8 +178,9 @@ func wantRefused(t *testing.T, what string, err error, reason string) {
 }
 
 // TestSPIFFEAcceptsX509SVID (PLT-489, A-60): an X.509-SVID presented as the mTLS client certificate, chained to the
-// bundle, in the trust domain and not expired, is the principal its policy rule maps: an exact id rule over a
-// prefix, a node's herdlet credential naming its worker, an operator role.
+// bundle, in the trust domain and not expired, is the principal its policy rule maps (an exact id rule over a prefix)
+// or, for herd's own identities, its built-in grant with no rule: a node's herdlet credential naming its worker, an
+// operator in every atespace, a node's herd-egress reading every atespace.
 func TestSPIFFEAcceptsX509SVID(t *testing.T) {
 	c := newCA(t, td)
 	s, _ := newSPIFFE(t, c.spiffeBundle(t, td))
@@ -193,8 +192,11 @@ func TestSPIFFEAcceptsX509SVID(t *testing.T) {
 	}{
 		{runnerID, func(p auth.Principal) bool { return p.Spaces["acme"] == auth.RoleWrite }, "the exact id rule's write role"},
 		{"spiffe://herd.test/everdict/ws/acme/runner/r2", func(p auth.Principal) bool { return p.Spaces["acme"] == auth.RoleRead }, "the prefix rule's read role"},
-		{"spiffe://herd.test/herd/node/w1", func(p auth.Principal) bool { return p.Herdlet && p.HerdletWorker() == "w1" && len(p.Spaces) == 0 }, "a herdlet credential for worker w1"},
+		{"spiffe://herd.test/herd/node/w1", func(p auth.Principal) bool {
+			return p.Herdlet && p.HerdletWorker() == "w1" && p.Spaces[auth.AllSpaces] == auth.RoleRead
+		}, "a herdlet credential for worker w1 that reads every space"},
 		{"spiffe://herd.test/herd/operator/alice", func(p auth.Principal) bool { return p.Spaces[auth.AllSpaces] == auth.RoleOperator }, "the operator role"},
+		{"spiffe://herd.test/herd/egress/w1", func(p auth.Principal) bool { return p.Spaces[auth.AllSpaces] == auth.RoleRead && !p.Herdlet }, "read in every space"},
 	} {
 		p, err := s.Authenticate(withChain(c.x509SVID(t, tc.id, now.Add(-time.Minute), now.Add(time.Hour))), "")
 		if err != nil {
@@ -228,6 +230,7 @@ func TestSPIFFERefusesX509SVID(t *testing.T) {
 		{"a URI SAN that is no SPIFFE ID", valid(c, "https://herd.test/everdict/ws/acme/runner/r1"), "not a SPIFFE ID"},
 		{"a SPIFFE ID whose path names nothing", valid(c, "spiffe://herd.test/somewhere/else"), "names no herd or Everdict identity"},
 		{"an identity no policy rule names", valid(c, "spiffe://herd.test/everdict/ws/other/runner/r1"), "no policy rule"},
+		{"herd-router, which is no caller of the API", valid(c, "spiffe://herd.test/herd/router"), "no policy rule"},
 	} {
 		_, err := s.Authenticate(withChain(tc.chain), "")
 		wantRefused(t, tc.what, err, tc.reason)
@@ -326,7 +329,7 @@ func TestSPIFFEBundleReRead(t *testing.T) {
 
 // TestSPIFFEPolicyRefusesWhatItCannotMean: a policy rule that names a path no identity parses to, a prefix without
 // its trailing slash (which would match /runner/r1 to /runner/r10), another trust domain, an unknown role, or a
-// herdlet role outside /herd/node/ is refused when the policy is read.
+// rule under /herd/ (whose grants are built in) is refused when the policy is read.
 func TestSPIFFEPolicyRefusesWhatItCannotMean(t *testing.T) {
 	c := newCA(t, td)
 	for _, tc := range []struct{ policy, reason string }{
@@ -334,7 +337,10 @@ func TestSPIFFEPolicyRefusesWhatItCannotMean(t *testing.T) {
 		{`{"rules": [{"prefix": "spiffe://herd.test/everdict/ws/acme", "spaces": {"a": "write"}}]}`, "must end with /"},
 		{`{"rules": [{"id": "spiffe://other.test/herd/api", "spaces": {"a": "read"}}]}`, "trust domain"},
 		{`{"rules": [{"id": "spiffe://herd.test/herd/api", "spaces": {"a": "admin"}}]}`, `role "admin"`},
-		{`{"rules": [{"prefix": "spiffe://herd.test/everdict/", "herdlet": true}]}`, "/herd/node/"},
+		{`{"rules": [{"prefix": "spiffe://herd.test/herd/node/", "spaces": {"a": "write"}}]}`, "built in"},
+		{`{"rules": [{"id": "spiffe://herd.test/herd/operator/bob", "spaces": {"a": "read"}}]}`, "built in"},
+		{`{"rules": [{"prefix": "spiffe://herd.test/", "spaces": {"a": "read"}}]}`, "built in"},
+		{`{"rules": [{"prefix": "spiffe://herd.test/everdict/", "herdlet": true}]}`, "unknown field"},
 		{`{"rules": [{"id": "spiffe://herd.test/herd/api"}], "extra": 1}`, "unknown field"},
 	} {
 		dir := t.TempDir()
@@ -358,6 +364,8 @@ func TestParseID(t *testing.T) {
 		{"spiffe://herd.test/herd/node/w1", auth.Identity{Kind: auth.KindNode, Worker: "w1"}},
 		{"spiffe://herd.test/herd/atespace/a/actor/u1", auth.Identity{Kind: auth.KindActor, Atespace: "a", ActorUID: "u1"}},
 		{"spiffe://herd.test/herd/operator/alice", auth.Identity{Kind: auth.KindOperator, Operator: "alice"}},
+		{"spiffe://herd.test/herd/router", auth.Identity{Kind: auth.KindRouter}},
+		{"spiffe://herd.test/herd/egress/w1", auth.Identity{Kind: auth.KindEgress, Worker: "w1"}},
 	} {
 		id := spiffeid.RequireFromString(tc.id)
 		got, err := auth.ParseID(id)

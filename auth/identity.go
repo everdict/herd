@@ -17,12 +17,16 @@ const (
 	KindRunner Kind = "runner"
 	// KindHerdAPI is herd-api itself: /herd/api.
 	KindHerdAPI Kind = "herd-api"
+	// KindRouter is herd-router: /herd/router (herd's addition to E3's paths).
+	KindRouter Kind = "herd-router"
 	// KindNode is a herdlet's node: /herd/node/<worker>.
 	KindNode Kind = "node"
 	// KindActor is an actor herd booted: /herd/atespace/<atespace>/actor/<uid>.
 	KindActor Kind = "actor"
-	// KindOperator is a person or tool operating herd: /herd/operator/<name> (herd's addition to E3's paths).
+	// KindOperator is a person or tool operating herd: /herd/operator/<name>.
 	KindOperator Kind = "operator"
+	// KindEgress is a node's herd-egress: /herd/egress/<worker> (herd's addition to E3's paths).
+	KindEgress Kind = "egress"
 )
 
 // Identity is a SPIFFE ID read by ParseID: its kind and the names its path carries.
@@ -31,12 +35,18 @@ type Identity struct {
 	Kind Kind
 	// Workspace and Runner are a KindRunner's.
 	Workspace, Runner string
-	// Worker is a KindNode's.
+	// Worker is a KindNode's or a KindEgress's.
 	Worker string
 	// Atespace and ActorUID are a KindActor's.
 	Atespace, ActorUID string
 	// Operator is a KindOperator's.
 	Operator string
+}
+
+// HerdID is the SPIFFE ID of herd's own path in trust domain td, e.g. HerdID(td, "api") for herd-api,
+// HerdID(td, "node", w) for worker w's herdlet.
+func HerdID(td spiffeid.TrustDomain, segs ...string) spiffeid.ID {
+	return spiffeid.RequireFromSegments(td, append([]string{"herd"}, segs...)...)
 }
 
 // ParseID is the one function that reads a SPIFFE ID's path (E3). A path that parses to none of the kinds is refused,
@@ -52,6 +62,10 @@ func ParseID(id spiffeid.ID) (Identity, error) {
 		out.Kind, out.Workspace, out.Runner = KindRunner, seg[2], seg[4]
 	case len(seg) == 2 && seg[0] == "herd" && seg[1] == "api":
 		out.Kind = KindHerdAPI
+	case len(seg) == 2 && seg[0] == "herd" && seg[1] == "router":
+		out.Kind = KindRouter
+	case len(seg) == 3 && seg[0] == "herd" && seg[1] == "egress":
+		out.Kind, out.Worker = KindEgress, seg[2]
 	case len(seg) == 3 && seg[0] == "herd" && seg[1] == "node":
 		out.Kind, out.Worker = KindNode, seg[2]
 	case len(seg) == 5 && seg[0] == "herd" && seg[1] == "atespace" && seg[3] == "actor":

@@ -60,7 +60,7 @@ func TestChainCountsBreakGlass(t *testing.T) {
 	// A chain without a break-glass key refuses HS256; without SPIFFE it refuses an SVID and a call with neither.
 	noKey := auth.Chain{SVID: s, Meter: m}
 	_, err = noKey.Authenticate(context.Background(), hs)
-	wantRefused(t, "HS256 with no break-glass key", err, "HS256")
+	wantRefused(t, "HS256 with no break-glass key", err, "no break-glass allowance")
 	keyOnly := auth.Chain{BreakGlass: auth.StaticKey{Key: key}, Meter: m}
 	_, err = keyOnly.Authenticate(context.Background(), c.jwtSVID(t, runnerID, []string{audience}, time.Now().Add(time.Minute)))
 	wantRefused(t, "a JWT-SVID with no trust bundle", err, "no SPIFFE trust bundle")
@@ -104,4 +104,25 @@ func TestActorWriter(t *testing.T) {
 			t.Errorf("%s: %q, %v; want %q", tc.what, got, err, tc.want)
 		}
 	}
+}
+
+// TestBreakGlassIsDated (A-60): an HS256 bearer is refused unless a break-glass allowance is configured, and from its
+// end date on.
+func TestBreakGlassIsDated(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	hs, err := auth.Sign(key, auth.Claims{Subject: "everdict", ExpiresAt: now.Add(48 * time.Hour).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = auth.Chain{}.Authenticate(ctx, hs)
+	wantRefused(t, "HS256 with no allowance", err, "no break-glass allowance")
+	until := now.Add(time.Hour)
+	c := auth.Chain{BreakGlass: auth.StaticKey{Key: key, Now: func() time.Time { return now }}, BreakGlassUntil: until, Now: func() time.Time { return now }}
+	if _, err := c.Authenticate(ctx, hs); err != nil {
+		t.Fatalf("HS256 before the allowance ends: %v", err)
+	}
+	c.Now = func() time.Time { return until }
+	_, err = c.Authenticate(ctx, hs)
+	wantRefused(t, "HS256 at the allowance's end", err, "allowance ended")
 }

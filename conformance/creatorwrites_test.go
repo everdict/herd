@@ -25,14 +25,14 @@ const (
 )
 
 // spiffeEnv starts herd-api authenticating SPIFFE SVIDs beside HS256 break-glass (auth.Chain), with a policy that
-// lets two runners write in the harness's space and makes alice an operator everywhere.
+// lets two runners write in the harness's space; alice, an operator, holds operator everywhere by the built-in
+// convention.
 func spiffeEnv(t *testing.T, herdlets ...conformance.HerdletSpec) (*conformance.Env, *spiffetest.CA) {
 	t.Helper()
 	ca := spiffetest.New(t, spiffeTD)
 	cfg := ca.Config(t, t.TempDir(), spiffeAudience, `{"rules": [
 	  {"id": "`+runner1+`", "spaces": {"space-1": "write"}},
-	  {"id": "`+runner2+`", "spaces": {"space-1": "write"}},
-	  {"id": "`+operatorID+`", "spaces": {"*": "operator"}}
+	  {"id": "`+runner2+`", "spaces": {"space-1": "write"}}
 	]}`)
 	sv, err := auth.NewSPIFFE(cfg)
 	if err != nil {

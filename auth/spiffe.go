@@ -26,16 +26,22 @@ import (
 
 // SPIFFEConfig configures the SPIFFE authenticator (ADR 0001 A-60).
 type SPIFFEConfig struct {
-	// TrustDomain is the one trust domain herd trusts (workload identity spec E2), e.g. "everdict.example".
+	// Source is the process's own identity, whose bundles verify callers (the Workload API's by default). Without it,
+	// BundleFile is read.
+	Source Source
+	// TrustDomain is the one trust domain herd trusts (workload identity spec E2); with a Source it defaults to the
+	// Source's SVID's, and must equal it.
 	TrustDomain string
-	// BundleFile is the trust bundle: PEM X.509 authorities, or a SPIFFE bundle (a JWKS whose keys are used
-	// x509-svid and jwt-svid, `spire-server bundle show -format spiffe`). It is read again whenever it changes.
+	// BundleFile is the trust bundle when there is no Source: PEM X.509 authorities, or a SPIFFE bundle (a JWKS whose
+	// keys are used x509-svid and jwt-svid, `spire-server bundle show -format spiffe`). It is read again whenever it
+	// changes.
 	BundleFile string
 	// JWTBundleFile, if set, is a JWKS of JWT-SVID authorities beside a PEM BundleFile, read again when it changes.
 	JWTBundleFile string
-	// Audience is what a JWT-SVID's aud must name for herd to accept it (herd-api's own audience).
+	// Audience is what a JWT-SVID's aud must name for herd to accept it: herd-api's own SPIFFE ID.
 	Audience string
-	// PolicyFile maps SPIFFE IDs to spaces and roles (Policy), read again when it changes.
+	// PolicyFile grants workloads atespace roles (Policy), read again when it changes; empty grants none beyond the
+	// built-in conventions (Builtin).
 	PolicyFile string
 	// Now is the clock X.509-SVIDs are checked at (default time.Now).
 	Now func() time.Time
@@ -44,14 +50,21 @@ type SPIFFEConfig struct {
 // SPIFFE authenticates a caller by its SPIFFE verifiable identity document (workload identity spec W1): an
 // X.509-SVID presented as the mTLS client certificate when the call carries no bearer, or a JWT-SVID bearer. The
 // SVID must verify against the trust bundle, name a SPIFFE ID in the trust domain whose path ParseID reads, not be
-// expired, and (a JWT-SVID) name the audience. The policy then maps the ID to the principal's spaces and roles; an
-// ID no rule names is refused. Every refusal is ErrUnauthenticated with its reason.
+// expired, and (a JWT-SVID) name the audience. herd's own identities then hold their built-in grant (Builtin), and a
+// workload the grant its policy rule names; an ID with neither is refused. Every refusal is ErrUnauthenticated with
+// its reason.
 type SPIFFE struct {
 	td       spiffeid.TrustDomain
 	audience string
 	now      func() time.Time
-	bundle   *watched[bundles]
+	trust    func() trust
 	policy   *watched[*Policy]
+}
+
+// trust is what verifies an SVID: the bundles of the one trust domain herd trusts.
+type trust interface {
+	GetX509BundleForTrustDomain(spiffeid.TrustDomain) (*x509bundle.Bundle, error)
+	GetJWTBundleForTrustDomain(spiffeid.TrustDomain) (*jwtbundle.Bundle, error)
 }
 
 // bundles is what one read of the bundle files gives.
@@ -62,32 +75,55 @@ type bundles struct {
 
 // NewSPIFFE reads the bundle and the policy; either failing to read or parse is an error here, at start.
 func NewSPIFFE(c SPIFFEConfig) (*SPIFFE, error) {
-	td, err := spiffeid.TrustDomainFromString(c.TrustDomain)
-	if err != nil {
-		return nil, fmt.Errorf("auth: trust domain %q: %w", c.TrustDomain, err)
-	}
-	if c.BundleFile == "" || c.PolicyFile == "" {
-		return nil, errors.New("auth: SPIFFE needs a bundle file and a policy file")
-	}
 	if c.Audience == "" {
 		return nil, errors.New("auth: SPIFFE needs the audience JWT-SVIDs must name")
 	}
-	s := &SPIFFE{td: td, audience: c.Audience, now: c.Now}
+	s := &SPIFFE{audience: c.Audience, now: c.Now}
 	if s.now == nil {
 		s.now = time.Now
 	}
-	paths := []string{c.BundleFile}
-	if c.JWTBundleFile != "" {
-		paths = append(paths, c.JWTBundleFile)
+	if c.Source != nil {
+		self, err := Self(c.Source)
+		if err != nil {
+			return nil, fmt.Errorf("auth: the identity source has no X.509-SVID: %w", err)
+		}
+		s.td = self.TrustDomain()
+		if c.TrustDomain != "" && c.TrustDomain != s.td.Name() {
+			return nil, fmt.Errorf("auth: trust domain %q is configured, but this process's SVID %s is of %q", c.TrustDomain, self, s.td)
+		}
+		t := onlyDomain{td: s.td, src: c.Source}
+		s.trust = func() trust { return t }
+	} else {
+		td, err := spiffeid.TrustDomainFromString(c.TrustDomain)
+		if err != nil {
+			return nil, fmt.Errorf("auth: trust domain %q: %w", c.TrustDomain, err)
+		}
+		if c.BundleFile == "" {
+			return nil, errors.New("auth: SPIFFE needs an identity source or a bundle file")
+		}
+		s.td = td
+		paths := []string{c.BundleFile}
+		if c.JWTBundleFile != "" {
+			paths = append(paths, c.JWTBundleFile)
+		}
+		b, err := watch("bundle", paths, func(b [][]byte) (bundles, error) { return parseBundles(td, b) })
+		if err != nil {
+			return nil, err
+		}
+		s.trust = func() trust { return b.get() }
 	}
-	if s.bundle, err = watch("bundle", paths, func(b [][]byte) (bundles, error) { return parseBundles(td, b) }); err != nil {
-		return nil, err
-	}
-	if s.policy, err = watch("policy", []string{c.PolicyFile}, func(b [][]byte) (*Policy, error) { return ParsePolicy(td, b[0]) }); err != nil {
-		return nil, err
+	if c.PolicyFile != "" {
+		td := s.td
+		var err error
+		if s.policy, err = watch("policy", []string{c.PolicyFile}, func(b [][]byte) (*Policy, error) { return ParsePolicy(td, b[0]) }); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
+
+// TrustDomain is the trust domain s accepts SVIDs of.
+func (s *SPIFFE) TrustDomain() spiffeid.TrustDomain { return s.td }
 
 func parseBundles(td spiffeid.TrustDomain, files [][]byte) (bundles, error) {
 	var out bundles
@@ -143,7 +179,7 @@ func refuse(format string, args ...any) error {
 
 // Authenticate is the SPIFFE authenticator: token is a JWT-SVID; empty, the peer's X.509-SVID.
 func (s *SPIFFE) Authenticate(ctx context.Context, token string) (Principal, error) {
-	b := s.bundle.get()
+	b := s.trust()
 	if token != "" {
 		return s.jwtSVID(b, token)
 	}
@@ -154,7 +190,7 @@ func (s *SPIFFE) Authenticate(ctx context.Context, token string) (Principal, err
 	return s.x509SVID(b, chain)
 }
 
-func (s *SPIFFE) x509SVID(b bundles, chain []*x509.Certificate) (Principal, error) {
+func (s *SPIFFE) x509SVID(b trust, chain []*x509.Certificate) (Principal, error) {
 	leaf := chain[0]
 	id, err := x509svid.IDFromCert(leaf)
 	if err != nil {
@@ -176,7 +212,7 @@ func (s *SPIFFE) x509SVID(b bundles, chain []*x509.Certificate) (Principal, erro
 	return s.principal(id, SchemeX509SVID)
 }
 
-func (s *SPIFFE) jwtSVID(b bundles, token string) (Principal, error) {
+func (s *SPIFFE) jwtSVID(b trust, token string) (Principal, error) {
 	// The subject names the bundle that verifies the token; it is read unverified here only to name a refusal.
 	if sub, ok := unverifiedSubject(token); ok {
 		id, err := spiffeid.FromString(sub)
@@ -217,9 +253,15 @@ func (s *SPIFFE) principal(id spiffeid.ID, scheme Scheme) (Principal, error) {
 	if err != nil {
 		return Principal{}, refuse("%v", err)
 	}
-	r, ok := s.policy.get().Match(id)
+	r, ok := Builtin(ident)
 	if !ok {
-		return Principal{}, refuse("no policy rule names %s", id)
+		var pol *Policy
+		if s.policy != nil {
+			pol = s.policy.get()
+		}
+		if r, ok = pol.Match(id); !ok {
+			return Principal{}, refuse("no policy rule names %s", id)
+		}
 	}
 	p := Principal{Subject: id.String(), Scheme: scheme, Spaces: r.Spaces, Herdlet: r.Herdlet}
 	if r.Herdlet {

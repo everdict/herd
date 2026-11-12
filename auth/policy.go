@@ -9,18 +9,19 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
-// Policy maps SPIFFE IDs to what they may do in herd (ADR 0001 A-60). It is a JSON file:
+// Policy grants workloads atespace roles (ADR 0001 A-60). herd's own identities need no rule; their grants are built
+// in (Builtin): a node (/herd/node/<worker>) is a herdlet that reads every atespace, an operator (/herd/operator/<name>) holds operator in every
+// atespace, and a node's herd-egress (/herd/egress/<worker>) reads every atespace. The file is JSON:
 //
 //	{"rules": [
 //	  {"id": "spiffe://td/everdict/ws/acme/runner/r1", "spaces": {"acme": "write"}},
 //	  {"prefix": "spiffe://td/everdict/ws/acme/", "spaces": {"acme": "read"}},
-//	  {"prefix": "spiffe://td/herd/node/", "herdlet": true},
-//	  {"id": "spiffe://td/herd/operator/alice", "spaces": {"*": "operator"}}
+//	  {"id": "spiffe://td/everdict/control-plane", "spaces": {"*": "read"}}
 //	]}
 //
 // A rule names one SPIFFE ID (id) or every ID under a path prefix (prefix, ending in "/"); an exact id rule wins over
-// a prefix, and the longest prefix over a shorter one. spaces maps an atespace (or "*") to read, write or operator;
-// herdlet makes a node's credential, and only IDs under /herd/node/ may hold it.
+// a prefix, and the longest prefix over a shorter one. spaces maps an atespace (or "*") to read, write or operator.
+// A rule may not name an ID under /herd/: those are the built-in conventions'.
 type Policy struct {
 	exact  map[string]Rule
 	prefix []prefixRule
@@ -39,16 +40,15 @@ type prefixRule struct {
 
 type policyFile struct {
 	Rules []struct {
-		ID      string          `json:"id"`
-		Prefix  string          `json:"prefix"`
-		Spaces  map[string]Role `json:"spaces"`
-		Herdlet bool            `json:"herdlet"`
+		ID     string          `json:"id"`
+		Prefix string          `json:"prefix"`
+		Spaces map[string]Role `json:"spaces"`
 	} `json:"rules"`
 }
 
 // ParsePolicy reads a policy for trust domain td, refusing a rule it could not mean: no id or prefix (or both), an id
 // ParseID refuses, another trust domain, a prefix without its trailing "/" (which would let /runner/r1 cover
-// /runner/r10), an unknown role, or herdlet outside /herd/node/.
+// /runner/r10), an unknown role, or an ID under /herd/ (built in).
 func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 	var f policyFile
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -57,7 +57,7 @@ func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 		return nil, fmt.Errorf("policy: %w", err)
 	}
 	p := &Policy{exact: map[string]Rule{}}
-	nodes := "spiffe://" + td.Name() + "/herd/node/"
+	herd := "spiffe://" + td.Name() + "/herd/"
 	for i, r := range f.Rules {
 		at := fmt.Sprintf("policy rule %d", i)
 		for space, role := range r.Spaces {
@@ -65,7 +65,7 @@ func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 				return nil, fmt.Errorf("%s: space %q: role %q, want read, write or operator", at, space, role)
 			}
 		}
-		rule := Rule{Spaces: r.Spaces, Herdlet: r.Herdlet}
+		rule := Rule{Spaces: r.Spaces}
 		switch {
 		case (r.ID == "") == (r.Prefix == ""):
 			return nil, fmt.Errorf("%s: name exactly one of id and prefix", at)
@@ -80,8 +80,8 @@ func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 			if _, err := ParseID(id); err != nil {
 				return nil, fmt.Errorf("%s: %w", at, err)
 			}
-			if r.Herdlet && !strings.HasPrefix(r.ID, nodes) {
-				return nil, fmt.Errorf("%s: only an id under %s may be a herdlet", at, nodes)
+			if strings.HasPrefix(r.ID, herd) {
+				return nil, fmt.Errorf("%s: %s is herd's own identity, whose grant is built in (nodes, operators, egress)", at, r.ID)
 			}
 			if _, dup := p.exact[r.ID]; dup {
 				return nil, fmt.Errorf("%s: %s is named twice", at, r.ID)
@@ -94,20 +94,37 @@ func ParsePolicy(td spiffeid.TrustDomain, b []byte) (*Policy, error) {
 			if !strings.HasSuffix(r.Prefix, "/") {
 				return nil, fmt.Errorf("%s: prefix %q must end with /", at, r.Prefix)
 			}
-			if r.Herdlet && !strings.HasPrefix(r.Prefix, nodes) {
-				return nil, fmt.Errorf("%s: only a prefix under %s may be a herdlet", at, nodes)
+			if strings.HasPrefix(r.Prefix, herd) || strings.HasPrefix(herd, r.Prefix) {
+				return nil, fmt.Errorf("%s: prefix %q covers herd's own identities, whose grants are built in", at, r.Prefix)
 			}
 			p.prefix = append(p.prefix, prefixRule{r.Prefix, rule})
-		}
-		if r.Herdlet && len(r.Spaces) > 0 {
-			return nil, fmt.Errorf("%s: a herdlet rule grants no spaces", at)
 		}
 	}
 	return p, nil
 }
 
-// Match is the rule for id: its exact rule, else its longest prefix rule.
+// Builtin is the grant herd's own identities hold without a policy rule; false for every other kind. herd-api and
+// herd-router are no callers of the Control API (the router carries its client's bearer), and neither is an actor yet
+// (W-7), so they hold none.
+func Builtin(ident Identity) (Rule, bool) {
+	switch ident.Kind {
+	case KindNode:
+		// A node links as its herdlet, and its herd-egress (in the herdlet's process on a Mac, or apart under the
+		// node's SVID) reads the egress policies of every atespace, as the egress credential a join granted did.
+		return Rule{Herdlet: true, Spaces: map[string]Role{AllSpaces: RoleRead}}, true
+	case KindOperator:
+		return Rule{Spaces: map[string]Role{AllSpaces: RoleOperator}}, true
+	case KindEgress:
+		return Rule{Spaces: map[string]Role{AllSpaces: RoleRead}}, true
+	}
+	return Rule{}, false
+}
+
+// Match is the rule for id: its exact rule, else its longest prefix rule. A nil Policy has none.
 func (p *Policy) Match(id spiffeid.ID) (Rule, bool) {
+	if p == nil {
+		return Rule{}, false
+	}
 	s := id.String()
 	if r, ok := p.exact[s]; ok {
 		return r, true

@@ -7,23 +7,36 @@ import (
 	"time"
 )
 
-// Chain is herd's authenticator since PLT-489 (ADR 0001 A-60): SPIFFE SVIDs, with HS256 shared-key bearers kept as
-// break-glass. A bearer whose header names HS256 goes to BreakGlass; every call it authenticates is counted by subject
-// (MetricBreakGlassCalls) and logged naming the subject. Any other bearer is a JWT-SVID, and a call with no bearer
-// is its peer's X.509-SVID; both go to SVID.
+// Chain is herd's authenticator since PLT-489 (ADR 0001 A-60): SPIFFE SVIDs, with HS256 shared-key bearers only as a
+// dated break-glass. A bearer whose header names HS256 goes to BreakGlass, and only before BreakGlassUntil; every
+// call it authenticates is counted by subject (MetricBreakGlassCalls) and logged, rate-limited (Meter.Note). Any other
+// bearer is a JWT-SVID, and a call with no bearer is its peer's X.509-SVID; both go to SVID.
 type Chain struct {
 	// SVID authenticates SVIDs; nil refuses them.
 	SVID Authenticator
-	// BreakGlass authenticates HS256 bearers; nil refuses them.
+	// BreakGlass authenticates HS256 bearers until BreakGlassUntil; nil refuses them.
 	BreakGlass Authenticator
+	// BreakGlassUntil is when the HS256 allowance ends (a bearer is refused from then on); zero with BreakGlass set
+	// means no end, which only tests use: herd-api and herd-router refuse to start without a date
+	// (-break-glass-hs256-until).
+	BreakGlassUntil time.Time
 	// Meter counts the break-glass calls (nil: not counted).
 	Meter *Meter
+	// Now is the clock BreakGlassUntil is read against (default time.Now).
+	Now func() time.Time
 }
 
 func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error) {
 	if token != "" && headerAlg(token) == "HS256" {
 		if c.BreakGlass == nil {
-			return Principal{}, refuse("HS256 bearers are not accepted here")
+			return Principal{}, refuse("HS256 bearers are refused: no break-glass allowance is configured (-break-glass-hs256-until)")
+		}
+		now := time.Now
+		if c.Now != nil {
+			now = c.Now
+		}
+		if !c.BreakGlassUntil.IsZero() && !now().Before(c.BreakGlassUntil) {
+			return Principal{}, refuse("HS256 bearers are refused: the break-glass allowance ended at %s", c.BreakGlassUntil.UTC().Format(time.RFC3339))
 		}
 		p, err := c.BreakGlass.Authenticate(ctx, token)
 		if err != nil {
