@@ -53,6 +53,10 @@ type conn struct {
 	mu      sync.Mutex // guards pending and done
 	pending map[string]*pending
 	done    chan struct{}
+	// retiring marks a link a newer one of the same worker replaced (make-before-break, ADR 0001 A-60): no call goes
+	// to it, and drained closes once the calls it carries have their outcomes, which ends it.
+	retiring bool
+	drained  chan struct{}
 
 	// instance is reg.Instance, which no update changes.
 	instance string
@@ -86,7 +90,8 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 			return err
 		}
 	}
-	c := &conn{reg: *up.Register, instance: up.Register.Instance, stream: s, pending: map[string]*pending{}, done: make(chan struct{})}
+	c := &conn{reg: *up.Register, instance: up.Register.Instance, stream: s, pending: map[string]*pending{}, done: make(chan struct{}),
+		drained: make(chan struct{})}
 	// Registered goes before any work can (the link is not the worker's until below): the herdlet knows the store of
 	// every VM it starts on this link (Registered.StoreID).
 	if err := c.send(Down{Registered: &Registered{Worker: c.reg.Worker, StoreID: h.StoreID}}); err != nil {
@@ -94,8 +99,10 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 	}
 	h.mu.Lock()
 	if old, ok := h.workers[c.reg.Worker]; ok {
-		// A reconnect replaces the old link; its pending calls end unknown.
-		old.close()
+		// A newer link of the worker takes its calls from now on (a herdlet that rotated its SVID links again before
+		// it lets the old link go): the old one finishes the calls it carries, then ends. A link that broke has ended
+		// its calls unknown already.
+		old.retire()
 	}
 	h.workers[c.reg.Worker] = c
 	h.mu.Unlock()
@@ -110,8 +117,36 @@ func (h *Hub) Serve(ctx context.Context, s Stream) error {
 		h.mu.Unlock()
 		c.close()
 	}()
+	type recvd struct {
+		b   []byte
+		err error
+	}
+	in := make(chan recvd, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			b, err := s.Recv()
+			select {
+			case in <- recvd{b, err}:
+			case <-stop:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	for {
-		b, err := s.Recv()
+		var b []byte
+		var err error
+		select {
+		case r := <-in:
+			b, err = r.b, r.err
+		case <-c.drained:
+			// Replaced by a newer link and done with every call it carried.
+			return nil
+		}
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -164,6 +199,7 @@ func (c *conn) deliver(o Outcome) {
 	c.mu.Lock()
 	p, ok := c.pending[o.ID]
 	delete(c.pending, o.ID)
+	c.drainIfDone()
 	c.mu.Unlock()
 	if ok {
 		p.out <- o
@@ -183,6 +219,26 @@ func (c *conn) progress(r Progress) {
 	default:
 	}
 	p.progress <- r.Bytes
+}
+
+// retire stops the link taking calls; it ends once those it carries are answered.
+func (c *conn) retire() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.retiring = true
+	c.drainIfDone()
+}
+
+// drainIfDone ends a retiring link with no call left. c.mu is held.
+func (c *conn) drainIfDone() {
+	if !c.retiring || len(c.pending) > 0 {
+		return
+	}
+	select {
+	case <-c.drained:
+	default:
+		close(c.drained)
+	}
 }
 
 func (c *conn) close() {
@@ -255,12 +311,26 @@ func (h *Hub) call(ctx context.Context, worker string, w Work, dl time.Time, siz
 	}
 	w.DeadlineUnixMilli = dl.UnixMilli()
 	p := &pending{out: make(chan Outcome, 1), progress: make(chan int64, 1)}
-	c.mu.Lock()
-	c.pending[w.ID] = p
-	c.mu.Unlock()
+	for {
+		c.mu.Lock()
+		if !c.retiring {
+			c.pending[w.ID] = p
+			c.mu.Unlock()
+			break
+		}
+		// Replaced between the lookup and now: the call goes to the newer link.
+		c.mu.Unlock()
+		h.mu.Lock()
+		c, ok = h.workers[worker]
+		h.mu.Unlock()
+		if !ok {
+			return unknown(fmt.Sprintf("herdlet %q is not connected", worker))
+		}
+	}
 	defer func() {
 		c.mu.Lock()
 		delete(c.pending, w.ID)
+		c.drainIfDone()
 		c.mu.Unlock()
 	}()
 	if err := c.send(Down{Work: &w}); err != nil {

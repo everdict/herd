@@ -200,10 +200,17 @@ func (s *SPIFFE) Authenticate(ctx context.Context, token string) (Principal, err
 	if len(chain) == 0 {
 		return Principal{}, refuse("no client certificate and no bearer")
 	}
-	return s.x509SVID(b, chain)
+	// The leaf is verified as of the connection's handshake (its rotation is no loss of authority); the bundle and
+	// the policy are the current ones.
+	return s.x509SVIDAt(b, chain, HandshakeTime(ctx))
 }
 
 func (s *SPIFFE) x509SVID(b trust, chain []*x509.Certificate) (Principal, error) {
+	return s.x509SVIDAt(b, chain, time.Time{})
+}
+
+// x509SVIDAt verifies chain's validity at at (zero: now).
+func (s *SPIFFE) x509SVIDAt(b trust, chain []*x509.Certificate, at time.Time) (Principal, error) {
 	leaf := chain[0]
 	id, err := x509svid.IDFromCert(leaf)
 	if err != nil {
@@ -213,6 +220,9 @@ func (s *SPIFFE) x509SVID(b trust, chain []*x509.Certificate) (Principal, error)
 		return Principal{}, refuse("X.509-SVID %s: foreign trust domain %q (herd trusts %q)", id, id.TrustDomain(), s.td)
 	}
 	now := s.now()
+	if !at.IsZero() {
+		now = at
+	}
 	if now.After(leaf.NotAfter) {
 		return Principal{}, refuse("X.509-SVID %s expired at %s", id, leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
@@ -318,8 +328,11 @@ func PeerChain(ctx context.Context) []*x509.Certificate {
 		return c
 	}
 	if p, ok := peer.FromContext(ctx); ok {
-		if ti, ok := p.AuthInfo.(credentials.TLSInfo); ok {
-			return ti.State.PeerCertificates
+		switch ai := p.AuthInfo.(type) {
+		case credentials.TLSInfo:
+			return ai.State.PeerCertificates
+		case *handshake:
+			return ai.State.PeerCertificates
 		}
 	}
 	return nil

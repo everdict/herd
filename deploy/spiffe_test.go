@@ -355,17 +355,18 @@ func TestMetricsDefaultToLoopback(t *testing.T) {
 	}
 }
 
-// TestShortLivedSVIDsOverLongConnections (PLT-489 review 1): a caller's X.509-SVID is its TLS handshake's, so a
-// connection that outlives the caller's leaf would refuse every later call. With SVIDs of a few seconds rotating under
-// both ends, one client connection keeps being answered: herd-api ends each connection well before an SVID's lifetime
-// (MaxConnectionAge), and the client redials with its current SVID.
+// TestShortLivedSVIDsOverLongConnections (PLT-489 review 1, re-review A): a caller's X.509-SVID is authenticated at its
+// connection's handshake. With the client's SVIDs of a few seconds rotating and the server's living a day, one client
+// connection keeps being answered over three client lifetimes: each call verifies the leaf as of the handshake, and
+// the connection drains before the leaf ends, so the client reconnects with its current one.
 func TestShortLivedSVIDsOverLongConnections(t *testing.T) {
-	prev := deploy.MinConnectionAge
-	deploy.MinConnectionAge = 500 * time.Millisecond
-	t.Cleanup(func() { deploy.MinConnectionAge = prev })
+	prev := auth.DrainMargin
+	auth.DrainMargin = time.Second
+	t.Cleanup(func() { auth.DrainMargin = prev })
 	const ttl = 3 * time.Second
 	ln := listen(t)
-	a := &deploy.API{Identity: deploy.Identity{Source: newRotating(t, "spiffe://herd.test/herd/api", ttl)}, Policy: noRules(t),
+	// The server's SVID lives a day, the client's 3 s: the connection's life follows the client's leaf, not the server's.
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t),
 		Store: "memory", Snapshots: t.TempDir()}
 	runAPI(t, a, ln)
 	op := newRotating(t, operatorID, ttl)

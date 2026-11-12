@@ -94,7 +94,7 @@ func (r *Router) Run(ctx context.Context, cl, tl net.Listener) error {
 		return err
 	}
 	// Herdlets behind NAT keep their tunnel alive with pings; allow them every 10 s even with no stream open.
-	g := grpc.NewServer(serverCreds(src), serverKeepalive(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(append(serverConn(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))...)
 	tunnels.Register(g)
 	hs := router.NewHTTPServer(rt)
 	hs.Protocols.SetHTTP2(true)

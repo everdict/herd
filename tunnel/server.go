@@ -110,7 +110,7 @@ func (s *Server) serveControl(ss grpc.ServerStream) error {
 		return err
 	}
 	// A tunnel ends with the credential that opened it (review 2).
-	return auth.ServeUntil(p.Expires, func() error { return s.control(ss, p.HerdletWorker()) })
+	return auth.ServeUntil(p.HardEnd, func() error { return s.control(ss, p.HerdletWorker()) })
 }
 
 func (s *Server) control(ss grpc.ServerStream, sub string) error {
@@ -128,18 +128,16 @@ func (s *Server) control(ss grpc.ServerStream, sub string) error {
 	sess := &session{worker: sub, stream: ss, done: make(chan struct{})}
 	s.mu.Lock()
 	s.init()
-	if old, ok := s.sessions[sub]; ok {
-		// A reconnect replaces the old tunnel; Opens waiting on it fail.
-		close(old.done)
-	}
+	// A newer tunnel of the worker takes its Opens from now on (make-before-break, ADR 0001 A-60): the older one goes
+	// on serving the Opens it was sent until its herdlet ends it, and the data streams it opened stay up until they end.
 	s.sessions[sub] = sess
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		if s.sessions[sub] == sess {
 			delete(s.sessions, sub)
-			close(sess.done)
 		}
+		close(sess.done)
 		s.mu.Unlock()
 	}()
 	if err := sess.send(Down{Welcome: &Welcome{Worker: sub}}); err != nil {
@@ -249,7 +247,7 @@ func (s *Server) serveData(ss grpc.ServerStream) error {
 	if err != nil {
 		return err
 	}
-	return auth.ServeUntil(p.Expires, func() error { return s.data(ss, p.HerdletWorker()) })
+	return auth.ServeUntil(p.HardEnd, func() error { return s.data(ss, p.HerdletWorker()) })
 }
 
 func (s *Server) data(ss grpc.ServerStream, sub string) error {

@@ -57,8 +57,10 @@ func (s *Server) CheckActorWrite(ctx context.Context, req *CheckActorWriteReques
 		auth.CountBreakGlass(s.cfg.Meter, "herd-router", p.Subject)
 	}
 	resp := &CheckActorWriteResponse{UID: ar.rec.UID}
-	if !p.Expires.IsZero() {
-		resp.Expires = p.Expires.Unix()
+	// A stream the router carries is bounded only by an HS256 bearer's break-glass end; a JWT-SVID authorizes the
+	// stream at its open, and its exp (SPIRE's default is 5 minutes) does not cut an exec or an attach.
+	if !p.HardEnd.IsZero() {
+		resp.Expires = p.HardEnd.Unix()
 	}
 	return resp, nil
 }

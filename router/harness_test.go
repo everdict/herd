@@ -85,6 +85,8 @@ type stack struct {
 
 type stackOpts struct {
 	budget time.Duration
+	// breakGlassUntil, if set, makes herd-api's authenticator a break-glass Chain ending then.
+	breakGlassUntil time.Time
 }
 
 // exitingVMs is the fake hypervisor with an exit observer: a VM in exited has exited.
@@ -159,7 +161,10 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	if _, err := rand.Read(s.key); err != nil {
 		t.Fatal(err)
 	}
-	authn := auth.StaticKey{Key: s.key}
+	var authn auth.Authenticator = auth.StaticKey{Key: s.key}
+	if !o.breakGlassUntil.IsZero() {
+		authn = auth.Chain{BreakGlass: auth.StaticKey{Key: s.key}, BreakGlassUntil: o.breakGlassUntil}
+	}
 
 	// herd-api
 	snaps, err := disk.New(t.TempDir())

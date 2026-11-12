@@ -51,6 +51,7 @@ func (c Chain) Authenticate(ctx context.Context, token string) (Principal, error
 		if !c.BreakGlassUntil.IsZero() && c.BreakGlassUntil.Before(p.Expires) {
 			p.Expires = c.BreakGlassUntil
 		}
+		p.HardEnd = c.BreakGlassUntil
 		if c.Forwarded != nil && c.Forwarded(ctx) {
 			return p, nil
 		}

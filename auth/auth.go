@@ -61,6 +61,10 @@ type Principal struct {
 	// Expires is when the credential stops authenticating the caller: a JWT's exp (an HS256 bearer's no later than
 	// its break-glass end), an X.509-SVID's NotAfter. A stream the credential opened ends then (review 2).
 	Expires time.Time
+	// HardEnd is when a link or stream the credential opened must end however it is used: an HS256 bearer's break-glass
+	// end. An SVID has none: its connection was authenticated at its handshake and drains before the leaf ends, and a
+	// JWT-SVID authorizes the stream it opens (ADR 0001 A-60, re-review).
+	HardEnd time.Time
 }
 
 // Scheme names the credential a principal was authenticated by.

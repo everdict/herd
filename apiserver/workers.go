@@ -169,7 +169,7 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 		lctx = context.WithValue(lctx, herdletSVIDKey{}, p.Subject)
 	}
 	// The link ends with the credential that opened it: an X.509-SVID's NotAfter, a JWT's exp, the break-glass end.
-	err = auth.ServeUntil(p.Expires, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
+	err = auth.ServeUntil(p.HardEnd, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		return status.Errorf(codes.Unauthenticated, "%v", err)
 	}

@@ -139,9 +139,25 @@ func TestBreakGlassCountedOncePerRequest(t *testing.T) {
 	}
 }
 
-// TestStreamEndsWithItsCredential (review 2): a stream the router carries (a CONNECT splice) is cut when the
-// credential that opened it ends.
-func TestStreamEndsWithItsCredential(t *testing.T) {
+// spliceOpenFor opens a CONNECT splice to a1 with tok and answers whether it is still open after d.
+func spliceOpenFor(t *testing.T, s *stack, tok string, d time.Duration) bool {
+	t.Helper()
+	conn := connect(t, s, space1+"/a1", tok, "a1.space-1:8080")
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(d))
+	// The guest's HTTP/2 server speaks first; read until the splice ends or d passes.
+	buf := make([]byte, 4096)
+	var err error
+	for err == nil {
+		_, err = conn.Read(buf)
+	}
+	ne, ok := err.(interface{ Timeout() bool })
+	return ok && ne.Timeout()
+}
+
+// TestStreamOutlivesItsJWT (re-review 4): a stream the router carries is authorized at its open; a bearer whose exp
+// passes while it runs (a JWT-SVID lives 5 minutes by default) does not cut an exec or an attach.
+func TestStreamOutlivesItsJWT(t *testing.T) {
 	s := startStack(t, stackOpts{budget: time.Second})
 	s.createActor(space1, "a1")
 	tok, err := auth.Sign(s.key, auth.Claims{Subject: "client", ExpiresAt: time.Now().Add(2 * time.Second).Unix(),
@@ -149,16 +165,16 @@ func TestStreamEndsWithItsCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn := connect(t, s, space1+"/a1", tok, "a1.space-1:8080")
-	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
-	start := time.Now()
-	// The guest's HTTP/2 server speaks first; read until the splice ends.
-	buf := make([]byte, 4096)
-	for err == nil {
-		_, err = conn.Read(buf)
+	if !spliceOpenFor(t, s, tok, 5*time.Second) {
+		t.Error("a splice was cut when its bearer's exp passed (2 s)")
 	}
-	if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
-		t.Fatalf("the splice is still open %s after its credential ended", time.Since(start).Round(time.Second))
+}
+
+// TestStreamEndsAtBreakGlassEnd (review 2): a stream an HS256 break-glass bearer opened ends at the allowance's end.
+func TestStreamEndsAtBreakGlassEnd(t *testing.T) {
+	s := startStack(t, stackOpts{budget: time.Second, breakGlassUntil: time.Now().Add(3 * time.Second)})
+	s.createActor(space1, "a1")
+	if spliceOpenFor(t, s, s.clientToken(), 6*time.Second) {
+		t.Error("an HS256 splice is still open 3 s after the break-glass allowance ended")
 	}
 }

@@ -230,7 +230,7 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 			return false
 		}}
 	// Herdlets behind NAT keep their link alive with pings (every 15 s); allow them every 10 s, as herd-router does.
-	g := grpc.NewServer(serverCreds(src), serverKeepalive(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))
+	g := grpc.NewServer(append(serverConn(src), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}))...)
 	srv.Register(g)
 	js.Register(g)
 	every := a.Reconcile

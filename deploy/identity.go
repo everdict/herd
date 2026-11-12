@@ -15,7 +15,6 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/keepalive"
 )
 
 // Identity is where a herd component gets its SPIFFE identity (ADR 0001 A-60): by default the SPIFFE Workload API
@@ -240,29 +239,16 @@ func authenticator(who string, src auth.Source, audience spiffeid.ID, policy str
 	return c, key, nil
 }
 
-// MinConnectionAge is the least age a herd gRPC server lets a connection reach before it asks the client to reconnect.
-var MinConnectionAge = 30 * time.Second
-
-// serverKeepalive bounds every connection's age well under the SVID's lifetime (review 1): a caller's X.509-SVID is
-// the handshake's, checked on every call, so a connection outliving its client's leaf would refuse every later call.
-// SPIRE rotates an SVID at half its lifetime, so a client's leaf has at least half its lifetime left when it
-// handshakes: the age is a quarter of the server's own SVID lifetime (the install's SVID TTL), and its grace an
-// eighth, so a connection ends (age + grace, with grpc's 10% jitter, under half) before the leaf it opened with; at
-// least MinConnectionAge. The client redials on the GOAWAY with its current SVID.
-func serverKeepalive(src auth.Source) grpc.ServerOption {
-	age := MinConnectionAge
-	if sv, err := src.GetX509SVID(); err == nil && len(sv.Certificates) > 0 {
-		leaf := sv.Certificates[0]
-		if q := leaf.NotAfter.Sub(leaf.NotBefore) / 4; q > age {
-			age = q
-		}
-	}
-	return grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: age / 2})
+// serverCreds are a herd gRPC listener's TLS (auth.ServerTLS) and its per-connection drain (auth.ServerCreds): a
+// connection is authenticated at its handshake, and drains before its client's X.509-SVID ends, its calls and streams
+// finishing first (ADR 0001 A-60).
+func serverCreds(src auth.Source) grpc.ServerOption {
+	return grpc.Creds(auth.ServerCreds(auth.ServerTLS(src)))
 }
 
-// serverCreds is a herd gRPC listener's TLS (auth.ServerTLS).
-func serverCreds(src auth.Source) grpc.ServerOption {
-	return grpc.Creds(credentials.NewTLS(auth.ServerTLS(src)))
+// serverConn is serverCreds with the interceptors that count each connection's work (auth.ConnInterceptors).
+func serverConn(src auth.Source) []grpc.ServerOption {
+	return append([]grpc.ServerOption{serverCreds(src)}, auth.ConnInterceptors()...)
 }
 
 // dial connects to a herd component at addr as src, accepting only the server SVID id.
