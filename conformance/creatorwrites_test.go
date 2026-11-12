@@ -311,3 +311,21 @@ func TestUidlessEgressPoliciesAreBoundAtStart(t *testing.T) {
 	_, err = e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a2")})
 	wantCode(t, "a uid-less policy written after the start", err, codes.NotFound)
 }
+
+// TestUnreadableEgressStateDoesNotStopTheStart (final review): an egress-policy record whose state herd-api cannot
+// decode does not stop herd-api starting: it is logged, counted and no actor's policy.
+func TestUnreadableEgressStateDoesNotStopTheStart(t *testing.T) {
+	e := conformance.Start(t, conformance.HerdletSpec{Name: "h1", Slots: 1})
+	ctx := ctxT(t)
+	mkTemplate(t, e, "tpl", ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
+	mkActor(t, e, "a1", "tpl", nil)
+	if _, err := e.Store.Create(ctx, store.Record{Key: store.Key{Kind: store.KindEgressPolicy, Space: e.Space, Name: "a1"}, State: []byte("{not json")}); err != nil {
+		t.Fatal(err)
+	}
+	e.RestartAPI(t)
+	_, err := e.Client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{Actor: oref(e, "a1")})
+	wantCode(t, "a1's egress policy with an unreadable state", err, codes.NotFound)
+	if n := e.Meter.Value(auth.MetricEgressStateUnreadable); n != 1 {
+		t.Errorf("%s = %d, want 1", auth.MetricEgressStateUnreadable, n)
+	}
+}

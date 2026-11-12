@@ -19,12 +19,15 @@ const (
 	MetricUnownedActorWrites = "herd_auth_unowned_actor_writes_total"
 	// MetricPolicyStale is 1 while the policy file's last change did not parse (the last good policy is in force).
 	MetricPolicyStale = "herd_auth_policy_stale"
+	// MetricEgressStateUnreadable counts egress-policy records whose state herd-api could not decode at its start.
+	MetricEgressStateUnreadable = "herd_egress_policy_state_unreadable_total"
 )
 
 var metricHelp = map[string]string{
-	MetricBreakGlassCalls:    "Calls authenticated by an HS256 shared-key bearer (break-glass, ADR 0001 A-60), by subject.",
-	MetricUnownedActorWrites: "Writes on actors with no creator recorded, allowed to an operator or to break-glass (ADR 0001 A-60).",
-	MetricPolicyStale:        "1 while the SPIFFE policy file's last change did not parse and the last good policy is in force.",
+	MetricBreakGlassCalls:       "Calls authenticated by an HS256 shared-key bearer (break-glass, ADR 0001 A-60), by subject.",
+	MetricUnownedActorWrites:    "Writes on actors with no creator recorded, allowed to an operator or to break-glass (ADR 0001 A-60).",
+	MetricEgressStateUnreadable: "Egress-policy records whose state herd-api could not decode at its start (each is no actor's policy).",
+	MetricPolicyStale:           "1 while the SPIFFE policy file's last change did not parse and the last good policy is in force.",
 }
 
 // gauges are the metrics of metricHelp that are gauges, not counters.

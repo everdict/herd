@@ -312,10 +312,16 @@ func (r *redialConn) current() *grpc.ClientConn {
 	return r.cc
 }
 
+// redialReads are the only methods a redialConn tries again: reads, which a second try cannot make happen twice. A
+// write is never retried: it may have taken effect before the connection failed.
+var redialReads = map[string]bool{
+	"/substrate.ateapi.v1.Control/GetActorEgressPolicy": true,
+}
+
 func (r *redialConn) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
 	cc := r.current()
 	err := cc.Invoke(ctx, method, args, reply, opts...)
-	if c := status.Code(err); c != codes.Unavailable && c != codes.Unauthenticated {
+	if c := status.Code(err); (c != codes.Unavailable && c != codes.Unauthenticated) || !redialReads[method] {
 		return err
 	}
 	r.mu.Lock()

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -109,5 +111,51 @@ func TestEgressConnectionOutlivesItsSVIDs(t *testing.T) {
 	}
 	if refused > 0 {
 		t.Errorf("%d calls of herd-egress's connection were refused as its SVIDs rotated", refused)
+	}
+}
+
+// TestRedialRetriesReadsOnly (final review): redialConn tries a call again on a new connection only for a read; a
+// write is tried once. herd-egress and the herdlet's in-process egress use it for GetActorEgressPolicy alone.
+func TestRedialRetriesReadsOnly(t *testing.T) {
+	g := grpc.NewServer()
+	calls := map[string]int{}
+	var mu sync.Mutex
+	g.RegisterService(&grpc.ServiceDesc{ServiceName: "substrate.ateapi.v1.Control", HandlerType: (*any)(nil), Methods: []grpc.MethodDesc{
+		{MethodName: "GetActorEgressPolicy", Handler: func(_ any, _ context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+			mu.Lock()
+			calls["read"]++
+			mu.Unlock()
+			return nil, status.Error(codes.Unavailable, "draining")
+		}},
+		{MethodName: "DeleteActorEgressPolicy", Handler: func(_ any, _ context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
+			mu.Lock()
+			calls["write"]++
+			mu.Unlock()
+			return nil, status.Error(codes.Unavailable, "draining")
+		}},
+	}}, struct{}{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = g.Serve(ln) }()
+	defer g.Stop()
+	r := &redialConn{dialFn: func() (*grpc.ClientConn, error) {
+		return grpc.NewClient("passthrough:///"+ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}}
+	if r.cc, err = r.dialFn(); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+	_ = r.Invoke(ctx, "/substrate.ateapi.v1.Control/GetActorEgressPolicy", &ateapi.GetActorEgressPolicyRequest{}, new(ateapi.EgressPolicy))
+	_ = r.Invoke(ctx, "/substrate.ateapi.v1.Control/DeleteActorEgressPolicy", &ateapi.DeleteActorEgressPolicyRequest{}, new(ateapi.EgressPolicy))
+	if calls["read"] != 2 || calls["write"] != 1 {
+		t.Errorf("a read was tried %d times and a write %d; want 2 and 1", calls["read"], calls["write"])
+	}
+	for m := range redialReads {
+		if !strings.Contains(m, "/Get") && !strings.Contains(m, "/List") {
+			t.Errorf("redialReads lists %s, which is no read", m)
+		}
 	}
 }

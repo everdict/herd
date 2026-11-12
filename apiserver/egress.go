@@ -62,7 +62,7 @@ func (s *Server) egressFor(ctx context.Context, k store.Key, uid string) (store.
 	var st egressState
 	if len(r.State) > 0 {
 		if err := json.Unmarshal(r.State, &st); err != nil {
-			return r, fmt.Errorf("apiserver: %v: state: %w", k, err)
+			return r, fmt.Errorf("%w: %v: its state does not decode (%v): no actor's policy", store.ErrNotFound, k, err)
 		}
 	}
 	if st.ActorUID != uid {
@@ -84,7 +84,11 @@ func (s *Server) bindEgressPolicies(ctx context.Context) error {
 		var st egressState
 		if len(r.State) > 0 {
 			if err := json.Unmarshal(r.State, &st); err != nil {
-				return fmt.Errorf("apiserver: %v: state: %w", r.Key, err)
+				// A state herd-api cannot read does not stop it starting: the record is no actor's policy (deny),
+				// logged and counted.
+				s.cfg.Meter.Inc(auth.MetricEgressStateUnreadable)
+				log.Printf("herd-api: egress policy %s/%s: its state does not decode (%v): it is no actor's policy", r.Space, r.Name, err)
+				continue
 			}
 		}
 		if st.ActorUID != "" {
