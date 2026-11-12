@@ -127,7 +127,10 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	if n, ok := a.Machines.Memory(w.VM); ok {
 		progress(ctx, n)
 	}
-	snap, err := a.Machines.Snapshot(ctx, w.VM, w.Fidelity, stop, pw)
+	// The snapshot is bounded by its lease's cancellation, which herd-api's Extend moves, never by the deadline the
+	// lease shows now: the flush's own bound (context.WithTimeout over ctx) would otherwise freeze the call timeout
+	// the lease had before that Extend landed, and cut the flush there.
+	snap, err := a.Machines.Snapshot(leaseDone{ctx}, w.VM, w.Fidelity, stop, pw)
 	if err != nil {
 		return classify(err)
 	}

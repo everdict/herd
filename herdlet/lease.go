@@ -49,6 +49,12 @@ func (c leaseCtx) Deadline() (time.Time, bool) {
 	return c.l.deadline, true
 }
 
+// leaseDone is a lease's context without its deadline: it ends when the lease is cancelled (at its deadline as Extends
+// move it), and a timeout derived from it is its own, not the lease's deadline as it stood when it was derived.
+type leaseDone struct{ context.Context }
+
+func (leaseDone) Deadline() (time.Time, bool) { return time.Time{}, false }
+
 // Err says DeadlineExceeded once the lease ran out, as a context.WithDeadline would.
 func (c leaseCtx) Err() error {
 	err := c.Context.Err()
