@@ -114,8 +114,13 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 
 // GetWorkerCapabilities returns one worker's declared capabilities.
 func (s *Server) GetWorkerCapabilities(ctx context.Context, req *herdext.GetWorkerCapabilitiesRequest) (*herdext.WorkerCapabilities, error) {
-	if _, err := s.principal(ctx); err != nil {
+	p, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
+	}
+	// A node reads its own capabilities; any other caller must read in some atespace (review 9).
+	if !(p.Herdlet && p.HerdletWorker() == req.GetWorker()) && !s.readsSomeSpace(p) {
+		return nil, status.Errorf(codes.PermissionDenied, "%q may not read worker %q's capabilities", p.Subject, req.GetWorker())
 	}
 	r, err := s.cfg.Store.Get(ctx, store.Key{Kind: store.KindWorker, Name: req.GetWorker()})
 	if err != nil {
@@ -127,8 +132,12 @@ func (s *Server) GetWorkerCapabilities(ctx context.Context, req *herdext.GetWork
 
 // ListWorkerCapabilities returns every worker's declared capabilities.
 func (s *Server) ListWorkerCapabilities(ctx context.Context, _ *herdext.ListWorkerCapabilitiesRequest) (*herdext.ListWorkerCapabilitiesResponse, error) {
-	if _, err := s.principal(ctx); err != nil {
+	p, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if !s.readsSomeSpace(p) {
+		return nil, status.Errorf(codes.PermissionDenied, "%q may not read in any atespace, so it may not list workers' capabilities", p.Subject)
 	}
 	recs, err := s.cfg.Store.List(ctx, store.KindWorker, "")
 	if err != nil {
