@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +111,60 @@ func TestOnlyItsOwnHerdletOpensATunnel(t *testing.T) {
 	_, err = srv.Dial(ctx, "h9", "vm-1", 8080)
 	if te, ok := err.(*tunnel.Error); !ok || te.Reason != tunnel.ReasonNodeUnreachable {
 		t.Errorf("Dial to a worker with no tunnel: %v", err)
+	}
+}
+
+// fakeAuthn answers "svid:<worker>" as that worker's node SVID and "hs:<worker>" as its HS256 herdlet credential.
+type fakeAuthn struct{}
+
+func (fakeAuthn) Authenticate(_ context.Context, tok string) (auth.Principal, error) {
+	switch {
+	case strings.HasPrefix(tok, "svid:"):
+		w := strings.TrimPrefix(tok, "svid:")
+		return auth.Principal{Subject: "spiffe://herd.test/herd/node/" + w, Worker: w, Herdlet: true, Scheme: auth.SchemeX509SVID,
+			Expires: time.Now().Add(time.Hour)}, nil
+	case strings.HasPrefix(tok, "hs:"):
+		return auth.Principal{Subject: strings.TrimPrefix(tok, "hs:"), Herdlet: true}, nil
+	}
+	return auth.Principal{}, auth.ErrUnauthenticated
+}
+
+// TestHS256TunnelCannotReplaceAnSVIDOne (R3): with the swap, under the lock, an HS256 tunnel cannot replace the
+// tunnel a node SVID holds, even when herd-api's record does not name the SVID yet (WorkerIdentity answers none).
+func TestHS256TunnelCannotReplaceAnSVIDOne(t *testing.T) {
+	srv := &tunnel.Server{Authn: fakeAuthn{}, WorkerIdentity: func(context.Context, string) (string, error) { return "", nil }}
+	g := grpc.NewServer()
+	srv.Register(g)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = g.Serve(l) }()
+	defer g.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	open := func(tok string) (grpc.ClientStream, error) {
+		cc, err := grpc.NewClient("passthrough:///"+l.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cc.Close() })
+		cs, err := cc.NewStream(ctx, &tunnel.ControlStreamDesc, tunnel.ControlMethod, grpc.CallContentSubtype(tunnel.ControlCodec))
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(tunnel.Up{Hello: &tunnel.Hello{Worker: "w1"}})
+		if err := cs.SendMsg(json.RawMessage(b)); err != nil {
+			return nil, err
+		}
+		var m json.RawMessage
+		return cs, cs.RecvMsg(&m)
+	}
+	if _, err := open("svid:w1"); err != nil {
+		t.Fatalf("w1's SVID tunnel: %v", err)
+	}
+	if _, err := open("hs:w1"); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("an HS256 tunnel replacing w1's SVID tunnel: %v, want PermissionDenied", err)
 	}
 }

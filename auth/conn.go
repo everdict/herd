@@ -28,6 +28,7 @@ type handshake struct {
 	credentials.TLSInfo
 	at       time.Time
 	notAfter time.Time
+	now      func() time.Time
 
 	mu       sync.Mutex
 	raw      net.Conn
@@ -39,7 +40,12 @@ type handshake struct {
 func (h *handshake) begin() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.notAfter.IsZero() && h.now().After(h.notAfter) {
+		// The drain timer runs on the monotonic clock; the leaf ends by the wall clock (R2): no call past it.
+		h.draining = true
+	}
 	if h.draining {
+		h.closeIfIdle()
 		return false
 	}
 	h.inflight++
@@ -89,7 +95,7 @@ func (c serverCreds) ServerHandshake(raw net.Conn) (net.Conn, credentials.AuthIn
 	if !ok {
 		return conn, ai, nil
 	}
-	h := &handshake{TLSInfo: ti, at: c.now(), raw: conn}
+	h := &handshake{TLSInfo: ti, at: c.now(), raw: conn, now: c.now}
 	if certs := ti.State.PeerCertificates; len(certs) > 0 {
 		h.notAfter = certs[0].NotAfter
 		at := h.notAfter.Add(-DrainMargin)
@@ -115,8 +121,19 @@ func handshakeOf(ctx context.Context) *handshake {
 	return nil
 }
 
+type handshakeTimeKey struct{}
+
+// WithHandshakeTime returns ctx as a call on a connection whose handshake was at t (tests, and servers that are not
+// gRPC).
+func WithHandshakeTime(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, handshakeTimeKey{}, t)
+}
+
 // HandshakeTime is when ctx's caller's TLS connection was established (zero if it is not one of ServerCreds').
 func HandshakeTime(ctx context.Context) time.Time {
+	if t, ok := ctx.Value(handshakeTimeKey{}).(time.Time); ok {
+		return t
+	}
 	if h := handshakeOf(ctx); h != nil {
 		return h.at
 	}

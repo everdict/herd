@@ -312,3 +312,26 @@ func TestServerAndClientTLS(t *testing.T) {
 		t.Error("a dialer expecting herd-router accepted herd-api's SVID")
 	}
 }
+
+// TestNoCallPastTheLeafByTheWallClock (R2): a call is verified as of its connection's handshake, but never once the
+// leaf has ended by the wall clock.
+func TestNoCallPastTheLeafByTheWallClock(t *testing.T) {
+	ca := mustCA(t, td)
+	src, err := ca.Source("spiffe://herd.test/herd/api", localca.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s, err := auth.NewSPIFFE(auth.SPIFFEConfig{Source: src, Audience: "spiffe://herd.test/herd/api", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := mustSVID(t, ca, "spiffe://herd.test/herd/operator/alice", localca.Options{TTL: time.Hour, NotBefore: now.Add(-time.Minute)})
+	ctx := auth.WithHandshakeTime(withChain(leaf.Certificates), now)
+	if _, err := s.Authenticate(ctx, ""); err != nil {
+		t.Fatalf("a call on a fresh handshake: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	_, err = s.Authenticate(ctx, "")
+	wantRefused(t, "a call two hours on, the handshake's leaf ended", err, "expired")
+}

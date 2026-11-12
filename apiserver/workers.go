@@ -100,6 +100,14 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 		if err != nil {
 			return err
 		}
+		// A worker a node SVID registered is that node's: an HS256 credential cannot link as it (re-review 5). Checked
+		// on the record this update replaces, so no SVID registration between a check and the write slips by (R3).
+		if _, herdlet := ctx.Value(herdletKey{}).(string); herdlet && svid == "" && len(cur.State) > 0 {
+			var st workerState
+			if err := json.Unmarshal(cur.State, &st); err == nil && st.Identity != "" {
+				return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot link as it", r.Worker, st.Identity)
+			}
+		}
 		cur.Data = data
 		if svid != "" {
 			cur.State, _ = json.Marshal(workerState{Identity: svid})
@@ -164,22 +172,12 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 	if !p.Herdlet {
 		return status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	if !p.SVID() {
-		// A worker a node SVID registered is that node's: an HS256 credential cannot link as it (re-review 5).
-		id, err := s.WorkerIdentity(ctx, p.HerdletWorker())
-		if err != nil {
-			return status.Errorf(codes.Unavailable, "%v", err)
-		}
-		if id != "" {
-			return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot link as it", p.HerdletWorker(), id)
-		}
-	}
 	lctx := context.WithValue(ctx, herdletKey{}, p.HerdletWorker())
 	if p.SVID() {
 		lctx = context.WithValue(lctx, herdletSVIDKey{}, p.Subject)
 	}
 	// The link ends with the credential that opened it: an X.509-SVID's NotAfter, a JWT's exp, the break-glass end.
-	err = auth.ServeUntil(p.HardEnd, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
+	err = auth.ServeWhile(p.Holds, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		return status.Errorf(codes.Unauthenticated, "%v", err)
 	}

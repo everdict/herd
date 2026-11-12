@@ -37,6 +37,9 @@ type Server struct {
 
 type session struct {
 	worker string
+	// p is the credential that opened the tunnel: an HS256 tunnel may not replace an SVID one (R3), and a data stream
+	// outlives its own leaf while the worker's current tunnel holds a valid one (R1).
+	p      auth.Principal
 	sendMu sync.Mutex
 	stream grpc.ServerStream
 	done   chan struct{}
@@ -123,10 +126,11 @@ func (s *Server) serveControl(ss grpc.ServerStream) error {
 		}
 	}
 	// A tunnel ends with the credential that opened it (review 2).
-	return auth.ServeUntil(p.HardEnd, func() error { return s.control(ss, p.HerdletWorker()) })
+	return auth.ServeWhile(p.Holds, func() error { return s.control(ss, p) })
 }
 
-func (s *Server) control(ss grpc.ServerStream, sub string) error {
+func (s *Server) control(ss grpc.ServerStream, p auth.Principal) error {
+	sub := p.HerdletWorker()
 	var hello json.RawMessage
 	if err := ss.RecvMsg(&hello); err != nil {
 		return err
@@ -138,9 +142,14 @@ func (s *Server) control(ss grpc.ServerStream, sub string) error {
 	if up.Hello.Worker != sub {
 		return status.Errorf(codes.PermissionDenied, "herdlet credential %q may not open the tunnel of worker %q", sub, up.Hello.Worker)
 	}
-	sess := &session{worker: sub, stream: ss, done: make(chan struct{})}
+	sess := &session{worker: sub, p: p, stream: ss, done: make(chan struct{})}
 	s.mu.Lock()
 	s.init()
+	if old, ok := s.sessions[sub]; ok && old.p.SVID() && !p.SVID() {
+		// Checked under the lock with the swap (R3): an HS256 tunnel cannot replace a node SVID's.
+		s.mu.Unlock()
+		return status.Errorf(codes.PermissionDenied, "worker %q's tunnel is node SVID %s's: an HS256 credential cannot replace it", sub, old.p.Subject)
+	}
 	// A newer tunnel of the worker takes its Opens from now on (make-before-break, ADR 0001 A-60): the older one goes
 	// on serving the Opens it was sent until its herdlet ends it, and the data streams it opened stay up until they end.
 	s.sessions[sub] = sess
@@ -260,7 +269,24 @@ func (s *Server) serveData(ss grpc.ServerStream) error {
 	if err != nil {
 		return err
 	}
-	return auth.ServeUntil(p.HardEnd, func() error { return s.data(ss, p.HerdletWorker()) })
+	// A data stream may outlive the leaf it opened with while the worker's current tunnel is authenticated with a
+	// valid, trusted leaf: a node that rotates keeps its long streams; one that stops loses them by its leaf's end plus
+	// DrainGrace (R1).
+	worker := p.HerdletWorker()
+	hold := func(t time.Time) error {
+		err := p.Holds(t)
+		if err == nil || p.Hold == nil || !p.HardEnd.IsZero() {
+			return err
+		}
+		s.mu.Lock()
+		cur, ok := s.sessions[worker]
+		s.mu.Unlock()
+		if ok && cur.p.SVID() && cur.p.Expires.After(t) && cur.p.Holds(t) == nil {
+			return nil
+		}
+		return err
+	}
+	return auth.ServeWhile(hold, func() error { return s.data(ss, worker) })
 }
 
 func (s *Server) data(ss grpc.ServerStream, sub string) error {

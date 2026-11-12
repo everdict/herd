@@ -219,7 +219,13 @@ func (s *SPIFFE) x509SVIDAt(b trust, chain []*x509.Certificate, at time.Time) (P
 	if id.TrustDomain() != s.td {
 		return Principal{}, refuse("X.509-SVID %s: foreign trust domain %q (herd trusts %q)", id, id.TrustDomain(), s.td)
 	}
-	now := s.now()
+	wall := s.now()
+	if wall.After(leaf.NotAfter) {
+		// Whatever the handshake time: no call is taken on a leaf that has ended by the wall clock (R2), even where
+		// the connection's drain timer, on the monotonic clock, has not fired (a host that slept).
+		return Principal{}, refuse("X.509-SVID %s expired at %s", id, leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+	now := wall
 	if !at.IsZero() {
 		now = at
 	}
@@ -234,6 +240,18 @@ func (s *SPIFFE) x509SVIDAt(b trust, chain []*x509.Certificate, at time.Time) (P
 	}
 	p, err := s.principal(id, SchemeX509SVID)
 	p.Expires = leaf.NotAfter
+	// A stream this identity opens may outlive its leaf only by DrainGrace, and only while its chain verifies against
+	// the current bundle (R1): a dropped CA ends it at the next check.
+	verifyAt := now
+	p.Hold = func(t time.Time) error {
+		if t.After(leaf.NotAfter.Add(DrainGrace)) {
+			return refuse("X.509-SVID %s ended at %s, %s ago", id, leaf.NotAfter.UTC().Format(time.RFC3339), t.Sub(leaf.NotAfter).Round(time.Second))
+		}
+		if _, _, err := x509svid.Verify(chain, s.trust(), x509svid.WithTime(verifyAt)); err != nil {
+			return refuse("X.509-SVID %s no longer chains to the trust bundle: %v", id, err)
+		}
+		return nil
+	}
 	return p, err
 }
 

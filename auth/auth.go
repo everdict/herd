@@ -65,6 +65,49 @@ type Principal struct {
 	// end. An SVID has none: its connection was authenticated at its handshake and drains before the leaf ends, and a
 	// JWT-SVID authorizes the stream it opens (ADR 0001 A-60, re-review).
 	HardEnd time.Time
+	// Hold, if set, answers whether a stream this credential opened may go on at t (an X.509-SVID's: until its leaf
+	// ended DrainGrace ago, and while its chain verifies against the current bundle). Nil: no bound but HardEnd.
+	Hold func(t time.Time) error
+}
+
+// DrainGrace is how long a stream an X.509 identity opened may outlive its leaf (R1): make-before-break rotates links
+// and tunnels well before; a node that stops rotating (its entry deleted, its CA dropped) loses its streams by then.
+var DrainGrace = 5 * time.Minute
+
+// StreamCheck is how often an open stream's Hold is asked again.
+var StreamCheck = 5 * time.Second
+
+// Holds is p's bound on a stream it opens: its Hold, and its HardEnd.
+func (p Principal) Holds(t time.Time) error {
+	if !p.HardEnd.IsZero() && !t.Before(p.HardEnd) {
+		return fmt.Errorf("%w: the credential that opened the stream ended at %s", ErrUnauthenticated, p.HardEnd.UTC().Format(time.RFC3339))
+	}
+	if p.Hold != nil {
+		return p.Hold(t)
+	}
+	return nil
+}
+
+// ServeWhile runs serve, a stream handler's body, and ends it once hold refuses (asked every StreamCheck, and at
+// once), answering hold's reason. The handler's return ends the stream, which ends serve's blocked reads.
+func ServeWhile(hold func(time.Time) error, serve func() error) error {
+	if err := hold(time.Now()); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- serve() }()
+	t := time.NewTicker(StreamCheck)
+	defer t.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case now := <-t.C:
+			if err := hold(now); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // Scheme names the credential a principal was authenticated by.
