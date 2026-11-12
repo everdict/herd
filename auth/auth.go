@@ -261,3 +261,22 @@ func RefuseHeader(h string) error {
 	}
 	return nil
 }
+
+// ServeUntil runs serve, a stream handler's body, and answers when it ends or when the credential that opened the
+// stream does (until; zero: no end), whichever is first (review 2): the handler's return ends the stream, which ends
+// serve's blocked reads.
+func ServeUntil(until time.Time, serve func() error) error {
+	if until.IsZero() {
+		return serve()
+	}
+	done := make(chan error, 1)
+	go func() { done <- serve() }()
+	t := time.NewTimer(time.Until(until))
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return fmt.Errorf("%w: the credential that opened the stream ended at %s", ErrUnauthenticated, until.UTC().Format(time.RFC3339))
+	}
+}

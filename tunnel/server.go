@@ -71,8 +71,14 @@ func (s *Server) Register(g grpc.ServiceRegistrar) {
 
 // herdlet authenticates the stream's caller as a herdlet credential.
 func (s *Server) herdlet(ctx context.Context) (string, error) {
+	p, err := s.herdletPrincipal(ctx)
+	return p.HerdletWorker(), err
+}
+
+// herdletPrincipal authenticates the stream's caller as a herdlet credential.
+func (s *Server) herdletPrincipal(ctx context.Context) (auth.Principal, error) {
 	if s.Authn == nil {
-		return "", status.Errorf(codes.Unauthenticated, "tunnel: no authenticator configured")
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "tunnel: no authenticator configured")
 	}
 	var h string
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -81,28 +87,33 @@ func (s *Server) herdlet(ctx context.Context) (string, error) {
 		}
 	}
 	if err := auth.RefuseHeader(h); err != nil {
-		return "", status.Errorf(codes.Unauthenticated, "%v", err)
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
 	}
 	tok := auth.BearerToken(h)
 	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
-		return "", status.Errorf(codes.Unauthenticated, "no node SVID and no bearer token")
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no node SVID and no bearer token")
 	}
 	// No bearer: the tunnel is its node's X.509-SVID over mTLS (ADR 0001 A-60).
 	p, err := s.Authn.Authenticate(ctx, tok)
 	if err != nil {
-		return "", status.Errorf(codes.Unauthenticated, "%v", err)
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
 	}
 	if !p.Herdlet {
-		return "", status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
+		return auth.Principal{}, status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	return p.HerdletWorker(), nil
+	return p, nil
 }
 
 func (s *Server) serveControl(ss grpc.ServerStream) error {
-	sub, err := s.herdlet(ss.Context())
+	p, err := s.herdletPrincipal(ss.Context())
 	if err != nil {
 		return err
 	}
+	// A tunnel ends with the credential that opened it (review 2).
+	return auth.ServeUntil(p.Expires, func() error { return s.control(ss, p.HerdletWorker()) })
+}
+
+func (s *Server) control(ss grpc.ServerStream, sub string) error {
 	var hello json.RawMessage
 	if err := ss.RecvMsg(&hello); err != nil {
 		return err
@@ -234,10 +245,14 @@ func (s *Server) Dial(ctx context.Context, worker, vm string, port uint32) (net.
 }
 
 func (s *Server) serveData(ss grpc.ServerStream) error {
-	sub, err := s.herdlet(ss.Context())
+	p, err := s.herdletPrincipal(ss.Context())
 	if err != nil {
 		return err
 	}
+	return auth.ServeUntil(p.Expires, func() error { return s.data(ss, p.HerdletWorker()) })
+}
+
+func (s *Server) data(ss grpc.ServerStream, sub string) error {
 	var id string
 	if md, ok := metadata.FromIncomingContext(ss.Context()); ok {
 		if v := md.Get(IDHeader); len(v) > 0 {

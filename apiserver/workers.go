@@ -168,7 +168,12 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 	if p.SVID() {
 		lctx = context.WithValue(lctx, herdletSVIDKey{}, p.Subject)
 	}
-	return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss))
+	// The link ends with the credential that opened it: an X.509-SVID's NotAfter, a JWT's exp, the break-glass end.
+	err = auth.ServeUntil(p.Expires, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return status.Errorf(codes.Unauthenticated, "%v", err)
+	}
+	return err
 }
 
 // CompatSchema is the schema_version of the compat attributes ListWorkers reports for a worker's sandbox runtime:

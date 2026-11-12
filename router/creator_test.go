@@ -138,3 +138,27 @@ func TestBreakGlassCountedOncePerRequest(t *testing.T) {
 		t.Errorf("%s{component=herd-router,subject=client} = %d after one request, want 1", auth.MetricBreakGlassCalls, n)
 	}
 }
+
+// TestStreamEndsWithItsCredential (review 2): a stream the router carries (a CONNECT splice) is cut when the
+// credential that opened it ends.
+func TestStreamEndsWithItsCredential(t *testing.T) {
+	s := startStack(t, stackOpts{budget: time.Second})
+	s.createActor(space1, "a1")
+	tok, err := auth.Sign(s.key, auth.Claims{Subject: "client", ExpiresAt: time.Now().Add(2 * time.Second).Unix(),
+		Spaces: map[string]auth.Role{space1: auth.RoleWrite}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connect(t, s, space1+"/a1", tok, "a1.space-1:8080")
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
+	start := time.Now()
+	// The guest's HTTP/2 server speaks first; read until the splice ends.
+	buf := make([]byte, 4096)
+	for err == nil {
+		_, err = conn.Read(buf)
+	}
+	if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+		t.Fatalf("the splice is still open %s after its credential ended", time.Since(start).Round(time.Second))
+	}
+}
