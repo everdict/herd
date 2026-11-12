@@ -181,7 +181,7 @@ func policyFile(who, path string) (string, error) {
 // authenticator is the auth.Chain of a component on src: SVIDs whose JWT audience is audience, granted by the policy
 // at policy, and the dated HS256 allowance if bg grants one; its calls counted on m.
 func authenticator(who string, src auth.Source, audience spiffeid.ID, policy string, bg *BreakGlass, m *auth.Meter) (auth.Chain, []byte, error) {
-	s, err := auth.NewSPIFFE(auth.SPIFFEConfig{Source: src, Audience: audience.String(), PolicyFile: policy})
+	s, err := auth.NewSPIFFE(auth.SPIFFEConfig{Source: src, Audience: audience.String(), PolicyFile: policy, Meter: m})
 	if err != nil {
 		return auth.Chain{}, nil, err
 	}

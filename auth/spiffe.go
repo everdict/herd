@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"strings"
@@ -45,6 +46,8 @@ type SPIFFEConfig struct {
 	PolicyFile string
 	// Now is the clock X.509-SVIDs are checked at (default time.Now).
 	Now func() time.Time
+	// Meter carries the policy's staleness (MetricPolicyStale); nil carries none.
+	Meter *Meter
 }
 
 // SPIFFE authenticates a caller by its SPIFFE verifiable identity document (workload identity spec W1): an
@@ -118,6 +121,16 @@ func NewSPIFFE(c SPIFFEConfig) (*SPIFFE, error) {
 		if s.policy, err = watch("policy", []string{c.PolicyFile}, func(b [][]byte) (*Policy, error) { return ParsePolicy(td, b[0]) }); err != nil {
 			return nil, err
 		}
+		s.policy.missing = func() *Policy { return nil }
+		m := c.Meter
+		s.policy.stale = func(v bool) {
+			if v {
+				m.SetGauge(MetricPolicyStale, 1)
+			} else {
+				m.SetGauge(MetricPolicyStale, 0)
+			}
+		}
+		m.SetGauge(MetricPolicyStale, 0)
 	}
 	return s, nil
 }
@@ -301,6 +314,12 @@ type watched[T any] struct {
 	paths []string
 	parse func([][]byte) (T, error)
 
+	// missing, if set, is the value while the files are deleted (a policy: no workload grants), taken once and
+	// logged once; stale, if set, is told whether the value in force is a last good one kept over a change that did
+	// not load.
+	missing func() T
+	stale   func(bool)
+
 	mu    sync.Mutex
 	stamp string
 	val   T
@@ -349,19 +368,43 @@ func (w *watched[T]) read() (string, T, error) {
 func (w *watched[T]) get() T {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if stamp, err := w.stampNow(); err == nil && stamp == w.stamp {
+	stamp, serr := w.stampNow()
+	if serr == nil && stamp == w.stamp {
+		return w.val
+	}
+	if serr != nil {
+		// Each state is logged once: the stamp names it until the files change again.
+		state := "missing:" + serr.Error()
+		if w.stamp == state {
+			return w.val
+		}
+		w.stamp = state
+		if w.missing != nil && errors.Is(serr, fs.ErrNotExist) {
+			w.val = w.missing()
+			w.setStale(false)
+			log.Printf("auth: %s %s was deleted: %v; in force now: none of its grants", w.what, strings.Join(w.paths, ", "), serr)
+			return w.val
+		}
+		w.setStale(true)
+		log.Printf("auth: %s %s cannot be read (%v); keeping the last good %s", w.what, strings.Join(w.paths, ", "), serr, w.what)
 		return w.val
 	}
 	stamp, v, err := w.read()
 	if err != nil {
+		// The same bad bytes are not parsed again on every call, nor logged again; the next change is read.
+		w.stamp = stamp
+		w.setStale(true)
 		log.Printf("auth: %s %s changed but %v; keeping the last good %s", w.what, strings.Join(w.paths, ", "), err, w.what)
-		if stamp != "" {
-			// The same bad bytes are not parsed again on every call; the next change is read.
-			w.stamp = stamp
-		}
 		return w.val
 	}
 	w.stamp, w.val = stamp, v
+	w.setStale(false)
 	log.Printf("auth: %s %s read again", w.what, strings.Join(w.paths, ", "))
 	return w.val
+}
+
+func (w *watched[T]) setStale(v bool) {
+	if w.stale != nil {
+		w.stale(v)
+	}
 }

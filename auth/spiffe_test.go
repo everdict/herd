@@ -381,3 +381,69 @@ func TestParseID(t *testing.T) {
 		}
 	}
 }
+
+// TestPolicyDeletedOrBroken (review, small items): a policy file deleted at runtime grants no workload anything (the
+// built-in grants stay), logged once; one that does not parse keeps the last good policy, logged once, with
+// herd_auth_policy_stale at 1 until a good read sets it to 0.
+func TestPolicyDeletedOrBroken(t *testing.T) {
+	c := newCA(t, td)
+	dir := t.TempDir()
+	pp := write(t, dir, "policy.json", []byte(policy))
+	m := auth.NewMeter()
+	s, err := auth.NewSPIFFE(auth.SPIFFEConfig{TrustDomain: td, BundleFile: write(t, dir, "b", c.spiffeBundle(t, td)), Audience: audience, PolicyFile: pp, Meter: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	now := time.Now()
+	call := func(id string) error {
+		_, err := s.Authenticate(withChain(c.x509SVID(t, id, now.Add(-time.Minute), now.Add(time.Hour))), "")
+		return err
+	}
+	touch := func(b []byte) {
+		if err := os.WriteFile(pp, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		later := time.Now().Add(time.Duration(len(logs.String())+2) * time.Second)
+		if err := os.Chtimes(pp, later, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	touch([]byte("{not json"))
+	for i := 0; i < 3; i++ {
+		if err := call(runnerID); err != nil {
+			t.Errorf("a runner while the policy does not parse: %v; want the last good grant", err)
+		}
+	}
+	if n := strings.Count(logs.String(), "keeping the last good policy"); n != 1 {
+		t.Errorf("a policy that does not parse logged %d times over three calls, want once:\n%s", n, logs.String())
+	}
+	if g := m.Gauge(auth.MetricPolicyStale); g != 1 {
+		t.Errorf("%s = %v while the policy does not parse, want 1", auth.MetricPolicyStale, g)
+	}
+	touch([]byte(policy))
+	if err := call(runnerID); err != nil {
+		t.Fatal(err)
+	}
+	if g := m.Gauge(auth.MetricPolicyStale); g != 0 {
+		t.Errorf("%s = %v after a good read, want 0", auth.MetricPolicyStale, g)
+	}
+
+	logs.Reset()
+	if err := os.Remove(pp); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		err := call(runnerID)
+		wantRefused(t, "a runner after the policy file was deleted", err, "no policy rule")
+	}
+	if err := call("spiffe://herd.test/herd/operator/alice"); err != nil {
+		t.Errorf("an operator after the policy file was deleted: %v; the built-in grants stay", err)
+	}
+	if n := strings.Count(logs.String(), "deleted"); n != 1 {
+		t.Errorf("a deleted policy logged %d times, want once:\n%s", n, logs.String())
+	}
+}

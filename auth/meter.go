@@ -17,12 +17,18 @@ const (
 	MetricBreakGlassCalls = "herd_auth_breakglass_calls_total"
 	// MetricUnownedActorWrites counts the writes on actors with no creator recorded, by allowance and caller.
 	MetricUnownedActorWrites = "herd_auth_unowned_actor_writes_total"
+	// MetricPolicyStale is 1 while the policy file's last change did not parse (the last good policy is in force).
+	MetricPolicyStale = "herd_auth_policy_stale"
 )
 
 var metricHelp = map[string]string{
 	MetricBreakGlassCalls:    "Calls authenticated by an HS256 shared-key bearer (break-glass, ADR 0001 A-60), by subject.",
 	MetricUnownedActorWrites: "Writes on actors with no creator recorded, allowed to an operator or to break-glass (ADR 0001 A-60).",
+	MetricPolicyStale:        "1 while the SPIFFE policy file's last change did not parse and the last good policy is in force.",
 }
+
+// gauges are the metrics of metricHelp that are gauges, not counters.
+var gauges = map[string]bool{MetricPolicyStale: true}
 
 // Meter is a set of counters keyed by name and labels. A nil Meter counts nothing.
 type Meter struct {
@@ -31,6 +37,7 @@ type Meter struct {
 	mu   sync.Mutex
 	c    map[string]map[string]uint64 // name → rendered labels → count
 	logs map[string]*logWindow        // Note's limit per key
+	g    map[string]float64           // gauges by name
 }
 
 // NewMeter returns an empty meter; the A-60 counters are listed (at no samples) from the start.
@@ -91,6 +98,12 @@ func (m *Meter) WriteText(w io.Writer) error {
 			if _, err := fmt.Fprintf(w, "# HELP %s %s\n", n, h); err != nil {
 				return err
 			}
+		}
+		if gauges[n] {
+			if _, err := fmt.Fprintf(w, "# TYPE %s gauge\n%s %v\n", n, n, m.g[n]); err != nil {
+				return err
+			}
+			continue
 		}
 		if _, err := fmt.Fprintf(w, "# TYPE %s counter\n", n); err != nil {
 			return err
@@ -165,3 +178,26 @@ func (m *Meter) Note(key, first string, summary func(n int, elapsed time.Duratio
 
 // Seconds renders an elapsed time for a summary line ("61s").
 func Seconds(d time.Duration) string { return fmt.Sprintf("%ds", int(d.Seconds())) }
+
+// SetGauge sets the gauge name.
+func (m *Meter) SetGauge(name string, v float64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.g == nil {
+		m.g = map[string]float64{}
+	}
+	m.g[name] = v
+}
+
+// Gauge is the gauge name (0 if never set).
+func (m *Meter) Gauge(name string) float64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.g[name]
+}
