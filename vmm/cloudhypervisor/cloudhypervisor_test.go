@@ -227,15 +227,17 @@ func TestBootWaitsForVMBoot(t *testing.T) {
 
 // TestBootDefaultCmdline: a spec without a command line boots with the backend's default for the host's arch, a
 // console the guest's output reaches and a panic that ends the VM, not an empty payload cmdline; a given one is
-// passed through as is.
+// passed through as is. Either way the guest clears the pages it frees (vmm.ZeroFreedPages, PLT-591), unless the
+// given one sets init_on_free itself.
 func TestBootDefaultCmdline(t *testing.T) {
 	for _, c := range []struct {
 		name, cmdline, want string
 		cpu                 CPU
 	}{
-		{"amd64 empty", "", "console=ttyS0 panic=-1", X86CPU{CPUID: tigerLake.cpuid}},
-		{"arm64 empty", "", "console=ttyAMA0 panic=-1", ARM64CPU{Root: "/nonexistent"}},
-		{"given", "console=ttyS0 quiet", "console=ttyS0 quiet", X86CPU{CPUID: tigerLake.cpuid}},
+		{"amd64 empty", "", "console=ttyS0 panic=-1 init_on_free=1", X86CPU{CPUID: tigerLake.cpuid}},
+		{"arm64 empty", "", "console=ttyAMA0 panic=-1 init_on_free=1", ARM64CPU{Root: "/nonexistent"}},
+		{"given", "console=ttyS0 quiet", "console=ttyS0 quiet init_on_free=1", X86CPU{CPUID: tigerLake.cpuid}},
+		{"given, init_on_free set", "console=ttyS0 init_on_free=0", "console=ttyS0 init_on_free=0", X86CPU{CPUID: tigerLake.cpuid}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)

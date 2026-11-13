@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 )
 
 // Fidelity is what a snapshot holds. The numbers are Substrate's SnapshotFidelity numbers.
@@ -288,4 +289,24 @@ type SnapshotRemover interface {
 	// RemoveLeftovers removes what a Snapshot or ImportSnapshot that never finished left on this host (never
 	// published, so nothing restores from it). It is for a start, while neither runs.
 	RemoveLeftovers(ctx context.Context) error
+}
+
+// ZeroFreedPages is the guest kernel parameter every backend boots a VM with (PLT-591): the kernel clears each page
+// it frees (init_on_free=1), so memory the guest no longer holds (an exited process's, a dropped page cache's, a
+// removed tmpfs file's) is zero pages in a MEMORY snapshot, which the bundle leaves out, instead of the bytes last
+// written there.
+const ZeroFreedPages = "init_on_free=1"
+
+// WithZeroFreedPages is cmdline with ZeroFreedPages added, unless cmdline sets init_on_free itself (an operator's
+// init_on_free=0 is kept).
+func WithZeroFreedPages(cmdline string) string {
+	for _, f := range strings.Fields(cmdline) {
+		if strings.HasPrefix(f, "init_on_free=") {
+			return cmdline
+		}
+	}
+	if cmdline == "" {
+		return ZeroFreedPages
+	}
+	return cmdline + " " + ZeroFreedPages
 }

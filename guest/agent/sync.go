@@ -20,9 +20,10 @@ import (
 // blocked (an unanswering virtio-fs server), so the caller's deadline decides and the snapshot is not taken.
 // With LayerShare, it first saves each container's writable layer there (DEFAUL-1619), leaving out its exec records:
 // a cold boot runs none of the processes they name.
-// After a successful flush it drops the guest's dentries and inodes (ADR A-52): a snapshot then holds no cached
-// virtio-fs entry that the virtiofsd started at restore would have to re-find by path. The drop is not a durability
-// step, so its failure is logged and the Sync still succeeds; like the flush, it answers ctx.
+// After a successful flush it drops the guest's page cache, dentries and inodes (DropCachesLevel; ADR A-52): a snapshot
+// then holds no cached virtio-fs entry that the virtiofsd started at restore would have to re-find by path, and no
+// cached file bytes (PLT-591). The drop is not a durability step, so its failure is logged and the Sync still succeeds;
+// like the flush, it answers ctx.
 func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.SyncResponse, error) {
 	dirs := append([]string(nil), g.SyncDirs...)
 	for _, c := range g.containers {
@@ -47,7 +48,7 @@ func (g *Guest) Sync(ctx context.Context, _ *herdext.SyncRequest) (*herdext.Sync
 			return
 		}
 		if err := drop(); err != nil {
-			log.Printf("herd-guest: sync: dropping the dentry and inode caches: %v", err)
+			log.Printf("herd-guest: sync: dropping the page cache, dentries and inodes: %v", err)
 		}
 		done <- nil
 	}()
@@ -98,3 +99,9 @@ func syncDirs(dirs []string, flush func(*os.File) error) error {
 	}
 	return errors.Join(errs...)
 }
+
+// DropCachesLevel is what Sync writes to /proc/sys/vm/drop_caches once the guest's buffers are flushed: "3", the clean
+// page cache (1) and the reclaimable dentries and inodes (2) (ADR A-52; the page cache since PLT-591). The page cache
+// is then free memory, which the guest kernel clears (vmm.ZeroFreedPages), so a MEMORY snapshot carries none of it;
+// a restored guest reads again from its disks and share what it reads.
+const DropCachesLevel = "3"

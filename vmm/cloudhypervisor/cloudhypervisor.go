@@ -320,6 +320,7 @@ func (v *VMM) vmConfig(spec vmm.Spec, dir string) vmConfig {
 	if cmdline == "" {
 		cmdline = DefaultCmdline(v.cfg.CPU.Arch())
 	}
+	cmdline = vmm.WithZeroFreedPages(cmdline)
 	c := vmConfig{
 		Payload: payloadConfig{Kernel: spec.Kernel, Initramfs: spec.Initrd, Cmdline: cmdline},
 		CPUs:    cpusConfig{BootVCPUs: spec.VCPUs, MaxVCPUs: spec.VCPUs},
