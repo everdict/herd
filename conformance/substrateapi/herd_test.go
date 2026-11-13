@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -94,8 +95,10 @@ func herdlet(t *testing.T, state, worker, labels string, caps vmm.Capabilities, 
 	g := fakeguest.New(fake.New(caps, vms), shortDir(t), []string{self, "shim"})
 	g.RootOf = func(vm string) string { return filepath.Join(state, "shares", vm) }
 	t.Cleanup(g.Close)
+	// Four 1-vCPU actors fit on any host: the herdlet counts this host's cores (2 on a small CI box would hold two).
 	return deploy.Herdlet{Worker: worker, Labels: labels, StateDir: state, Slots: 4, Kernel: "vmlinux", VCPUs: 1, MemoryMiB: 512,
-		GuestPort: fakeguest.GuestPort, VMM: g, Guests: g, Retry: 50 * time.Millisecond,
+		CPUOvercommit: overcommitFor(4),
+		GuestPort:     fakeguest.GuestPort, VMM: g, Guests: g, Retry: 50 * time.Millisecond,
 		Images: &image.Cache{Dir: filepath.Join(state, "images"), Source: registry(), Builder: &imagetest.Builder{},
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}}}
 }
@@ -529,3 +532,7 @@ func TestSuiteGreenOnJoinOfLinuxHostsAtMemory(t *testing.T) {
 		}
 	}
 }
+
+// overcommitFor is the -cpu-overcommit that gives a test herdlet cores×1000 millicores to allocate whatever this host's
+// core count, so a suite that runs several actors at once is not refused by admission on a small host.
+func overcommitFor(cores int) float64 { return float64(cores) / float64(runtime.NumCPU()) }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -50,8 +51,9 @@ func registry() *imagetest.Registry {
 // test registry: templates become VMs through the same machines a real host has.
 func herdletOn(t *testing.T, worker string, store *fake.Store) deploy.Herdlet {
 	state := filepath.Join(t.TempDir(), "state")
+	// Four 1-vCPU actors fit on any host (a test that raises Slots runs up to four), whatever its core count.
 	return deploy.Herdlet{Worker: worker, Identity: nodeIdentity(t, worker), StateDir: state, Slots: 1, Kernel: "vmlinux",
-		VCPUs: 1, MemoryMiB: 512, VMM: fake.New(chCaps(), store), Retry: 50 * time.Millisecond,
+		VCPUs: 1, MemoryMiB: 512, CPUOvercommit: float64(4) / float64(runtime.NumCPU()), VMM: fake.New(chCaps(), store), Retry: 50 * time.Millisecond,
 		Images: &image.Cache{Dir: filepath.Join(state, "images"), Source: registry(), Builder: &imagetest.Builder{},
 			Platform: image.Platform{OS: "linux", Architecture: "amd64"}}}
 }
