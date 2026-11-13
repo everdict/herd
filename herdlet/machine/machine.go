@@ -365,6 +365,7 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if err != nil {
 		return vmm.Snapshot{}, err
 	}
+	ph := phasesOf(ctx)
 	start := time.Now()
 	if err := m.flush(ctx, vmID, m.spec(vmID, t, nil).MemoryMiB); err != nil {
 		// Not %w: the guest's answer is no outcome of the VMM's, and no snapshot was taken.
@@ -373,6 +374,8 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 	if m.cfg.Flush != nil {
 		log.Printf("machine: snapshot %s: guest flushed after %v", id, time.Since(start).Round(time.Millisecond))
 	}
+	ph.Flush = time.Since(start)
+	start = time.Now()
 	snap, err := m.cfg.VMM.Snapshot(ctx, vmID, f)
 	if err != nil {
 		return vmm.Snapshot{}, err
@@ -423,9 +426,15 @@ func (m *Machines) Snapshot(ctx context.Context, id string, f vmm.Fidelity, stop
 		}
 		man.Memory = files
 	}
+	for _, f := range man.Memory {
+		ph.Memory += f.Size
+	}
+	ph.VMM = time.Since(start)
+	start = time.Now()
 	if err := writeBundle(w, man, filepath.Join(m.cfg.ShareDir, vmID)); err != nil {
 		return vmm.Snapshot{}, err
 	}
+	ph.Bundle = time.Since(start)
 	m.taken(snap.ID, id)
 	return snap, nil
 }

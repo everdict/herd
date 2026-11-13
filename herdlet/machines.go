@@ -3,12 +3,15 @@ package herdlet
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
 
+	"github.com/everdict/herd/herdlet/machine"
 	"github.com/everdict/herd/image/registry"
 	"github.com/everdict/herd/link"
+	"github.com/everdict/herd/snapstore"
 	"github.com/everdict/herd/vmm"
 )
 
@@ -104,8 +107,10 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 }
 
 // machineSnapshot writes the bundle to a local file first and then puts it in the snapshot store, so a store that
-// fails mid-way leaves no object and the outcome says so.
+// fails mid-way leaves no object and the outcome says so. The bundle is hashed as it is written, so the store reads it
+// once, to upload it (snapstore.Summed). One line logs the seconds and bytes of each phase (PLT-591).
 func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) link.Outcome {
+	begun := time.Now()
 	create := func() (*os.File, error) { return os.CreateTemp("", "herd-bundle-*") }
 	if a.Bundles != nil {
 		// Beside the cache, so keeping the bundle there is a rename.
@@ -117,16 +122,19 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
+	summer := snapstore.NewSummer(snapstore.PartSizeOf(a.Snapshots))
+	sums := &timedWriter{w: summer}
 	// herd-api waits for the bundle by its size (link.Progress): it learns the size as the bundle grows, and in full
 	// before the upload.
-	pw := &progressWriter{ctx: ctx, w: f, last: time.Now()}
+	pw := &progressWriter{ctx: ctx, w: io.MultiWriter(f, sums), last: time.Now()}
 	// The guest's flush comes first and reports nothing; it saves the containers' writable layers, which the VM's
 	// memory bounds, into the bundle. herd-api learns that size now, so its call waits for the flush's bound
 	// (machine.FlushTimeoutFor) and does not end it at its call timeout (PLT-378).
 	if n, ok := a.Machines.Memory(w.VM); ok {
 		progress(ctx, n)
 	}
-	snap, err := a.Machines.Snapshot(ctx, w.VM, w.Fidelity, stop, pw)
+	sctx, ph := machine.WithPhases(ctx)
+	snap, err := a.Machines.Snapshot(sctx, w.VM, w.Fidelity, stop, pw)
 	if err != nil {
 		return classify(err)
 	}
@@ -134,7 +142,8 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	if _, err := f.Seek(0, 0); err != nil {
 		return link.Outcome{Result: link.ResultFailed, Reason: err.Error()}
 	}
-	obj, err := a.Snapshots.Put(ctx, w.SnapshotKey, f)
+	uploaded := time.Now()
+	obj, err := a.Snapshots.Put(ctx, w.SnapshotKey, snapstore.SummedFile(f, summer))
 	if err != nil {
 		// No object holds the snapshot, and herd-api records none: nothing restores from the host's copy.
 		if _, rerr := a.Machines.RemoveSnapshot(ctx, snap.ID); rerr != nil {
@@ -142,6 +151,15 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 		}
 		return classify(err)
 	}
+	upload := time.Since(uploaded)
+	why := "fork"
+	if stop {
+		why = "suspend"
+	}
+	// The bundle's write and its hash run together; the bundle's phase is the write's part.
+	log.Printf("herdlet %s: snapshot %s of %s (%s): flush %.3fs, vmm snapshot %.3fs, bundle %.3fs %d B, hash %.3fs %d B, upload %.3fs %d B, total %.3fs; %s, memory files %d B",
+		a.Worker, obj.Key, w.VM, why, ph.Flush.Seconds(), ph.VMM.Seconds(), (ph.Bundle - sums.d).Seconds(), pw.n, sums.d.Seconds(), sums.n,
+		upload.Seconds(), obj.Size, time.Since(begun).Seconds(), snap.Fidelity, ph.Memory)
 	a.noteSnapshot(snap.ID, obj.Key)
 	if a.Bundles != nil {
 		// A snapshot this node took (a template's golden) is restored here from its own copy (PLT-227).
@@ -152,6 +170,21 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	return link.Outcome{Result: link.ResultDone, Snapshot: &link.SnapshotRef{
 		Key: obj.Key, Digest: obj.Digest, Fidelity: snap.Fidelity, RestoreFamily: snap.RestoreFamily,
 	}}
+}
+
+// timedWriter is w and how long its writes took, and how many bytes they took.
+type timedWriter struct {
+	w io.Writer
+	d time.Duration
+	n int64
+}
+
+func (t *timedWriter) Write(b []byte) (int, error) {
+	start := time.Now()
+	n, err := t.w.Write(b)
+	t.d += time.Since(start)
+	t.n += int64(n)
+	return n, err
 }
 
 func presenceOutcome(op link.Op, p vmm.Presence, err error) link.Outcome {
