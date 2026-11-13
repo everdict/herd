@@ -241,22 +241,11 @@ func (a *API) Run(ctx context.Context, ln net.Listener) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go func() {
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if left, err := srv.Reconcile(ctx); err != nil {
-					log.Printf("herd-api: reconcile: %v", err)
-				} else if left > 0 {
-					log.Printf("herd-api: reconcile: %d workflow steps still owed", left)
-				}
-			}
-		}
-	}()
+	// Two loops, so that an actor's owed step a herdlet does not answer (each waits out a call's timeout) delays no
+	// golden build or rebuild: on one cluster a boot that never converged took three minutes of every pass, and the
+	// goldens of a new guest were rebuilt one every three minutes (PLT-591).
+	go reconcileEvery(ctx, every, "actors", srv.ReconcileActors)
+	go reconcileEvery(ctx, every, "templates", srv.ReconcileTemplates)
 	if a.SnapshotSweep > 0 {
 		delay := a.SnapshotSweepDelay
 		if delay <= 0 {
@@ -428,4 +417,22 @@ func (a *API) grantedStore() (*s3.Config, error) {
 	}
 	cfg := s.Config()
 	return &cfg, nil
+}
+
+// reconcileEvery runs pass every period until ctx ends, one pass at a time.
+func reconcileEvery(ctx context.Context, every time.Duration, what string, pass func(context.Context) (int, error)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if left, err := pass(ctx); err != nil {
+				log.Printf("herd-api: reconcile of %s: %v", what, err)
+			} else if left > 0 {
+				log.Printf("herd-api: reconcile of %s: %d workflow steps still owed", what, left)
+			}
+		}
+	}
 }

@@ -45,6 +45,12 @@ const (
 	TargetActorHeader = "ate-target-actor"
 	// ReasonHeader carries a typed Reason on a refusal (a header) or on a cut stream (a trailer).
 	ReasonHeader = "herd-reason"
+	// WakeHeader says whether the request may resume a suspended actor. Absent, it may (resume-on-request). WakeNever:
+	// it may not, and a request to an actor that is SUSPENDING or SUSPENDED is refused at once with ReasonSuspended.
+	// A control plane that suspends actors itself sends it on what it re-attaches, so only its own ResumeActor wakes
+	// one (PLT-586).
+	WakeHeader = "herd-wake"
+	WakeNever  = "never"
 )
 
 // Reason is why the router refused or ended a request.
@@ -222,6 +228,16 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, rerr)
 		return
 	}
+	wake := true
+	switch v := r.Header.Get(WakeHeader); v {
+	case "":
+	case WakeNever:
+		wake = false
+	default:
+		// An unknown value is not read as "wake": the caller asked for something this router cannot promise.
+		fail(w, r, &routeError{http.StatusBadRequest, codes.InvalidArgument, ReasonBadTarget, fmt.Sprintf("%s %q: want %q or no header", WakeHeader, v, WakeNever)})
+		return
+	}
 	port := rt.cfg.DefaultPort
 	if r.Method == http.MethodConnect {
 		_, ps, err := net.SplitHostPort(r.Host)
@@ -234,7 +250,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The parking budget bounds only the wait for a connection, never the request once delivered.
 	pctx, cancel := context.WithTimeout(r.Context(), rt.cfg.ParkingBudget)
-	conn, rerr := rt.connect(pctx, wr, token, space, name, port)
+	conn, rerr := rt.connect(pctx, wr, token, space, name, port, wake)
 	cancel()
 	if rerr != nil {
 		fail(w, r, rerr)
@@ -253,8 +269,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // connect resolves the actor (parking while it is not running) and opens a connection to port through its worker's
-// tunnel, retrying until ctx (the parking budget) ends.
-func (rt *Router) connect(ctx context.Context, w *actorWrite, token, space, name string, port uint32) (net.Conn, *routeError) {
+// tunnel, retrying until ctx (the parking budget) ends. Without wake it resumes nothing and does not park behind a
+// suspend: an actor that is SUSPENDING or SUSPENDED refuses the request at once.
+func (rt *Router) connect(ctx context.Context, w *actorWrite, token, space, name string, port uint32, wake bool) (net.Conn, *routeError) {
 	parked := false
 	defer func() {
 		if parked {
@@ -263,7 +280,7 @@ func (rt *Router) connect(ctx context.Context, w *actorWrite, token, space, name
 	}()
 	var last, lastAPI string
 	for {
-		worker, vm, why, rerr := rt.resolve(ctx, w, token, space, name)
+		worker, vm, why, rerr := rt.resolve(ctx, w, token, space, name, wake)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -318,8 +335,8 @@ func (rt *Router) budgetError(space, name, last, lastAPI string) *routeError {
 }
 
 // resolve looks the actor up once. It answers its worker and VM when the actor runs; otherwise why it cannot be
-// reached yet (and it starts a resume of a suspended actor), or a terminal refusal.
-func (rt *Router) resolve(ctx context.Context, wr *actorWrite, token, space, name string) (worker, vm, why string, _ *routeError) {
+// reached yet (and, with wake, it starts a resume of a suspended actor), or a terminal refusal.
+func (rt *Router) resolve(ctx context.Context, wr *actorWrite, token, space, name string, wake bool) (worker, vm, why string, _ *routeError) {
 	a, err := rt.cfg.Control.GetActor(ctx, token, space, name)
 	if err != nil {
 		switch status.Code(err) {
@@ -347,8 +364,14 @@ func (rt *Router) resolve(ctx context.Context, wr *actorWrite, token, space, nam
 		if node := a.GetStatus().GetAssignedNode(); node != "" {
 			return node, a.GetMetadata().GetUid(), "", nil
 		}
-	case ateapi.ActorState_ACTOR_STATE_SUSPENDED:
-		rt.resume(token, space, name)
+	case ateapi.ActorState_ACTOR_STATE_SUSPENDING, ateapi.ActorState_ACTOR_STATE_SUSPENDED:
+		if !wake {
+			return "", "", "", &routeError{http.StatusServiceUnavailable, codes.Unavailable, ReasonSuspended,
+				fmt.Sprintf("actor %s/%s is %v and this request does not wake it (%s: %s)", space, name, st, WakeHeader, WakeNever)}
+		}
+		if st == ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+			rt.resume(token, space, name)
+		}
 	case ateapi.ActorState_ACTOR_STATE_DELETING:
 		return "", "", "", &routeError{http.StatusNotFound, codes.NotFound, ReasonActorDeleting, fmt.Sprintf("actor %s/%s is being deleted", space, name)}
 	case ateapi.ActorState_ACTOR_STATE_CRASHED:

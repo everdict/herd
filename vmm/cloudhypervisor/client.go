@@ -129,6 +129,7 @@ type vmConfig struct {
 	Payload payloadConfig  `json:"payload"`
 	CPUs    cpusConfig     `json:"cpus"`
 	Memory  memoryConfig   `json:"memory"`
+	Balloon *balloonConfig `json:"balloon,omitempty"`
 	Disks   []diskConfig   `json:"disks,omitempty"`
 	Fs      []fsConfig     `json:"fs,omitempty"`
 	Net     []netConfig    `json:"net,omitempty"`
@@ -152,6 +153,13 @@ type memoryConfig struct {
 	Size int64 `json:"size"`
 	// Shared is required by vhost-user devices (virtio-fs) and by snapshots that carry them.
 	Shared bool `json:"shared"`
+}
+
+// balloonConfig is a virtio-balloon device. Size is how much of the guest's memory the balloon takes (0: none);
+// FreePageReporting has the guest report the pages it frees, which Cloud Hypervisor returns to the host.
+type balloonConfig struct {
+	Size              int64 `json:"size"`
+	FreePageReporting bool  `json:"free_page_reporting"`
 }
 
 type diskConfig struct {

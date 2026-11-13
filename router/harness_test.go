@@ -366,6 +366,15 @@ func (s *stack) client(target, token string) *client {
 	return &client{conn: c, md: md, stack: s}
 }
 
+// with is the client sending one more header on every call.
+func (c *client) with(k, v string) *client {
+	md := map[string]string{k: v}
+	for mk, mv := range c.md {
+		md[mk] = mv
+	}
+	return &client{conn: c.conn, md: md, stack: c.stack}
+}
+
 func (c *client) ctx(ctx context.Context) context.Context {
 	return metadata.NewOutgoingContext(ctx, metadata.New(c.md))
 }

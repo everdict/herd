@@ -131,6 +131,9 @@ func (s Spec) Validate() error {
 	case s.NIC != nil && (!tapRE.MatchString(s.NIC.TAP) || !macRE.MatchString(s.NIC.MAC)):
 		return fmt.Errorf("%w: nic tap %q mac %q", ErrInvalidSpec, s.NIC.TAP, s.NIC.MAC)
 	}
+	if err := CheckCmdline(s.Cmdline); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSpec, err)
+	}
 	return nil
 }
 
@@ -291,22 +294,41 @@ type SnapshotRemover interface {
 	RemoveLeftovers(ctx context.Context) error
 }
 
-// ZeroFreedPages is the guest kernel parameter every backend boots a VM with (PLT-591): the kernel clears each page
-// it frees (init_on_free=1), so memory the guest no longer holds (an exited process's, a dropped page cache's, a
-// removed tmpfs file's) is zero pages in a MEMORY snapshot, which the bundle leaves out, instead of the bytes last
-// written there.
-const ZeroFreedPages = "init_on_free=1"
+// FreePageReporting says how a backend keeps memory its guest no longer holds (an exited process's, a dropped page
+// cache's, a removed tmpfs file's) out of a MEMORY snapshot and off the host (PLT-591): the guest reports its free pages
+// through a virtio balloon and the VMM gives them back to the host, so they are holes that read zero, which the bundle
+// leaves out. init_on_free=1 was the first attempt (v0.1.24) and is refused here: the guest kernel then writes every
+// page it frees, the boot's own included, so each VM held its whole memory on the host and a 15 GB node with three
+// 4 GiB VMs ran out of memory (2026-11-13).
+const FreePageReporting = true
 
-// WithZeroFreedPages is cmdline with ZeroFreedPages added, unless cmdline sets init_on_free itself (an operator's
-// init_on_free=0 is kept).
-func WithZeroFreedPages(cmdline string) string {
+// ReportEveryFreePage is the kernel parameter a backend with FreePageReporting boots its guests with: the kernel
+// reports free blocks of this order and up, and by default only whole pageblocks (4 MiB here), which leaves the free
+// memory between used pages, with the bytes last written there, in every snapshot. Order 0 reports every free page.
+const ReportEveryFreePage = "page_reporting.page_reporting_order=0"
+
+// WithFreePageReporting is cmdline with ReportEveryFreePage, unless cmdline sets the order itself.
+func WithFreePageReporting(cmdline string) string {
 	for _, f := range strings.Fields(cmdline) {
-		if strings.HasPrefix(f, "init_on_free=") {
+		if strings.HasPrefix(f, "page_reporting.page_reporting_order=") {
 			return cmdline
 		}
 	}
 	if cmdline == "" {
-		return ZeroFreedPages
+		return ReportEveryFreePage
 	}
-	return cmdline + " " + ZeroFreedPages
+	return cmdline + " " + ReportEveryFreePage
+}
+
+// RefusedCmdline is the kernel parameter no backend adds and no operator's command line may carry.
+const RefusedCmdline = "init_on_free=1"
+
+// CheckCmdline refuses a command line that makes the guest hold all of its memory on the host.
+func CheckCmdline(cmdline string) error {
+	for _, f := range strings.Fields(cmdline) {
+		if f == RefusedCmdline {
+			return fmt.Errorf("vmm: kernel command line carries %s: the guest would write every page it frees and hold its whole memory on the host", RefusedCmdline)
+		}
+	}
+	return nil
 }

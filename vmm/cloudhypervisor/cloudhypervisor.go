@@ -320,11 +320,14 @@ func (v *VMM) vmConfig(spec vmm.Spec, dir string) vmConfig {
 	if cmdline == "" {
 		cmdline = DefaultCmdline(v.cfg.CPU.Arch())
 	}
-	cmdline = vmm.WithZeroFreedPages(cmdline)
+	cmdline = vmm.WithFreePageReporting(cmdline)
 	c := vmConfig{
 		Payload: payloadConfig{Kernel: spec.Kernel, Initramfs: spec.Initrd, Cmdline: cmdline},
 		CPUs:    cpusConfig{BootVCPUs: spec.VCPUs, MaxVCPUs: spec.VCPUs},
 		Memory:  memoryConfig{Size: int64(spec.MemoryMiB) << 20, Shared: true},
+		// A balloon that never inflates: it is there for the guest to report its free pages through, which Cloud
+		// Hypervisor gives back to the host (vmm.FreePageReporting).
+		Balloon: &balloonConfig{Size: 0, FreePageReporting: vmm.FreePageReporting},
 		Vsock:   &vsockConfig{CID: guestCID, Socket: filepath.Join(dir, "vsock.sock")},
 		Serial:  &consoleConfig{Mode: "File", File: filepath.Join(dir, "serial.log")},
 		Console: &consoleConfig{Mode: "File", File: filepath.Join(dir, "console.log")},

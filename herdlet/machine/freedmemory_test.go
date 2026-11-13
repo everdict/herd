@@ -6,8 +6,6 @@ import (
 	"crypto/rand"
 	"io"
 	"path/filepath"
-	"slices"
-	"strings"
 	"sync"
 	"testing"
 
@@ -19,25 +17,19 @@ import (
 )
 
 // guestKernel is a fake host whose VM has a memory and a model of the guest kernel's use of it (PLT-591): a page a
-// process or the page cache filled holds its bytes; a page freed holds them still, unless the VM booted with
-// init_on_free=1, which clears it; the page cache is freed by a drop_caches write that names it (1). The VM's command
-// line is what a backend boots it with (vmm.WithZeroFreedPages, as cloudhypervisor and vz apply it), and its flush
+// process or the page cache filled holds its bytes; a page freed holds them still, unless the guest reports its free
+// pages and the VMM gives them back to the host (reporting), which leaves a hole that reads zero; the page cache is
+// freed by a drop_caches write that names it (1). Reporting is what the backend does (vmm.FreePageReporting, as
+// cloudhypervisor applies it) unless the test turns it off, and its flush
 // writes what herd-guest's Sync writes (dropLevel, agent.DropCachesLevel by default). Its MEMORY snapshot carries the
 // memory as one file, as Cloud Hypervisor's memory-ranges.
 type guestKernel struct {
 	*fake.Fake
-	mu         sync.Mutex
-	mem        []byte
-	cache      [][2]int // the page cache's [offset, end)
-	zeroOnFree bool
-	dropLevel  string
-}
-
-func (g *guestKernel) Boot(ctx context.Context, s vmm.Spec) (vmm.VM, error) {
-	g.mu.Lock()
-	g.zeroOnFree = slices.Contains(strings.Fields(vmm.WithZeroFreedPages(s.Cmdline)), "init_on_free=1")
-	g.mu.Unlock()
-	return g.Fake.Boot(ctx, s)
+	mu        sync.Mutex
+	mem       []byte
+	cache     [][2]int // the page cache's [offset, end)
+	reporting bool
+	dropLevel string
 }
 
 // fill has a process (or, with cache, the page cache) write n bytes at off: random bytes, which no codec makes smaller.
@@ -52,9 +44,9 @@ func (g *guestKernel) fill(t *testing.T, off, n int, cache bool) {
 	}
 }
 
-// free frees [off, off+n): its bytes stay unless the kernel clears freed pages.
+// free frees [off, off+n): its bytes stay unless the guest reports the pages and the host takes them back.
 func (g *guestKernel) free(off, n int) {
-	if g.zeroOnFree {
+	if g.reporting {
 		clear(g.mem[off : off+n])
 	}
 }
@@ -82,18 +74,19 @@ func (g *guestKernel) ExportSnapshot(ctx context.Context, s vmm.Snapshot) ([]vmm
 
 // TestFreedGuestMemoryLeavesTheBundle (PLT-591): a VM of 256 MiB whose processes hold 32 MiB, that filled and freed
 // 96 MiB more (a build that exited) and read 96 MiB of files into its page cache, takes a MEMORY bundle of about the
-// 32 MiB it holds: the guest boots with init_on_free=1, so freed pages are zero, and the flush drops the page cache
-// ("3"), so the cache is freed and zero too; the bundle leaves zero pages out. With init_on_free=0 and a drop of "2"
-// (v0.1.23) the freed bytes and the cache stay in the memory and the bundle carries them; that run is logged.
+// 32 MiB it holds: the guest reports its free pages (vmm.FreePageReporting), so freed pages are holes that read zero,
+// and the flush drops the page cache ("3"), so the cache is freed and reported too; the bundle leaves zero pages out.
+// With no reporting and a drop of "2" (v0.1.23) the freed bytes and the cache stay in the memory and the bundle
+// carries them; that run is logged.
 func TestFreedGuestMemoryLeavesTheBundle(t *testing.T) {
 	const size, held, freed, cached = 256 << 20, 32 << 20, 96 << 20, 96 << 20
-	run := func(t *testing.T, cmdline, dropLevel string) int {
+	run := func(t *testing.T, reporting bool, dropLevel string) int {
 		dir := t.TempDir()
-		g := &guestKernel{Fake: fake.New(ubuntuCaps, nil), mem: make([]byte, size), dropLevel: dropLevel}
+		g := &guestKernel{Fake: fake.New(ubuntuCaps, nil), mem: make([]byte, size), reporting: reporting, dropLevel: dropLevel}
 		reg := registry()
 		cache := &image.Cache{Dir: filepath.Join(dir, "images"), Source: reg, Builder: &imagetest.Builder{}, Platform: image.Platform{OS: "linux", Architecture: ubuntuCaps.Arch}}
 		m, err := New(Config{VMM: g, Images: cache, ShareDir: filepath.Join(dir, "shares"), Flush: g,
-			Base: vmm.Spec{Kernel: "vmlinux", Initrd: "initramfs", Cmdline: cmdline}})
+			Base: vmm.Spec{Kernel: "vmlinux", Initrd: "initramfs"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -113,10 +106,10 @@ func TestFreedGuestMemoryLeavesTheBundle(t *testing.T) {
 		}
 		return bundle.Len()
 	}
-	got := run(t, "", agent.DropCachesLevel)
+	got := run(t, vmm.FreePageReporting, agent.DropCachesLevel)
 	t.Logf("a %d-byte VM holding %d bytes, %d freed, %d in its page cache: a %d-byte bundle", size, held, freed, cached, got)
 	if limit := held + 4<<20; got > limit {
 		t.Errorf("the bundle holds %d bytes, want at most %d: the VM holds %d bytes; its freed memory and page cache are in the bundle", got, limit, held)
 	}
-	t.Logf("with init_on_free=0 and drop_caches 2 (v0.1.23): a %d-byte bundle", run(t, "console=ttyS0 init_on_free=0", "2"))
+	t.Logf("with no free page reporting and drop_caches 2 (v0.1.23): a %d-byte bundle", run(t, false, "2"))
 }
