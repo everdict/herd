@@ -22,16 +22,18 @@ import (
 // then, for a MEMORY snapshot of a VMM that carries its snapshots (vmm.SnapshotCarrier), the VMM's snapshot files
 // under memory/<name> (Manifest.Memory; from version 4 as compressed frames without their zero pages, memframes.go),
 // the volume tree under volumes/<name>/ and, from version 3, each container's
-// writable layer as its guest saved it under rootfs/<container>.tar (package layer), which a cold boot puts back. A
+// writable layer as its guest saved it under rootfs/<container>.tar (package layer), which a cold boot puts back.
+// From version 5 the files of both are stored in compressed pieces (pieces.go), and a file with several names in the
+// volumes (hard links) is stored once: its further names are link entries, and a restore links them again. A
 // VOLUMES bundle is everything a move needs; a MEMORY bundle with its memory files is everything a restore on any
 // host of its family needs (ADR A-28). A MEMORY bundle without them (version 1, or a VMM that is no carrier) restores
-// only where they were written. A reader reads versions 1 to 4.
+// only where they were written. A reader reads versions 1 to 5.
 const (
 	bundleManifest = "herd-bundle.json"
 	bundleMemory   = "memory"
 	bundleVolumes  = "volumes"
 	bundleRootfs   = "rootfs"
-	bundleVersion  = 4
+	bundleVersion  = 5
 )
 
 // Manifest is the bundle's first entry.
@@ -62,9 +64,12 @@ func marshalPlan(p *initd.Plan) ([]byte, error) {
 }
 
 // writeBundle writes m, the files m.Memory names (opened through them) and then the tree of every volume of the
-// share. It does not follow symlinks: a link in a volume is stored as a link.
+// share. It does not follow symlinks: a link in a volume is stored as a link. A file's second and further names are
+// stored as links to its first, in the order the walk meets them.
 func writeBundle(w io.Writer, m Manifest, share string) error {
 	tw := tar.NewWriter(w)
+	ps := newPieces()
+	first := map[[2]uint64]string{} // a linked file's first name in the bundle
 	b, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("machine: bundle: %w", err)
@@ -119,18 +124,23 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 			if !fi.Mode().IsRegular() && !fi.IsDir() && fi.Mode()&fs.ModeSymlink == 0 {
 				return nil // sockets, fifos and devices do not move
 			}
-			if err := tw.WriteHeader(h); err != nil {
+			if !fi.Mode().IsRegular() {
+				return tw.WriteHeader(h)
+			}
+			if id, linked := fileID(fi); linked {
+				if name, ok := first[id]; ok {
+					h.Typeflag, h.Linkname, h.Size = tar.TypeLink, name, 0
+					return tw.WriteHeader(h)
+				}
+				first[id] = h.Name
+			}
+			f, err := os.Open(p)
+			if err != nil {
 				return err
 			}
-			if fi.Mode().IsRegular() {
-				f, err := os.Open(p)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				if _, err := io.CopyN(tw, f, h.Size); err != nil {
-					return err
-				}
+			defer f.Close()
+			if err := ps.write(tw, h, f, h.Size); err != nil {
+				return fmt.Errorf("%s: %w", rel, err)
 			}
 			return nil
 		})
@@ -138,7 +148,7 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 			return fmt.Errorf("machine: bundle: volume %q: %w", v, err)
 		}
 	}
-	if err := writeLayers(tw, share); err != nil {
+	if err := writeLayers(tw, ps, share); err != nil {
 		return fmt.Errorf("machine: bundle: %w", err)
 	}
 	return tw.Close()
@@ -146,7 +156,7 @@ func writeBundle(w io.Writer, m Manifest, share string) error {
 
 // writeLayers writes each container's layer archive the guest saved in the share (layer.Dir, at its Sync before the
 // snapshot) as rootfs/<container>.tar. A share without them (a guest from before herd carried layers) writes none.
-func writeLayers(tw *tar.Writer, share string) error {
+func writeLayers(tw *tar.Writer, ps *pieces, share string) error {
 	ents, err := os.ReadDir(filepath.Join(share, layer.Dir))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -168,11 +178,7 @@ func writeLayers(tw *tar.Writer, share string) error {
 			return err
 		}
 		h := &tar.Header{Name: bundleRootfs + "/" + e.Name(), Mode: 0o600, Size: fi.Size(), ModTime: fi.ModTime(), Typeflag: tar.TypeReg, Format: tar.FormatPAX}
-		if err := tw.WriteHeader(h); err != nil {
-			f.Close()
-			return err
-		}
-		_, err = io.CopyN(tw, f, h.Size)
+		err = ps.write(tw, h, f, h.Size)
 		f.Close()
 		if err != nil {
 			return fmt.Errorf("layer %s: %w", e.Name(), err)
@@ -208,6 +214,27 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 	for _, v := range vols {
 		declared[v] = true
 	}
+	// inVolume is the path in the share of a bundle name under volumes/, which must lie in a declared volume.
+	inVolume := func(name string) (string, error) {
+		rel, ok := strings.CutPrefix(name, bundleVolumes+"/")
+		if !ok {
+			return "", fmt.Errorf("machine: bundle: entry %q is not under %s/", name, bundleVolumes)
+		}
+		rel = strings.TrimSuffix(rel, "/")
+		for _, el := range strings.Split(rel, "/") {
+			if el == ".." || el == "." || el == "" {
+				return "", fmt.Errorf("%w: bundle entry %q", ErrOutsideShare, name)
+			}
+		}
+		if !declared[strings.Split(rel, "/")[0]] {
+			return "", fmt.Errorf("machine: bundle: entry %q is in no declared volume", name)
+		}
+		return rel, nil
+	}
+	ps := newPieces()
+	// The file whose pieces are being read: a further piece belongs to the entry right before it.
+	var last string
+	lastPart := 0
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -216,24 +243,23 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 		if err != nil {
 			return fmt.Errorf("machine: bundle: %w", err)
 		}
+		part, err := partOf(h)
+		if err != nil {
+			return err
+		}
+		if part > 0 && (h.Typeflag != tar.TypeReg || h.Name != last || part != lastPart+1) {
+			return fmt.Errorf("machine: bundle: entry %q is piece %d of a file, after piece %d of %q", h.Name, part, lastPart, last)
+		}
+		last, lastPart = h.Name, part
 		if name, ok := strings.CutPrefix(h.Name, bundleRootfs+"/"); ok {
-			if err := extractLayer(tr, root, name, h); err != nil {
+			if err := extractLayer(tr, root, ps, name, h, part); err != nil {
 				return err
 			}
 			continue
 		}
-		rel, ok := strings.CutPrefix(h.Name, bundleVolumes+"/")
-		if !ok {
-			return fmt.Errorf("machine: bundle: entry %q is not under %s/", h.Name, bundleVolumes)
-		}
-		rel = strings.TrimSuffix(rel, "/")
-		for _, el := range strings.Split(rel, "/") {
-			if el == ".." || el == "." || el == "" {
-				return fmt.Errorf("%w: bundle entry %q", ErrOutsideShare, h.Name)
-			}
-		}
-		if !declared[strings.Split(rel, "/")[0]] {
-			return fmt.Errorf("machine: bundle: entry %q is in no declared volume", h.Name)
+		rel, err := inVolume(h.Name)
+		if err != nil {
+			return err
 		}
 		mode := fs.FileMode(h.Mode) & fs.ModePerm
 		switch h.Typeflag {
@@ -245,17 +271,31 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 				return fmt.Errorf("%w: bundle entry %q is not a directory in the share", ErrOutsideShare, h.Name)
 			}
 		case tar.TypeReg:
-			f, err := root.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+			flags := os.O_CREATE | os.O_EXCL | os.O_WRONLY
+			if part > 0 {
+				flags = os.O_APPEND | os.O_WRONLY
+			}
+			f, err := root.OpenFile(rel, flags, mode)
 			if err != nil {
 				return wrapEscape(h.Name, err)
 			}
-			if _, err := io.CopyN(f, tr, h.Size); err != nil {
+			if err := ps.readPiece(tr, h, f); err != nil {
 				_ = f.Close()
-				return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
+				return err
 			}
 			if err := f.Close(); err != nil {
 				return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
 			}
+		case tar.TypeLink:
+			// Another name of a file the bundle already gave; its owner and time are that file's.
+			old, err := inVolume(h.Linkname)
+			if err != nil {
+				return fmt.Errorf("machine: bundle: entry %q links to %q: %w", h.Name, h.Linkname, err)
+			}
+			if err := root.Link(old, rel); err != nil {
+				return wrapEscape(h.Name, err)
+			}
+			continue
 		case tar.TypeSymlink:
 			if err := root.Symlink(h.Linkname, rel); err != nil {
 				return wrapEscape(h.Name, err)
@@ -273,20 +313,24 @@ func extractVolumes(tr *tar.Reader, root *os.Root, vols []string) error {
 
 // extractLayer writes a container's layer archive into the share at layer.Dir/<name>, where the guest's cold boot
 // reads it (layer.Restore); a MEMORY restore that runs on from the memory leaves it unread.
-func extractLayer(tr *tar.Reader, root *os.Root, name string, h *tar.Header) error {
+func extractLayer(tr *tar.Reader, root *os.Root, ps *pieces, name string, h *tar.Header, part int) error {
 	if h.Typeflag != tar.TypeReg || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, layer.Ext) || name == layer.Ext {
 		return fmt.Errorf("%w: bundle entry %q is no container's layer archive", ErrOutsideShare, h.Name)
 	}
 	if err := root.MkdirAll(layer.Dir, 0o755); err != nil {
 		return wrapEscape(h.Name, err)
 	}
-	f, err := root.OpenFile(layer.Dir+"/"+name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	flags := os.O_CREATE | os.O_TRUNC | os.O_WRONLY
+	if part > 0 {
+		flags = os.O_APPEND | os.O_WRONLY
+	}
+	f, err := root.OpenFile(layer.Dir+"/"+name, flags, 0o600)
 	if err != nil {
 		return wrapEscape(h.Name, err)
 	}
-	if _, err := io.CopyN(f, tr, h.Size); err != nil {
+	if err := ps.readPiece(tr, h, f); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
+		return err
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("machine: bundle: %s: %w", h.Name, err)
