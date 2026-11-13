@@ -136,4 +136,13 @@ func TestMeasureSuspend(t *testing.T) {
 	}
 	t.Logf("MEASURE memory_bytes=%d used_bytes=%d stream_mibs=%d suspend_s=%.2f object_bytes=%d endpoint_received_bytes=%d node_vmm_bytes=%d node_cache_bytes=%d",
 		size, used, rate>>20, took.Seconds(), obj.Size, srv.Received(), diskBytes(t, v.dir), diskBytes(t, filepath.Join(dir, "bundles")))
+	// The resume on this node, from the bundle cache, after herd-api deleted the suspended VM.
+	if o := a.doMachine(ctx, link.Work{Op: link.OpDelete, VM: "vm-1", Cause: link.CauseSuspend}); o.Result != link.ResultDone {
+		t.Fatalf("delete: %+v", o)
+	}
+	start = time.Now()
+	if o := a.doMachine(ctx, link.Work{Op: link.OpRestore, VM: "vm-1", Snapshot: o.Snapshot}); o.Result != link.ResultDone {
+		t.Fatalf("restore: %+v", o)
+	}
+	t.Logf("MEASURE resume_here_s=%.2f", time.Since(start).Seconds())
 }

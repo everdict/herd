@@ -1,6 +1,7 @@
 package herdlet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -78,7 +79,7 @@ func (v *diskVMM) ImportSnapshot(ctx context.Context, s vmm.Snapshot, next func(
 			if err != nil {
 				return f, nil, err
 			}
-			_, err = io.CopyN(out, r, f.Size)
+			err = copyHoles(out, r, f.Size)
 			out.Close()
 			if err != nil {
 				return f, nil, err
@@ -169,4 +170,24 @@ func TestSnapshotLeavesOneLocalCopy(t *testing.T) {
 	if o := a.doMachine(ctx, link.Work{Op: link.OpRestore, VM: "vm-1", Snapshot: o.Snapshot}); o.Result != link.ResultDone {
 		t.Fatalf("restore from the kept bundle: %+v", o)
 	}
+}
+
+// copyHoles is Cloud Hypervisor's import (cloudhypervisor.writeFrom): size bytes of r into f, zero blocks as holes.
+func copyHoles(f *os.File, r io.Reader, size int64) error {
+	buf, zero := make([]byte, 64<<10), make([]byte, 64<<10)
+	for n := int64(0); n < size; {
+		b := buf[:min(int64(len(buf)), size-n)]
+		if _, err := io.ReadFull(r, b); err != nil {
+			return err
+		}
+		if bytes.Equal(b, zero[:len(b)]) {
+			if _, err := f.Seek(int64(len(b)), io.SeekCurrent); err != nil {
+				return err
+			}
+		} else if _, err := f.Write(b); err != nil {
+			return err
+		}
+		n += int64(len(b))
+	}
+	return f.Truncate(size)
 }
