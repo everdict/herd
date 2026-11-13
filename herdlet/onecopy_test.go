@@ -26,6 +26,8 @@ type diskVMM struct {
 	*fake.Fake
 	dir    string
 	memory int64
+	// write, if set, writes the memory file at p in place of 1 MiB of random bytes and zeros.
+	write func(p string, size int64) error
 }
 
 const memoryFile = "memory-ranges"
@@ -35,12 +37,15 @@ func (v *diskVMM) Snapshot(ctx context.Context, id string, f vmm.Fidelity) (vmm.
 	if err != nil {
 		return s, err
 	}
+	if err := os.MkdirAll(filepath.Join(v.dir, s.ID), 0o700); err != nil {
+		return s, err
+	}
+	if v.write != nil {
+		return s, v.write(filepath.Join(v.dir, s.ID, memoryFile), v.memory)
+	}
 	b := make([]byte, v.memory)
 	// 1 MiB of data the guest used, in its first pages.
 	if _, err := rand.Read(b[:1<<20]); err != nil {
-		return s, err
-	}
-	if err := os.MkdirAll(filepath.Join(v.dir, s.ID), 0o700); err != nil {
 		return s, err
 	}
 	return s, os.WriteFile(filepath.Join(v.dir, s.ID, memoryFile), b, 0o600)
