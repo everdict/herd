@@ -16,7 +16,6 @@ import (
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/mkfs"
 	ociregistry "github.com/everdict/herd/image/registry"
-	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/snapstore/s3/s3test"
 	"github.com/everdict/herd/vmm/cloudhypervisor"
@@ -55,10 +54,7 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	key, err := deploy.EnsureKey(filepath.Join(dir, "jwt.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	herd := newTestHerd(t)
 	creds := s3.Credentials{AccessKeyID: "herd", SecretAccessKey: "herd-secret"}
 	store := s3test.New("us-east-1", creds)
 	endpoint := s3test.Start(t, store).URL
@@ -76,15 +72,11 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		go func() { c <- f() }()
 	}
 	apiLn, cl, tl := listen(t), listen(t), listen(t)
-	api := &deploy.API{Key: key, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: endpoint,
+	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: endpoint,
 		S3Credentials: creds, CallTimeout: 5 * time.Minute, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Key: key, API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: time.Minute, DefaultPort: 8080}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
-	jt, err := join.MintToken(key, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	builder, why, err := mkfs.Detect(ctx, mkfs.Exec{})
 	if err != nil {
 		t.Fatalf("rootfs builder: %s: %v", why, err)
@@ -95,13 +87,13 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		StateDir: filepath.Join(state, "vms"), SnapshotDir: filepath.Join(state, "vm-snapshots")})
 	h := deploy.Herdlet{Worker: "herdlet-f", Labels: "pool=herdlet-f", StateDir: state, Slots: 2, Kernel: kernel, Initrd: initrd,
 		VCPUs: 1, MemoryMiB: 1024, GuestPort: 8080, VMM: v, Guests: v, Retry: 200 * time.Millisecond,
-		API: apiLn.Addr().String(), Token: jt,
+		API: apiLn.Addr().String(), Identity: herd.id(t, "/herd/node/herdlet-f"),
 		Images: &image.Cache{Dir: filepath.Join(state, "images"), Source: &ociregistry.Client{}, Builder: builder,
 			Platform: image.Platform{OS: "linux", Architecture: runtime.GOARCH}}}
 	serve(func() error { return h.Run(ctx) })
-	tok := token(t, key)
+	tok := herd.token(t, apiLn.Addr().String(), cl.Addr().String())
 	waitWorkers(t, apiLn.Addr().String(), tok, 1)
-	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: apiLn.Addr().String()}, tok)
+	c, err := substrateapi.DialControl(ep(apiLn.Addr().String()), tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +134,7 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		"dd if=/dev/urandom of=/dev/null bs=256M count=1 2>/dev/null && " +
 		"dd if=/dev/urandom of=/work/cached bs=1M count=128 2>/dev/null && sync && cat /work/cached >/dev/null && " +
 		"grep -E '^(MemFree|Cached|Shmem):' /proc/meminfo"
-	res, err := substrateapi.EnvExec{}.Exec(cctx, substrateapi.Router{Endpoint: substrateapi.Endpoint{Addr: cl.Addr().String()}, Token: tok},
+	res, err := substrateapi.EnvExec{}.Exec(cctx, substrateapi.Router{Endpoint: ep(cl.Addr().String()), Token: tok},
 		space+"/filler", "/bin/sh", "-c", script)
 	if err != nil || res.ExitCode != 0 {
 		t.Fatalf("filling the guest's memory: exit %d, %v\n%s%s", res.ExitCode, err, res.Stdout, res.Stderr)
