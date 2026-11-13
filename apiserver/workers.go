@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 
@@ -39,6 +40,33 @@ func workerCapabilities(r link.Register) *herdext.WorkerCapabilities {
 
 type herdletKey struct{}
 
+// herdletSVIDKey carries the SPIFFE ID of a link opened by a node SVID.
+type herdletSVIDKey struct{}
+
+// workerState is herd-api's bookkeeping beside a worker record.
+type workerState struct {
+	// Identity is the node SVID that registered the worker, if one did.
+	Identity string `json:"identity,omitempty"`
+}
+
+// WorkerIdentity is the node SVID a worker was registered by ("" if none did, or no such worker).
+func (s *Server) WorkerIdentity(ctx context.Context, worker string) (string, error) {
+	r, err := s.cfg.Store.Get(ctx, store.Key{Kind: store.KindWorker, Name: worker})
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var st workerState
+	if len(r.State) > 0 {
+		if err := json.Unmarshal(r.State, &st); err != nil {
+			return "", err
+		}
+	}
+	return st.Identity, nil
+}
+
 // recordWorker keeps a Worker record of what each herdlet declared, so the capabilities survive the link.
 func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 	// A herdlet credential names one worker: it may register only itself.
@@ -54,10 +82,16 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 		return err
 	}
 	k := store.Key{Kind: store.KindWorker, Name: r.Worker}
+	// A worker a node SVID registered is that node's from then on: a token join cannot take its name (review 4).
+	svid, _ := ctx.Value(herdletSVIDKey{}).(string)
 	for {
 		cur, err := s.cfg.Store.Get(ctx, k)
 		if errors.Is(err, store.ErrNotFound) {
-			_, err = s.cfg.Store.Create(ctx, store.Record{Key: k, Data: data})
+			rec := store.Record{Key: k, Data: data}
+			if svid != "" {
+				rec.State, _ = json.Marshal(workerState{Identity: svid})
+			}
+			_, err = s.cfg.Store.Create(ctx, rec)
 			if errors.Is(err, store.ErrExists) {
 				continue
 			}
@@ -66,7 +100,18 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 		if err != nil {
 			return err
 		}
+		// A worker a node SVID registered is that node's: an HS256 credential cannot link as it (re-review 5). Checked
+		// on the record this update replaces, so no SVID registration between a check and the write slips by (R3).
+		if _, herdlet := ctx.Value(herdletKey{}).(string); herdlet && svid == "" && len(cur.State) > 0 {
+			var st workerState
+			if err := json.Unmarshal(cur.State, &st); err == nil && st.Identity != "" {
+				return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot link as it", r.Worker, st.Identity)
+			}
+		}
 		cur.Data = data
+		if svid != "" {
+			cur.State, _ = json.Marshal(workerState{Identity: svid})
+		}
 		_, err = s.cfg.Store.Update(ctx, cur)
 		if errors.Is(err, store.ErrConflict) {
 			continue
@@ -77,8 +122,13 @@ func (s *Server) recordWorker(ctx context.Context, r link.Register) error {
 
 // GetWorkerCapabilities returns one worker's declared capabilities.
 func (s *Server) GetWorkerCapabilities(ctx context.Context, req *herdext.GetWorkerCapabilitiesRequest) (*herdext.WorkerCapabilities, error) {
-	if _, err := s.principal(ctx); err != nil {
+	p, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
+	}
+	// A node reads its own capabilities; any other caller must read in some atespace (review 9).
+	if !(p.Herdlet && p.HerdletWorker() == req.GetWorker()) && !s.readsSomeSpace(p) {
+		return nil, status.Errorf(codes.PermissionDenied, "%q may not read worker %q's capabilities", p.Subject, req.GetWorker())
 	}
 	r, err := s.cfg.Store.Get(ctx, store.Key{Kind: store.KindWorker, Name: req.GetWorker()})
 	if err != nil {
@@ -90,8 +140,12 @@ func (s *Server) GetWorkerCapabilities(ctx context.Context, req *herdext.GetWork
 
 // ListWorkerCapabilities returns every worker's declared capabilities.
 func (s *Server) ListWorkerCapabilities(ctx context.Context, _ *herdext.ListWorkerCapabilitiesRequest) (*herdext.ListWorkerCapabilitiesResponse, error) {
-	if _, err := s.principal(ctx); err != nil {
+	p, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if !s.readsSomeSpace(p) {
+		return nil, status.Errorf(codes.PermissionDenied, "%q may not read in any atespace, so it may not list workers' capabilities", p.Subject)
 	}
 	recs, err := s.cfg.Store.List(ctx, store.KindWorker, "")
 	if err != nil {
@@ -118,7 +172,16 @@ func (s *Server) serveLink(ss grpc.ServerStream) error {
 	if !p.Herdlet {
 		return status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	return s.cfg.Hub.Serve(context.WithValue(ctx, herdletKey{}, p.Subject), link.NewGRPCStream(ss))
+	lctx := context.WithValue(ctx, herdletKey{}, p.HerdletWorker())
+	if p.SVID() {
+		lctx = context.WithValue(lctx, herdletSVIDKey{}, p.Subject)
+	}
+	// The link ends with the credential that opened it: an X.509-SVID's NotAfter, a JWT's exp, the break-glass end.
+	err = auth.ServeWhile(p.Holds, func() error { return s.cfg.Hub.Serve(lctx, link.NewGRPCStream(ss)) })
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return status.Errorf(codes.Unauthenticated, "%v", err)
+	}
+	return err
 }
 
 // CompatSchema is the schema_version of the compat attributes ListWorkers reports for a worker's sandbox runtime:

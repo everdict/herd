@@ -40,3 +40,9 @@ protoc-gen-go orders them (the same rewrite of the previous descriptor reproduce
 the structs and getters in protoc-gen-go's shape. `go generate` with protoc replaces the file.
 
 `ListTags` (DEFAUL-1613) was added the same way, its messages after `GetTagRequest` and the method after `GetTag`.
+
+`Actor.provenance` and `ActorStatus.creator` (PLT-489, ADR 0001 A-60) were added to `herd-additions.txt` and generated
+from it: `ateapi.proto` by `internal/cmd/protosubset`, `ateapi.pb.go` by protoc-gen-go v1.36.12 fed by a stand-in for
+protoc (protocompile v0.14.1 compiling the same sources with standard source info, the CodeGeneratorRequest naming
+libprotoc 7.36.2), where no protoc binary was. The same stand-in run on the previous `ateapi.proto` reproduced the
+previous `ateapi.pb.go` byte for byte; `go generate` with protoc replaces the file.

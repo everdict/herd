@@ -84,6 +84,8 @@ type Env struct {
 	// SnapshotDir is the directory the snapshot store keeps its objects in.
 	SnapshotDir string
 	Key         []byte
+	// Meter is herd-api's (apiserver.Config.Meter): the A-60 allowance counters.
+	Meter *auth.Meter
 	// Client may write in Space.
 	Client   *Client
 	Herdlets map[string]*Herdlet
@@ -96,6 +98,10 @@ type Env struct {
 
 // NewStore makes the record store each Env runs on; tests may swap it (Envs are not started in parallel).
 var NewStore = func(t testing.TB) store.Store { return memstore.New() }
+
+// Authn is herd-api's authenticator in the harness, made from the Env's HS256 key and meter (tests may set it; Envs are
+// not started in parallel). The default accepts the HS256 bearers Token mints, uncounted.
+var Authn = func(key []byte, m *auth.Meter) auth.Authenticator { return auth.StaticKey{Key: key} }
 
 // GoldenWarmup is herd-api's apiserver.Config.GoldenWarmup in the harness (tests may set it; Envs are not started in
 // parallel).
@@ -134,7 +140,7 @@ func Start(t testing.TB, herdlets ...HerdletSpec) *Env {
 	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
 	snaps.NoSync = true
 	hang := &hangStore{Store: snaps}
-	e := &Env{Space: "space-1", Store: NewStore(t), Snapshots: hang, SnapshotDir: snapDir, Key: key,
+	e := &Env{Space: "space-1", Store: NewStore(t), Snapshots: hang, SnapshotDir: snapDir, Key: key, Meter: auth.NewMeter(),
 		Herdlets: map[string]*Herdlet{}, vms: fake.NewStore(), ctx: ctx, hang: hang}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

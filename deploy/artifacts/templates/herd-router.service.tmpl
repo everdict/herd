@@ -1,12 +1,13 @@
-# herd-router beside herd-api (docs/runbooks/join.md).
+# herd-router beside herd-api (docs/runbooks/join.md): spiffe://<td>/herd/router from the host's SPIRE agent;
+# herd-api decides its clients' requests, so it reads no policy (ADR 0001 A-60).
 # Rendered by deploy/artifacts; edit the template, not this file.
 [Unit]
 Description=herd-router
 After=herd-api.service
 
 [Service]
-ExecStart=[[.BinDir]]/herd-router -listen 0.0.0.0:8443 -tunnel-listen 0.0.0.0:7444 -api 127.0.0.1:7443 \
-    -key-file /etc/herd/jwt.key
+User=herd-router
+ExecStart=[[.BinDir]]/herd-router -listen 0.0.0.0:8443 -tunnel-listen 0.0.0.0:7444 -api 127.0.0.1:7443
 Restart=on-failure
 RestartSec=2
 

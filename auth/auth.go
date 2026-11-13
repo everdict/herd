@@ -1,7 +1,7 @@
 // Package auth is herd-api's authentication (who is calling) and per-space authorization (may they do this in that
-// atespace). Both are interfaces; this round ships a static-key implementation: HS256 JWTs signed with one shared
-// key, carrying the caller's spaces in a claim. An issuer-backed (JWKS) authenticator can replace it later without
-// touching the API server.
+// atespace). Both are interfaces. SPIFFE authenticates SVIDs (an X.509-SVID over mTLS, a JWT-SVID bearer) and maps
+// them to roles by a policy file; StaticKey authenticates HS256 JWTs signed with one shared key, which Chain keeps as
+// counted break-glass; ActorWriter is the creator-scoped rule for writes on an actor (ADR 0001 A-60).
 package auth
 
 import (
@@ -24,6 +24,11 @@ const (
 	RoleWrite Role = "write"
 	// RoleHerdlet may connect as a herdlet; it grants nothing on the Control API.
 	RoleHerdlet Role = "herdlet"
+	// RoleOperator may write in the space as RoleWrite does, and also act on actors it did not create (and on the
+	// actors created before herd recorded creators): ADR 0001 A-60.
+	RoleOperator Role = "operator"
+	// RoleEgress may read the actors' egress policies and nothing else: herd-egress's grant (ADR 0001 A-60).
+	RoleEgress Role = "egress"
 )
 
 // AllSpaces in a principal's Spaces grants its role in every space.
@@ -35,6 +40,8 @@ type Action int
 const (
 	ActionRead Action = iota
 	ActionWrite
+	// ActionReadEgress reads an actor's egress policy: every role allows it, RoleEgress nothing else.
+	ActionReadEgress
 )
 
 // Principal is an authenticated caller.
@@ -44,9 +51,99 @@ type Principal struct {
 	Spaces map[string]Role
 	// Herdlet is set for a herdlet's credential.
 	Herdlet bool
+	// Worker is the worker a herdlet SVID names (spiffe://<td>/herd/node/<worker>); empty for an HS256 herdlet
+	// credential, whose Subject is the worker (HerdletWorker).
+	Worker string
 	// Join is set for a join token: it may only be exchanged for a herdlet credential (package join).
 	Join bool
+	// Scheme is how the caller was authenticated. The zero value is SchemeHS256, the shared-key bearer.
+	Scheme Scheme
+	// Expires is when the credential stops authenticating the caller: a JWT's exp (an HS256 bearer's no later than
+	// its break-glass end), an X.509-SVID's NotAfter. A stream the credential opened ends then (review 2).
+	Expires time.Time
+	// HardEnd is when a link or stream the credential opened must end however it is used: an HS256 bearer's break-glass
+	// end. An SVID has none: its connection was authenticated at its handshake and drains before the leaf ends, and a
+	// JWT-SVID authorizes the stream it opens (ADR 0001 A-60, re-review).
+	HardEnd time.Time
+	// Hold, if set, answers whether a stream this credential opened may go on at t (an X.509-SVID's: until its leaf
+	// ended DrainGrace ago, and while its chain verifies against the current bundle). Nil: no bound but HardEnd.
+	Hold func(t time.Time) error
 }
+
+// DrainGrace is how long a stream an X.509 identity opened may outlive its leaf (R1): make-before-break rotates links
+// and tunnels well before; a node that stops rotating (its entry deleted, its CA dropped) loses its streams by then.
+var DrainGrace = 5 * time.Minute
+
+// StreamCheck is how often an open stream's Hold is asked again.
+var StreamCheck = 5 * time.Second
+
+// Holds is p's bound on a stream it opens: its Hold, and its HardEnd.
+func (p Principal) Holds(t time.Time) error {
+	if !p.HardEnd.IsZero() && !t.Before(p.HardEnd) {
+		return fmt.Errorf("%w: the credential that opened the stream ended at %s", ErrUnauthenticated, p.HardEnd.UTC().Format(time.RFC3339))
+	}
+	if p.Hold != nil {
+		return p.Hold(t)
+	}
+	return nil
+}
+
+// ServeWhile runs serve, a stream handler's body, and ends it once hold refuses (asked every StreamCheck, and at
+// once), answering hold's reason. The handler's return ends the stream, which ends serve's blocked reads.
+func ServeWhile(hold func(time.Time) error, serve func() error) error {
+	if err := hold(time.Now()); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- serve() }()
+	t := time.NewTicker(StreamCheck)
+	defer t.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case now := <-t.C:
+			if err := hold(now); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// Scheme names the credential a principal was authenticated by.
+type Scheme string
+
+const (
+	// SchemeHS256 is a bearer JWT signed with herd-api's shared key: break-glass since PLT-489 (ADR 0001 A-60).
+	SchemeHS256 Scheme = ""
+	// SchemeX509SVID is an X.509-SVID presented as the mTLS client certificate.
+	SchemeX509SVID Scheme = "x509-svid"
+	// SchemeJWTSVID is a JWT-SVID presented as the bearer.
+	SchemeJWTSVID Scheme = "jwt-svid"
+)
+
+// HerdletWorker is the worker a herdlet credential speaks for.
+func (p Principal) HerdletWorker() string {
+	if p.Worker != "" {
+		return p.Worker
+	}
+	return p.Subject
+}
+
+// SVID reports whether p was authenticated by a SPIFFE verifiable identity document.
+func (p Principal) SVID() bool { return p.Scheme == SchemeX509SVID || p.Scheme == SchemeJWTSVID }
+
+// Creator is the caller as herd records it on what it creates (an Actor's status.creator): its SPIFFE ID, or
+// "hs256:<sub>" for a shared-key bearer, so no HS256 subject can name a SPIFFE ID.
+func (p Principal) Creator() string {
+	if p.SVID() {
+		return p.Subject
+	}
+	return BreakGlassPrefix + p.Subject
+}
+
+// BreakGlassPrefix starts the creator of what a shared-key (HS256) bearer created.
+const BreakGlassPrefix = "hs256:"
 
 // Authenticator turns a bearer token into a principal; ErrUnauthenticated otherwise.
 type Authenticator interface {
@@ -71,7 +168,7 @@ func (SpaceRoles) Authorize(p Principal, space string, a Action) error {
 		return fmt.Errorf("%w: no atespace named", ErrPermissionDenied)
 	}
 	for _, r := range []Role{p.Spaces[space], p.Spaces[AllSpaces]} {
-		if r == RoleWrite || (r == RoleRead && a == ActionRead) {
+		if r == RoleWrite || r == RoleOperator || (r == RoleRead && a != ActionWrite) || (r == RoleEgress && a == ActionReadEgress) {
 			return nil
 		}
 	}
@@ -79,8 +176,11 @@ func (SpaceRoles) Authorize(p Principal, space string, a Action) error {
 }
 
 func actionName(a Action) string {
-	if a == ActionWrite {
+	switch a {
+	case ActionWrite:
 		return "write"
+	case ActionReadEgress:
+		return "read egress policies"
 	}
 	return "read"
 }
@@ -167,7 +267,7 @@ func (s StaticKey) Authenticate(ctx context.Context, token string) (Principal, e
 	if c.Join && (c.Herdlet || len(c.Spaces) > 0) {
 		return Principal{}, fmt.Errorf("%w: a join token grants nothing else", ErrUnauthenticated)
 	}
-	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet, Join: c.Join}, nil
+	return Principal{Subject: c.Subject, Spaces: c.Spaces, Herdlet: c.Herdlet, Join: c.Join, Expires: time.Unix(c.ExpiresAt, 0)}, nil
 }
 
 func decodePart(p string, v any) error {
@@ -190,3 +290,40 @@ func (b Bearer) GetRequestMetadata(context.Context, ...string) (map[string]strin
 
 // RequireTransportSecurity reports false; see Bearer.
 func (Bearer) RequireTransportSecurity() bool { return false }
+
+// BearerToken is the token of an authorization header value: what follows "Bearer ", or "" when h does not use that
+// scheme. A header in another form (a raw JWT) is not a bearer, never read whole as one.
+func BearerToken(h string) string {
+	tok, ok := strings.CutPrefix(h, "Bearer ")
+	if !ok {
+		return ""
+	}
+	return tok
+}
+
+// RefuseHeader is the reason an authorization header h that is not a bearer is refused; "" for none or a bearer.
+func RefuseHeader(h string) error {
+	if h != "" && BearerToken(h) == "" {
+		return fmt.Errorf("%w: the authorization header is not \"Bearer <token>\"", ErrUnauthenticated)
+	}
+	return nil
+}
+
+// ServeUntil runs serve, a stream handler's body, and answers when it ends or when the credential that opened the
+// stream does (until; zero: no end), whichever is first (review 2): the handler's return ends the stream, which ends
+// serve's blocked reads.
+func ServeUntil(until time.Time, serve func() error) error {
+	if until.IsZero() {
+		return serve()
+	}
+	done := make(chan error, 1)
+	go func() { done <- serve() }()
+	t := time.NewTimer(time.Until(until))
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return fmt.Errorf("%w: the credential that opened the stream ended at %s", ErrUnauthenticated, until.UTC().Format(time.RFC3339))
+	}
+}

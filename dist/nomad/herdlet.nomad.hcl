@@ -1,6 +1,7 @@
 # herdlet and herd-egress as a Nomad system job: one of each on every Linux client (docs/runbooks/nomad.md). Each
-# herdlet joins herd-api with the join token in the job's Nomad variable once and reuses its grant after that; it
-# keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
+# herdlet is its node's SPIFFE identity, spiffe://<td>/herd/node/<worker>, from the node's SPIRE agent (ADR 0001
+# A-60; herd-egress is spiffe://<td>/herd/egress/<worker>): no join token, its node's settings asked of herd-api by that
+# SVID at its first start and reused after; without the agent neither starts. It keeps snapshots in the S3 store the join hands it, so it takes no -snapshots. The same variable's registry_auth, a
 # docker config file, is the node's registry logins for private template images (-registry-auth, rendered 0600).
 # insecure_registries are registry hosts it pulls from over plain HTTP (-insecure-registry, comma-separated; ""
 # names none), a node-level fallback that defaults to none: a template's golden pull names its own plain-HTTP hosts
@@ -54,12 +55,6 @@ job "herdlet" {
         env         = true
       }
 
-      template {
-        data        = "{{ with nomadVar \"nomad/jobs/herdlet\" }}{{ .join_token }}{{ end }}"
-        destination = "secrets/join.token"
-        perms       = "0600"
-      }
-
       # The node's registry logins for private template images (-registry-auth): the variable's registry_auth, a docker
       # config file; without it the file is empty and pulls are anonymous.
       template {
@@ -68,12 +63,16 @@ job "herdlet" {
         perms       = "0600"
       }
 
+      # The herdlet is root (uid 0) with the primary group herd-node (gid 64440) and no supplementary groups: its SPIRE
+      # entry selects unix:uid:0 and unix:gid:64440, which no other root process on the node (the Nomad client among
+      # them) has. A supplementary group would not do: children inherit those.
       config {
-        command = "local/herdlet"
+        command = "/usr/bin/setpriv"
         args = [
-          "join", "${HERD_API}",
-          "-token-file", "secrets/join.token",
+          "--regid", "herd-node", "--clear-groups", "--", "local/herdlet",
+          "run", "-api", "${HERD_API}",
           "-state", "/var/lib/herdlet",
+          "-egress-ca", "/var/lib/herd-egress/egress-ca.pem",
           "-kernel", "${NOMAD_TASK_DIR}/kernel",
           "-initrd", "${NOMAD_TASK_DIR}/initrd.img",
           "-virtiofsd", "${NOMAD_TASK_DIR}/virtiofsd",
@@ -84,8 +83,12 @@ job "herdlet" {
       }
     }
 
+    # herd-egress needs no root and no capability (its ports are above 1024, SO_ORIGINAL_DST is a getsockopt on its own
+    # socket): it runs as herd-egress, the uid its SPIRE entry selects, and keeps its CA in /var/lib/herd-egress and its
+    # bindings acknowledgements in /run/herd, both its own (the runbook's tmpfiles.d line). The herdlet stays root.
     task "herd-egress" {
       driver = "raw_exec"
+      user   = "herd-egress"
 
       artifact {
         source = "${var.release_url}/herd_linux_${attr.cpu.arch}.tar.gz"
@@ -111,9 +114,8 @@ job "herdlet" {
         command = "local/herd-egress"
         args = [
           "-api", "${HERD_API}",
-          "-token-file", "/var/lib/herdlet/egress.token",
           "-bindings", "/run/herd/egress-bindings.json",
-          "-ca-out", "/var/lib/herdlet/egress-ca.pem",
+          "-ca-out", "/var/lib/herd-egress/egress-ca.pem",
           "-host-services-file", "local/host-services",
           "-router", "${HERD_ROUTER}",
           "-egress-allow-prefix", "${var.egress_allow_prefix}",

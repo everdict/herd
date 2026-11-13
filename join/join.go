@@ -9,10 +9,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/everdict/herd/auth"
@@ -61,8 +59,14 @@ type Server struct {
 	Tunnel string
 	// Snapshots, if set, is handed to every joining herdlet (Grant.Snapshots).
 	Snapshots *s3.Config
-	// TTL is the lifetime of the credentials a join grants (default one year).
-	TTL time.Duration
+	// TTL is the lifetime of the HS256 credentials a token join grants (default DefaultCredentialTTL), and NotAfter, if
+	// set, their latest end (the break-glass allowance's): a break-glass credential is short-lived and bound to its
+	// worker, whose registration it alone may make.
+	TTL      time.Duration
+	NotAfter time.Time
+	// SVIDWorker, if set, answers the node SVID that registered a worker ("" if none did): a token join cannot take
+	// such a worker's name.
+	SVIDWorker func(ctx context.Context, worker string) (string, error)
 	// OnGrant, if set, sees every grant before it is answered.
 	OnGrant func(Grant)
 	Now     func() time.Time
@@ -86,16 +90,42 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok || tok == "" {
-		return nil, status.Errorf(codes.Unauthenticated, "join: no join token")
+	if err := auth.RefuseHeader(h); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "join: %v", err)
 	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
+		return nil, status.Errorf(codes.Unauthenticated, "join: no node SVID and no join token")
+	}
+	// A node joins by its X.509-SVID (spiffe://<td>/herd/node/<worker>, ADR 0001 A-60), or, under the HS256
+	// break-glass, by a join token.
 	p, err := s.Authn.Authenticate(ctx, tok)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "join: %v", err)
 	}
-	if !p.Join {
-		return nil, status.Errorf(codes.PermissionDenied, "join: %q is not a join token", p.Subject)
+	// A node SVID presented beside a bearer still names the worker it may join as.
+	if tok != "" && len(auth.PeerChain(ctx)) > 0 {
+		if np, err := s.Authn.Authenticate(ctx, ""); err == nil && np.Herdlet && np.SVID() && np.HerdletWorker() != req.Worker {
+			return nil, status.Errorf(codes.PermissionDenied, "join: the node SVID %s is worker %q's, not %q's", np.Subject, np.HerdletWorker(), req.Worker)
+		}
+	}
+	switch {
+	case p.Join:
+		if s.SVIDWorker != nil {
+			id, err := s.SVIDWorker(ctx, req.Worker)
+			if err != nil {
+				return nil, status.Errorf(codes.Unavailable, "join: %v", err)
+			}
+			if id != "" {
+				return nil, status.Errorf(codes.PermissionDenied, "join: worker %q is node SVID %s's; a join token cannot take its name", req.Worker, id)
+			}
+		}
+	case p.Herdlet && p.SVID():
+		if req.Worker != p.HerdletWorker() {
+			return nil, status.Errorf(codes.PermissionDenied, "join: the node SVID %s is worker %q's, not %q's", p.Subject, p.HerdletWorker(), req.Worker)
+		}
+	default:
+		return nil, status.Errorf(codes.PermissionDenied, "join: %q is neither a node SVID nor a join token", p.Subject)
 	}
 	if err := ValidWorker(req.Worker); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
@@ -109,19 +139,28 @@ func (s *Server) Join(ctx context.Context, req *Request) (*Grant, error) {
 	}
 	ttl := s.TTL
 	if ttl <= 0 {
-		ttl = 365 * 24 * time.Hour
+		ttl = DefaultCredentialTTL
 	}
-	exp := now().Add(ttl).Unix()
-	cred, err := auth.Sign(s.Key, auth.Claims{Subject: req.Worker, ExpiresAt: exp, Herdlet: true})
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "join: %v", err)
+	end := now().Add(ttl)
+	if !s.NotAfter.IsZero() && s.NotAfter.Before(end) {
+		end = s.NotAfter
 	}
-	egress, err := auth.Sign(s.Key, auth.Claims{Subject: "herd-egress@" + req.Worker, ExpiresAt: exp,
-		Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleRead}})
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "join: %v", err)
+	exp := end.Unix()
+	g := &Grant{Worker: req.Worker, Tunnel: s.Tunnel, Snapshots: s.Snapshots, ExpiresAt: exp}
+	if p.Join {
+		// A join token is break-glass: its host links with the HS256 credentials it is granted. A node that joined by
+		// its SVID dials with the SVID and is granted none.
+		cred, err := auth.Sign(s.Key, auth.Claims{Subject: req.Worker, ExpiresAt: exp, Herdlet: true})
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "join: %v", err)
+		}
+		egress, err := auth.Sign(s.Key, auth.Claims{Subject: "herd-egress@" + req.Worker, ExpiresAt: exp,
+			Spaces: map[string]auth.Role{auth.AllSpaces: auth.RoleEgress}})
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "join: %v", err)
+		}
+		g.Credential, g.EgressCredential = cred, egress
 	}
-	g := &Grant{Worker: req.Worker, Credential: cred, EgressCredential: egress, Tunnel: s.Tunnel, Snapshots: s.Snapshots, ExpiresAt: exp}
 	if s.OnGrant != nil {
 		s.OnGrant(*g)
 	}
@@ -136,6 +175,10 @@ func MintToken(key []byte, ttl time.Duration) (string, error) {
 	}
 	return auth.Sign(key, auth.Claims{Subject: "join-" + hex.EncodeToString(id[:]), ExpiresAt: time.Now().Add(ttl).Unix(), Join: true})
 }
+
+// DefaultCredentialTTL is how long the HS256 credentials of a token join live: a herdlet joins again with its join
+// token once they end.
+const DefaultCredentialTTL = 24 * time.Hour
 
 // Register serves the join call on g.
 func (s *Server) Register(g *grpc.Server) {
@@ -154,17 +197,16 @@ func (s *Server) Register(g *grpc.Server) {
 
 // Call exchanges token for a Grant at the herd-api cc reaches.
 func Call(ctx context.Context, cc grpc.ClientConnInterface, token, worker string) (Grant, error) {
-	if token == "" {
-		return Grant{}, errors.New("join: no token")
+	opts := []grpc.CallOption{grpc.CallContentSubtype(link.CodecName)}
+	if token != "" {
+		opts = append(opts, grpc.PerRPCCredentials(auth.Bearer(token)))
 	}
 	var g Grant
-	err := cc.Invoke(ctx, Method, &Request{Worker: worker}, &g, grpc.CallContentSubtype(link.CodecName),
-		grpc.PerRPCCredentials(auth.Bearer(token)))
-	if err != nil {
+	if err := cc.Invoke(ctx, Method, &Request{Worker: worker}, &g, opts...); err != nil {
 		return Grant{}, err
 	}
-	if g.Credential == "" || g.Worker != worker {
-		return Grant{}, fmt.Errorf("join: herd-api granted %q, not a credential for %q", g.Worker, worker)
+	if g.Worker != worker || (token != "" && g.Credential == "") {
+		return Grant{}, fmt.Errorf("join: herd-api granted %q, not a grant for %q", g.Worker, worker)
 	}
 	return g, nil
 }

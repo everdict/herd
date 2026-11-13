@@ -5,7 +5,9 @@ go 1.25.0
 require (
 	github.com/Code-Hex/vz/v3 v3.8.0
 	github.com/containers/gvisor-tap-vsock v0.8.7
+	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/pierrec/lz4/v4 v4.1.14
+	github.com/spiffe/go-spiffe/v2 v2.9.0
 	go.etcd.io/bbolt v1.5.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12

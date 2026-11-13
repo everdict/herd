@@ -76,8 +76,9 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			return link.Outcome{Result: link.ResultFailed, Reason: "restore names no snapshot"}
 		}
 		if p, _ := m.Inspect(ctx, w.VM); p == vmm.PresencePresent {
+			// A restore repeated (its answer was lost): the fidelity this host restored the VM at, if it was this host.
 			a.reopen(w.VM)
-			return link.Outcome{Result: link.ResultDone}
+			return link.Outcome{Result: link.ResultDone, Restored: m.Restored(w.VM)}
 		}
 		rc, err := a.openSnapshot(ctx, *w.Snapshot)
 		if err != nil {
@@ -91,7 +92,7 @@ func (a *Agent) doMachine(ctx context.Context, w link.Work) link.Outcome {
 			return classify(err)
 		}
 		a.reopen(w.VM)
-		return link.Outcome{Result: link.ResultDone}
+		return link.Outcome{Result: link.ResultDone, Restored: m.Restored(w.VM)}
 	case link.OpDelete, link.OpInspect:
 		var p vmm.Presence
 		var err error
@@ -133,7 +134,10 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	if n, ok := a.Machines.Memory(w.VM); ok {
 		progress(ctx, n)
 	}
-	sctx, ph := machine.WithPhases(ctx)
+	// The snapshot is bounded by its lease's cancellation, which herd-api's Extend moves, never by the deadline the
+	// lease shows now: the flush's own bound (context.WithTimeout over ctx) would otherwise freeze the call timeout
+	// the lease had before that Extend landed, and cut the flush there.
+	sctx, ph := machine.WithPhases(leaseDone{ctx})
 	snap, err := a.Machines.Snapshot(sctx, w.VM, w.Fidelity, stop, pw)
 	if err != nil {
 		return classify(err)

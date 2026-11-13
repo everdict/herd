@@ -96,13 +96,9 @@ func TestRealHostTAPEgress(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("all-in-one not ready")
 	}
-	key, err := deploy.ReadKey(filepath.Join(data, "jwt.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok := token(t, key)
+	tok := aioToken(t, data, addrs)
 	waitWorkers(t, addrs.API, tok, 1)
-	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: addrs.API}, tok)
+	c, err := substrateapi.DialControl(ep(addrs.API), tok)
 	if err != nil {
 		t.Fatal(err)
 	}

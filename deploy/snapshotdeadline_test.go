@@ -8,7 +8,6 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
-	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/snapstore/s3/s3test"
@@ -27,11 +26,6 @@ func TestGoldenSnapshotsOverSlowS3(t *testing.T) {
 	srv := s3test.New("us-east-1", creds)
 	ts := s3test.Start(t, srv)
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	key, err := deploy.EnsureKey(keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +33,7 @@ func TestGoldenSnapshotsOverSlowS3(t *testing.T) {
 	// herd-api expects at least 1 KiB/s; the link takes a little more, so a bundle of a few KiB uploads for seconds.
 	const expect = 1024
 	srv.SetWriteRate(expect + expect/6)
-	a := &deploy.API{KeyFile: keyFile, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
 		S3Endpoint: ts.URL, S3Credentials: creds, CallTimeout: callTimeout, Reconcile: time.Hour,
 		RestoreBandwidthMiB: float64(expect) / (1 << 20)}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,17 +46,14 @@ func TestGoldenSnapshotsOverSlowS3(t *testing.T) {
 		}
 	})
 	addr := ln.Addr().String()
-	tok, err := (&deploy.JoinToken{KeyFile: keyFile, TTL: time.Hour}).Mint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctl := writeToken(t, key)
+	tok := "" // a node joins by its SVID
+	ctl := ""
 	h := herdletOn(t, "node-1", nil)
 	h.API, h.Token, h.Slots = addr, tok, 4
 	runHerdlet(t, h)
 	waitWorkers(t, addr, ctl, 1)
 
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer ccancel()

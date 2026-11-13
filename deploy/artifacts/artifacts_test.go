@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -79,9 +80,9 @@ func TestArtifactsRunCommandLinesTheBinariesAccept(t *testing.T) {
 		}
 	}
 	for _, k := range []string{
-		"systemd:herd", "systemd:herd-api", "systemd:herd-router", "systemd:herdlet join", "systemd:herd-egress",
-		"launchd:herd", "launchd:herdlet join",
-		"nomad:herd-api", "nomad:herd-router", "nomad:herdlet join", "nomad:herd-egress",
+		"systemd:herd", "systemd:herd-api", "systemd:herd-router", "systemd:herdlet run", "systemd:herd-egress",
+		"launchd:herd", "launchd:herdlet run",
+		"nomad:herd-api", "nomad:herd-router", "nomad:herdlet run", "nomad:herd-egress",
 	} {
 		if !seen[k] {
 			t.Errorf("no %s artifact runs %s", strings.SplitN(k, ":", 2)[0], strings.SplitN(k, ":", 2)[1])
@@ -103,14 +104,15 @@ func withVarDefaults(f artifacts.File, args []string) []string {
 	return out
 }
 
-// TestNomadJobPair: herd-api is a service job and herdlet a system job; the herdlet job joins with the token in its
-// Nomad variable.
+// TestNomadJobPair: herd-api is a service job and herdlet a system job; the herdlet job reads its Nomad variable
+// (registry logins) and finds herd-api by its Nomad service, and herd-api mounts the SPIRE agent's socket.
 func TestNomadJobPair(t *testing.T) {
 	for _, c := range []struct{ file, want string }{
 		{"nomad/herd-api.nomad.hcl", `type = "service"`},
 		{"nomad/herdlet.nomad.hcl", `type = "system"`},
 		{"nomad/herdlet.nomad.hcl", `nomadVar \"nomad/jobs/herdlet\"`},
 		{"nomad/herdlet.nomad.hcl", `nomadService \"herd-api\"`},
+		{"nomad/herd-api.nomad.hcl", `source    = "spire-agent-socket"`},
 	} {
 		b, err := os.ReadFile(filepath.Join(dist, c.file))
 		if err != nil {
@@ -123,7 +125,7 @@ func TestNomadJobPair(t *testing.T) {
 }
 
 // TestMacHerdletJoinsLikeLinux (criterion launchd-install): the launchd daemon a Mac installs runs the same command
-// as the systemd unit on Linux — `herdlet join <herd-api>` with the join token file, the state directory and the
+// as the systemd unit on Linux — `herdlet run -api <herd-api>` as its SPIFFE identity, with the state directory and the
 // guest kernel and initramfs — and no flag the Linux unit does not pass; only paths differ. It is a launchd daemon
 // that starts at load and is kept alive, Interactive, with room for a host of VMs' files.
 func TestMacHerdletJoinsLikeLinux(t *testing.T) {
@@ -161,10 +163,10 @@ func TestMacHerdletJoinsLikeLinux(t *testing.T) {
 	}
 	ms, mf := flags(mac)
 	ls, lf := flags(linux)
-	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "join" || ls != "join" {
-		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet join", mac.Binary, mac.Args, linux.Binary, linux.Args)
+	if mac.Binary != "herdlet" || linux.Binary != "herdlet" || ms != "run" || ls != "run" {
+		t.Fatalf("Mac runs %s %q, Linux %s %q; want both herdlet run", mac.Binary, mac.Args, linux.Binary, linux.Args)
 	}
-	for _, f := range []string{"token-file", "state", "kernel", "initrd"} {
+	for _, f := range []string{"state", "kernel", "initrd"} {
 		if !mf[f] || !lf[f] {
 			t.Errorf("-%s: Mac %v, Linux %v; both joins pass it", f, mf[f], lf[f])
 		}
@@ -199,11 +201,11 @@ func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
 		}
 		for _, inv := range invs {
 			switch {
-			case inv.Binary == "herdlet" && len(inv.Args) > 0 && inv.Args[0] == "join":
+			case inv.Binary == "herdlet" && len(inv.Args) > 0 && inv.Args[0] == "run":
 				joins[f.Path] = true
 				for _, a := range inv.Args {
 					if n := strings.TrimLeft(a, "-"); a != n && (n == "snapshots" || strings.HasPrefix(n, "snapshots=")) {
-						t.Errorf("%s runs herdlet join with %s: a joined herdlet's snapshots go to the join's store", f.Path, a)
+						t.Errorf("%s runs herdlet run with %s: a joined herdlet's snapshots go to the join's store", f.Path, a)
 					}
 				}
 			case inv.Binary == "herd-api":
@@ -213,7 +215,7 @@ func TestJoinedHerdletsPassNoSnapshotDir(t *testing.T) {
 	}
 	for _, p := range []string{"systemd/herdlet.service", "launchd/com.everdict.herdlet.plist", "nomad/herdlet.nomad.hcl"} {
 		if !joins[p] {
-			t.Errorf("%s runs no herdlet join", p)
+			t.Errorf("%s runs no herdlet run", p)
 		}
 	}
 	for _, p := range []string{"systemd/herd-api.service", "nomad/herd-api.nomad.hcl"} {
@@ -232,7 +234,7 @@ func TestMacPlistsPassSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"launchd/com.everdict.herdlet.plist": {"join", "@HERD_API@", "-token-file", "/usr/local/etc/herd/join.token",
+		"launchd/com.everdict.herdlet.plist": {"run", "-api", "@HERD_API@",
 			"-state", "/usr/local/var/herdlet", "-kernel", "/usr/local/share/herd/kernel",
 			"-initrd", "/usr/local/share/herd/initrd.img", "-secrets", "/usr/local/etc/herd/secrets",
 			"-registry-auth", "/usr/local/etc/herd/registry-auth.json"},
@@ -527,5 +529,92 @@ func TestNoArtifactSetsTheCallTimeout(t *testing.T) {
 	}
 	if apis == 0 {
 		t.Fatal("no artifact runs herd-api: the test read nothing")
+	}
+}
+
+// TestEachProcessHasItsOwnUID (PLT-489, ADR 0001 A-60): on a node, SPIRE tells herd-api, herd-router, herd-egress and
+// the herdlet apart by uid and gid (unix:uid, unix:gid selectors, no sys_ptrace), so each artifact runs herd-api as
+// herd, herd-router as herd-router and herd-egress as herd-egress, and the herdlet, which needs root for /dev/kvm, TAPs
+// and nftables, as root with the primary group herd-node and no supplementary groups: uid 0 alone would hand the node
+// SVID to every root process.
+func TestEachProcessHasItsOwnUID(t *testing.T) {
+	files, err := artifacts.Render(artifacts.Defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"herd-api": "herd", "herd-router": "herd-router", "herd-egress": "herd-egress", "herdlet": ""}
+	task := regexp.MustCompile(`(?s)task "([a-z-]+)" \{\s*driver = "[a-z_]+"\s*(?:user   = "([a-z-]+)")?`)
+	unit := regexp.MustCompile(`(?m)^User=(.+)$`)
+	seen := 0
+	for _, f := range files {
+		switch f.Kind {
+		case artifacts.Nomad:
+			for _, m := range task.FindAllSubmatch(f.Data, -1) {
+				name, user := string(m[1]), string(m[2])
+				if w, ok := want[name]; ok {
+					seen++
+					if user != w {
+						t.Errorf("%s: task %s runs as %q, want %q", f.Path, name, user, w)
+					}
+				}
+			}
+		case artifacts.Systemd:
+			name := strings.TrimSuffix(path.Base(f.Path), ".service")
+			w, ok := want[name]
+			if !ok {
+				continue
+			}
+			seen++
+			user := ""
+			if m := unit.FindSubmatch(f.Data); m != nil {
+				user = string(m[1])
+			}
+			if user != w {
+				t.Errorf("%s runs as %q, want %q", f.Path, user, w)
+			}
+		}
+	}
+	if seen != 8 {
+		t.Fatalf("checked %d herd-api, herd-router, herd-egress and herdlet tasks and units, want 8 (4 Nomad tasks, 4 units)", seen)
+	}
+	// The herdlet's primary group: setpriv --regid herd-node --clear-groups in Nomad, Group= with no supplementary
+	// groups in systemd, GroupName without InitGroups in launchd.
+	groups := 0
+	for _, f := range files {
+		invs, err := artifacts.Invocations(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range invs {
+			if inv.Binary != "herdlet" {
+				continue
+			}
+			groups++
+			g := inv.Group
+			switch f.Kind {
+			case artifacts.Systemd:
+				g = ""
+				if m := regexp.MustCompile(`(?m)^Group=(.+)$`).FindSubmatch(f.Data); m != nil {
+					g = string(m[1])
+				}
+				if !regexp.MustCompile(`(?m)^SupplementaryGroups=$`).Match(f.Data) {
+					t.Errorf("%s does not clear the herdlet's supplementary groups", f.Path)
+				}
+			case artifacts.Launchd:
+				g = ""
+				if m := regexp.MustCompile(`<key>GroupName</key>\s*<string>([^<]+)</string>`).FindSubmatch(f.Data); m != nil {
+					g = string(m[1])
+				}
+				if !regexp.MustCompile(`<key>InitGroups</key>\s*<false/>`).Match(f.Data) {
+					t.Errorf("%s does not keep the herdlet out of its user's groups (InitGroups false)", f.Path)
+				}
+			}
+			if g != "herd-node" {
+				t.Errorf("%s starts the herdlet with primary group %q, want herd-node", f.Path, g)
+			}
+		}
+	}
+	if groups != 3 {
+		t.Fatalf("checked %d herdlet artifacts, want 3 (Nomad, systemd, launchd)", groups)
 	}
 }

@@ -3,15 +3,19 @@ package substrateapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	herdext "github.com/everdict/herd/api/herdext/v1"
 	"github.com/everdict/herd/auth"
+	"github.com/everdict/herd/auth/localca"
 	"github.com/everdict/herd/conformance/substrateapi"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/egress/nft/nfttest"
@@ -19,14 +23,13 @@ import (
 	"github.com/everdict/herd/guest/execrec"
 	"github.com/everdict/herd/image"
 	"github.com/everdict/herd/image/imagetest"
-	"github.com/everdict/herd/join"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/snapstore/s3/s3test"
 	"github.com/everdict/herd/vmm"
 	"github.com/everdict/herd/vmm/fake"
 	"github.com/everdict/herd/vmm/fakeguest"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 // The test binary doubles as herd-guest's in-container shim.
@@ -97,20 +100,101 @@ func herdlet(t *testing.T, state, worker, labels string, caps vmm.Capabilities, 
 			Platform: image.Platform{OS: "linux", Architecture: caps.Arch}}}
 }
 
-func token(t *testing.T, key []byte) string {
+// herds maps the address of a herd-api or herd-router under test to the bundle file its SVIDs chain to: every herd
+// listener serves TLS with its SPIFFE identity (ADR 0001 A-60), and the suite checks it by the bundle and the loopback
+// name the test CAs put in herd-api's and herd-router's SVIDs.
+var herds sync.Map
+
+// ep is the endpoint the suite dials a herd listener at.
+func ep(addr string) substrateapi.Endpoint {
+	ca, _ := herds.Load(addr)
+	f, _ := ca.(string)
+	return substrateapi.Endpoint{Addr: addr, TLS: true, CAFile: f, ServerName: "localhost"}
+}
+
+// tlsDial dials a herd listener as a TLS client of no certificate (the bearer is the caller).
+func tlsDial(t *testing.T, addr string) grpc.DialOption {
 	t.Helper()
-	tok, err := auth.Sign(key, auth.Claims{Subject: "conformance", ExpiresAt: time.Now().Add(time.Hour).Unix(),
-		Spaces: map[string]auth.Role{space: auth.RoleWrite}})
+	ca, _ := herds.Load(addr)
+	f, _ := ca.(string)
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatalf("no bundle registered for %s: %v", addr, err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(b)
+	return grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "localhost", MinVersion: tls.VersionTLS12}))
+}
+
+// testHerd is a herd whose components' SVIDs a CA of the test issues, as a cluster's SPIRE would.
+type testHerd struct {
+	ca             *localca.CA
+	bundle, policy string
+}
+
+func newTestHerd(t *testing.T) *testHerd {
+	t.Helper()
+	ca, err := localca.New("herd.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	h := &testHerd{ca: ca, bundle: filepath.Join(dir, "bundle.pem"), policy: filepath.Join(dir, "spiffe-policy.json")}
+	if err := ca.WriteBundle(h.bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.policy, []byte(`{"rules": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// id is the identity of herd path p (e.g. "/herd/api"), with the loopback names a host-name check dials.
+func (h *testHerd) id(t *testing.T, p string) deploy.Identity {
+	t.Helper()
+	s, err := h.ca.Source("spiffe://herd.test"+p, localca.Options{DNS: []string{"localhost"}, IPs: []net.IP{net.IPv4(127, 0, 0, 1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return deploy.Identity{Source: s}
+}
+
+// token registers the herd's listeners and answers an operator's JWT-SVID for its herd-api.
+func (h *testHerd) token(t *testing.T, addrs ...string) string {
+	t.Helper()
+	for _, a := range addrs {
+		herds.Store(a, h.bundle)
+	}
+	return operatorJWT(t, h.ca, "spiffe://herd.test/herd/operator/conformance")
+}
+
+func operatorJWT(t *testing.T, ca *localca.CA, sub string) string {
+	t.Helper()
+	tok, err := ca.JWTSVID(sub, []string{"spiffe://" + ca.TD.Name() + "/herd/api"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return tok
 }
 
+// aioToken registers an all-in-one's listeners by the bundle its local CA wrote in data, and answers a JWT-SVID of the
+// operator it issues for its herd-api.
+func aioToken(t *testing.T, data string, addrs deploy.Addrs) string {
+	t.Helper()
+	ca, err := localca.LoadOrCreate(deploy.IdentityDir(data), deploy.LocalTrustDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := filepath.Join(deploy.IdentityDir(data), "bundle.pem")
+	herds.Store(addrs.API, b)
+	herds.Store(addrs.Router, b)
+	return operatorJWT(t, ca, deploy.LocalOperator)
+}
+
 // template creates the suite's template through the Control API, as an operator would before a run.
 func template(t *testing.T, addr, tok string, f ateapi.SnapshotFidelity) {
 	t.Helper()
-	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: addr}, tok)
+	c, err := substrateapi.DialControl(ep(addr), tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +216,7 @@ func template(t *testing.T, addr, tok string, f ateapi.SnapshotFidelity) {
 // /left and /right.
 func template2(t *testing.T, addr, tok string, f ateapi.SnapshotFidelity) {
 	t.Helper()
-	c, err := substrateapi.DialControl(substrateapi.Endpoint{Addr: addr}, tok)
+	c, err := substrateapi.DialControl(ep(addr), tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +246,8 @@ func optional(cfg *substrateapi.Config, e *substrateapi.Echo, echoURL, listedURL
 }
 
 func suiteConfig(target, api, router, tok string) substrateapi.Config {
-	return substrateapi.Config{Target: target, Control: substrateapi.Endpoint{Addr: api},
-		Router: substrateapi.Router{Endpoint: substrateapi.Endpoint{Addr: router}, Token: tok}, Token: tok,
+	return substrateapi.Config{Target: target, Control: ep(api),
+		Router: substrateapi.Router{Endpoint: ep(router), Token: tok}, Token: tok,
 		Atespace: space, Template: "agent", Probe: substrateapi.EnvExec{}, VolumePath: "/work/conformance.txt", RootfsPath: "/root/conformance-rootfs.txt",
 		Wait: 20 * time.Second, Poll: 20 * time.Millisecond}
 }
@@ -254,11 +338,7 @@ func startAllInOneWith(t *testing.T, n *vmNet) (deploy.Addrs, string) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("all-in-one not ready")
 	}
-	key, err := deploy.ReadKey(filepath.Join(data, "jwt.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok := token(t, key)
+	tok := aioToken(t, data, addrs)
 	waitWorkers(t, addrs.API, tok, 1)
 	template(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
 	template2(t, addrs.API, tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
@@ -302,6 +382,7 @@ func TestHerdConformanceCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"conformance", "--target", "herd-all-in-one-cli", "--endpoint", addrs.API, "--token-file", tf,
+		"--tls", "--ca-file", ep(addrs.API).CAFile, "--tls-server-name", "localhost", "--router-tls", "--router-tls-server-name", "localhost",
 		"--atespace", space, "--template", "agent", "--router", addrs.Router, "--probe", "env-exec",
 		"--volume-path", "/work/conformance.txt", "--rootfs-path", "/root/conformance-rootfs.txt", "--expect-fidelity", "MEMORY", "--wait", "20s"}
 	if code := deploy.Main("herd", args); code != 0 {
@@ -319,11 +400,7 @@ func TestHerdConformanceCommand(t *testing.T) {
 // from the Mac to the Ubuntu host at VOLUMES and checks its volume.
 func TestSuiteGreenOnJoin(t *testing.T) {
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	key, err := deploy.EnsureKey(keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	herd := newTestHerd(t)
 	snaps := filepath.Join(dir, "snapshots")
 	ctx, cancel := context.WithCancel(context.Background())
 	var stops []chan error
@@ -339,22 +416,19 @@ func TestSuiteGreenOnJoin(t *testing.T) {
 		go func() { c <- f() }()
 	}
 	apiLn, cl, tl := listen(t), listen(t), listen(t)
-	api := &deploy.API{Key: key, Store: "bolt:" + filepath.Join(dir, "herd.db"), Snapshots: snaps, CallTimeout: 10 * time.Second,
-		Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
+	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), Snapshots: snaps,
+		CallTimeout: 10 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Key: key, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
 
-	jt, err := join.MintToken(key, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	vms := fake.NewStore()
 	for _, h := range []deploy.Herdlet{herdlet(t, filepath.Join(dir, "mac-1"), "mac-1", "pool=mac", mac, vms), herdlet(t, filepath.Join(dir, "ubuntu-1"), "ubuntu-1", "pool=ubuntu", ubuntu, vms)} {
-		h.API, h.Token, h.Snapshots = apiLn.Addr().String(), jt, snaps
+		// Each host joins by its node SVID.
+		h.API, h.Snapshots, h.Identity = apiLn.Addr().String(), snaps, herd.id(t, "/herd/node/"+h.Worker)
 		serve(func() error { return h.Run(ctx) })
 	}
-	tok := token(t, key)
+	tok := herd.token(t, apiLn.Addr().String(), cl.Addr().String())
 	waitWorkers(t, apiLn.Addr().String(), tok, 2)
 	template(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
 	template2(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
@@ -384,8 +458,7 @@ func listen(t *testing.T) net.Listener {
 // suite's).
 func waitWorkers(t *testing.T, addr, tok string, n int) {
 	t.Helper()
-	cc, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(auth.Bearer(tok)))
+	cc, err := grpc.NewClient("passthrough:///"+addr, tlsDial(t, addr), grpc.WithPerRPCCredentials(auth.Bearer(tok)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,11 +485,7 @@ func waitWorkers(t *testing.T, addr, tok string, n int) {
 // move (and a fork placed on the other host) failed with `snapshot ...: vmm: not found`.
 func TestSuiteGreenOnJoinOfLinuxHostsAtMemory(t *testing.T) {
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	key, err := deploy.EnsureKey(keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	herd := newTestHerd(t)
 	creds := s3.Credentials{AccessKeyID: "herd", SecretAccessKey: "herd-secret"}
 	bucket := s3test.Start(t, s3test.New("us-east-1", creds))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -433,22 +502,18 @@ func TestSuiteGreenOnJoinOfLinuxHostsAtMemory(t *testing.T) {
 		go func() { c <- f() }()
 	}
 	apiLn, cl, tl := listen(t), listen(t), listen(t)
-	api := &deploy.API{Key: key, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: bucket.URL,
+	api := &deploy.API{Identity: herd.id(t, "/herd/api"), Policy: herd.policy, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd-snapshots", S3Endpoint: bucket.URL,
 		S3Credentials: creds, CallTimeout: 10 * time.Second, Reconcile: time.Second, AdvertiseTunnel: tl.Addr().String(), CredentialTTL: time.Hour}
 	serve(func() error { return api.Run(ctx, apiLn) })
-	rt := &deploy.Router{Key: key, API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
+	rt := &deploy.Router{Identity: herd.id(t, "/herd/router"), API: apiLn.Addr().String(), ParkingBudget: 10 * time.Second, DefaultPort: fakeguest.GuestPort}
 	serve(func() error { return rt.Run(ctx, cl, tl) })
 
-	jt, err := join.MintToken(key, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, w := range []string{"herd-fresh-1", "herd-fresh-2"} {
 		h := herdlet(t, filepath.Join(dir, w), w, "pool="+w, ubuntu, nil) // no -snapshots: the join's bucket
-		h.API, h.Token = apiLn.Addr().String(), jt
+		h.API, h.Identity = apiLn.Addr().String(), herd.id(t, "/herd/node/"+w)
 		serve(func() error { return h.Run(ctx) })
 	}
-	tok := token(t, key)
+	tok := herd.token(t, apiLn.Addr().String(), cl.Addr().String())
 	waitWorkers(t, apiLn.Addr().String(), tok, 2)
 	template(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)
 	template2(t, apiLn.Addr().String(), tok, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY)

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
-	"github.com/everdict/herd/conformance"
 	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/snapstore/s3"
 	"github.com/everdict/herd/snapstore/s3/s3test"
@@ -25,23 +24,19 @@ import (
 	"github.com/everdict/herd/vmm/fake"
 )
 
-// s3HerdAPI runs herd-api with its snapshots in a fake S3 bucket (-s3 s3://herd/snapshots) and mints a join token.
+// s3HerdAPI runs herd-api with its snapshots in a fake S3 bucket (-s3 s3://herd/snapshots); its nodes join by their
+// SVIDs, so the key and token it answers are empty.
 func s3HerdAPI(t *testing.T) (srv *s3test.Server, ts *httptest.Server, addr string, key []byte, tok string) {
 	creds := s3.Credentials{AccessKeyID: "herd", SecretAccessKey: "herd-secret"}
 	srv = s3test.New("us-east-1", creds)
 	ts = s3test.Start(t, srv)
 
 	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "jwt.key")
-	key, err := deploy.EnsureKey(keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &deploy.API{KeyFile: keyFile, Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
+	a := &deploy.API{Identity: apiIdentity(t), Policy: noRules(t), Store: "bolt:" + filepath.Join(dir, "herd.db"), S3: "s3://herd/snapshots",
 		S3Endpoint: ts.URL, S3Credentials: creds, CallTimeout: 5 * time.Second, Reconcile: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -53,11 +48,8 @@ func s3HerdAPI(t *testing.T) (srv *s3test.Server, ts *httptest.Server, addr stri
 		}
 	})
 	addr = ln.Addr().String()
-	tok, err = (&deploy.JoinToken{KeyFile: keyFile, TTL: time.Hour}).Mint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return srv, ts, addr, key, tok
+	tok = "" // a node joins by its SVID
+	return srv, ts, addr, nil, tok
 }
 
 // TestJoinedHostsMoveActorsThroughS3: herd-api keeps snapshots in an S3 bucket (-s3) and hands the store to every
@@ -67,7 +59,7 @@ func s3HerdAPI(t *testing.T) (srv *s3test.Server, ts *httptest.Server, addr stri
 // directory of its own: herd-api cannot verify the object and the suspend fails, as a join without a shared mount
 // did before the S3 store.
 func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
-	srv, ts, addr, key, tok := s3HerdAPI(t)
+	srv, ts, addr, _, tok := s3HerdAPI(t)
 	for _, w := range []string{"node-1", "node-2"} {
 		h := herdletOn(t, w, nil)
 		h.API, h.Token, h.Labels = addr, tok, "host="+w
@@ -83,10 +75,10 @@ func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
 			}
 		})
 	}
-	ctl := writeToken(t, key)
+	ctl := ""
 	waitWorkers(t, addr, ctl, 2)
 
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
@@ -138,15 +130,15 @@ func TestJoinedHostsMoveActorsThroughS3(t *testing.T) {
 // directory. Its counterexample is a herdlet that lets -snapshots win over the grant: the snapshot lands in the
 // directory, and herd-api answers "snapshot not durable: ... snapstore: not found".
 func TestJoinedHerdletIgnoresSnapshotsFlag(t *testing.T) {
-	srv, _, addr, key, tok := s3HerdAPI(t)
+	srv, _, addr, _, tok := s3HerdAPI(t)
 	h := herdletOn(t, "node-1", nil)
 	local := filepath.Join(t.TempDir(), "snapshots")
 	h.API, h.Token, h.Snapshots = addr, tok, local
 	runHerdlet(t, h)
-	ctl := writeToken(t, key)
+	ctl := ""
 	waitWorkers(t, addr, ctl, 1)
 
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
@@ -209,7 +201,7 @@ func (m *memoryRestores) restored() []string {
 // left the memory in node-1's vm-snapshots: the fork placed on node-2 fails (`snapshot ...: not found`), as fork2 did
 // on the supervisor's two-VM Nomad walk, and the moved actor cannot resume once node-1 is gone.
 func TestJoinedHostsForkAndMoveAtMemoryThroughS3(t *testing.T) {
-	_, _, addr, key, tok := s3HerdAPI(t)
+	_, _, addr, _, tok := s3HerdAPI(t)
 	nodes := map[string]*memoryRestores{}
 	stop := map[string]context.CancelFunc{}
 	for _, w := range []string{"node-1", "node-2"} {
@@ -222,10 +214,10 @@ func TestJoinedHostsForkAndMoveAtMemoryThroughS3(t *testing.T) {
 		stop[w] = func() { cancel(); <-done }
 		t.Cleanup(stop[w])
 	}
-	ctl := writeToken(t, key)
+	ctl := ""
 	waitWorkers(t, addr, ctl, 2)
 
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{
@@ -312,14 +304,14 @@ func TestSuspendAndTagMoveNoSnapshotBytesThroughHerdAPI(t *testing.T) {
 	out := log.Writer()
 	log.SetOutput(io.MultiWriter(&logs, out))
 	t.Cleanup(func() { log.SetOutput(out) })
-	srv, _, addr, key, tok := s3HerdAPI(t)
+	srv, _, addr, _, tok := s3HerdAPI(t)
 	h := herdletOn(t, "node-1", nil)
 	h.API, h.Token, h.Labels = addr, tok, "host=node-1"
 	runHerdlet(t, h)
-	ctl := writeToken(t, key)
+	ctl := ""
 	waitWorkers(t, addr, ctl, 1)
 
-	c := conformance.NewClient(addr, ctl)
+	c := client(t, addr, ctl)
 	defer c.Close()
 	cctx := ctxT(t)
 	if _, err := c.CreateActorTemplate(cctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: &ateapi.ActorTemplate{

@@ -65,8 +65,11 @@ func (t *Tunnel) Reopen(vm string) {
 }
 
 // Run dials nothing itself: it opens the control stream on cc (a connection the herdlet dialed to the router),
-// introduces the worker and serves Opens until ctx ends or the tunnel breaks. Every guest stream ends with it.
+// introduces the worker and serves Opens until ctx ends or the tunnel breaks. A guest stream it opened outlives the
+// control stream (make-before-break: a newer tunnel takes the Opens while the older one's streams finish, ADR 0001
+// A-60) and ends with ctx or its own stream; Run returns once they have.
 func (t *Tunnel) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
+	outer := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cs, err := cc.NewStream(ctx, &tunnel.ControlStreamDesc, tunnel.ControlMethod, grpc.CallContentSubtype(tunnel.ControlCodec))
@@ -108,7 +111,7 @@ func (t *Tunnel) Run(ctx context.Context, cc grpc.ClientConnInterface) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if r := t.open(ctx, cc, o); r != nil {
+			if r := t.open(outer, cc, o); r != nil {
 				_ = send(tunnel.Up{Refused: r})
 			}
 		}()

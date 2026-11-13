@@ -12,6 +12,24 @@ reach it with no lab allowance and no address in a job file. An actor still need
 
 ## Cluster prerequisites
 
+- SPIRE (ADR 0001 A-60): a SPIRE agent on every client, its Workload API socket directory exposed to jobs as the host
+  volume `spire-agent-socket` (`client { host_volume "spire-agent-socket" { path = "/run/spire/agent/sockets" read_only
+  = true } }`), and the registration entries of join.md's Identity table. herd-api and herd-router read their SVIDs
+  through it, herdlet and herd-egress (raw_exec) through the host's socket; none starts without one.
+- The group and users of join.md's Identity table on every client (`herd-node` gid 64440; `herd` 64441,
+  `herd-router` 64442, `herd-egress` 64443) and `setpriv` (util-linux) at `/usr/bin/setpriv`: the jobs run herd-api,
+  herd-router and herd-egress as their users (`user = ...`), and the herdlet as root under `setpriv --regid herd-node
+  --clear-groups`, so each agent selects them by `unix:uid` (the herdlet by `unix:uid:0` and `unix:gid:64440`) without
+  `sys_ptrace`. The `herd-data` host volume's directory is owned by `herd`. herd-egress's two
+  directories are its own; on every Linux client, `/etc/tmpfiles.d/herd.conf`:
+
+  ```
+  d /run/herd 0750 herd-egress herd-egress -
+  d /var/lib/herd-egress 0755 herd-egress herd-egress -
+  ```
+
+  then `sudo systemd-tmpfiles --create /etc/tmpfiles.d/herd.conf` (and at every boot by systemd).
+
 - Nomad 1.7+ (Nomad variables, `nomadService` templates), with the `exec` and `raw_exec` drivers enabled on the
   clients (`plugin "raw_exec" { config { enabled = true } }`): herdlet needs `/dev/kvm`, TAP devices and nftables on
   the host, which only `raw_exec` gives it, and `conntrack` (Ubuntu package `conntrack`) to clear a VM address's
@@ -40,31 +58,27 @@ reach it with no lab allowance and no address in a job file. An actor still need
 ## Steps
 
 1. Get the release archive (with a `gh` login that can read the private everdict/herd, as in all-in-one.md step 2)
-   and create the signing key and join token on an operator machine:
+   on an operator machine, and write the workloads' atespace grants (join.md, Identity):
 
    ```sh
    gh release download --repo everdict/herd --pattern herd_linux_amd64.tar.gz
    mkdir herd && tar -C herd -xzf herd_linux_amd64.tar.gz
-   ./herd/herd-api keygen -out jwt.key
-   ./herd/herd-api join-token -key-file jwt.key -ttl 24h > join.token
+   echo '{"rules": [{"prefix": "spiffe://<td>/everdict/ws/team-a/", "spaces": {"team-a": "write"}}]}' > spiffe-policy.json
    ```
 
-2. Put them, and herd-api's snapshot bucket (`<s3-endpoint>` as every client reaches it, e.g.
-   `http://minio.example:9000`), into the jobs' Nomad variables:
+2. Put the policy and herd-api's snapshot bucket (`<s3-endpoint>` as every client reaches it, e.g.
+   `http://minio.example:9000`) into the job's Nomad variable:
 
    ```sh
-   nomad var put nomad/jobs/herd-api jwt_key="$(cat jwt.key)" s3=s3://herd-snapshots s3_endpoint=<s3-endpoint> \
+   nomad var put nomad/jobs/herd-api spiffe_policy=@spiffe-policy.json s3=s3://herd-snapshots s3_endpoint=<s3-endpoint> \
      aws_access_key_id=<access key> aws_secret_access_key=<secret key>
-   nomad var put nomad/jobs/herdlet join_token="$(cat join.token)"
    ```
 
    For private template images, the herdlet variable also holds the nodes' registry logins, `registry_auth`: a docker
    config file (`auths`, as all-in-one.md step 7 shows). The job renders it to `secrets/registry-auth.json`, mode
    0600, and runs the herdlet with `-registry-auth` on it; without the key the file is empty and pulls are anonymous.
-   `nomad var put` replaces the whole variable, so give both keys:
-
    ```sh
-   nomad var put nomad/jobs/herdlet join_token="$(cat join.token)" registry_auth=@registry-auth.json
+   nomad var put nomad/jobs/herdlet registry_auth=@registry-auth.json
    ```
 
    Prefer a per-template credential to `registry_auth` (PLT-330): whoever creates the template passes
@@ -90,11 +104,10 @@ reach it with no lab allowance and no address in a job file. An actor still need
    nomad job run -var release_url=<mirror base URL> herd/dist/nomad/herdlet.nomad.hcl
    ```
 
-4. Check the pool: every Linux client is a worker.
+4. Check the pool, from a host whose SPIRE agent gives you an operator's SVID: every Linux client is a worker.
 
    ```sh
-   TOKEN=$(./herd/herd-api token -key-file jwt.key -sub everdict -space team-a=write -ttl 720h)
-   ./herd/herd-api workers -api <herd-api client address>:7443 -token "$TOKEN"
+   ./herd/herd-api workers -api <herd-api client address>:7443
    ```
 
    Once actors run, each client's VMs are in cgroups of their own, not in the herdlet task's: every
@@ -104,6 +117,8 @@ reach it with no lab allowance and no address in a job file. An actor still need
    for p in $(pgrep -x cloud-hyperviso); do cat /proc/$p/cgroup; done
    ```
 
-Each herdlet joins once with the token in its variable and keeps its grant in `/var/lib/herdlet`, so the token may
-expire after the first rollout; a node added later needs a fresh token in the variable. If herd-api moves to another
-client, herdlets join again at the new address (one more reason to keep a valid token in the variable).
+Each herdlet is its node's SVID and needs no join token: at its first start it asks herd-api, as that SVID, for the
+node's settings and keeps them in `/var/lib/herdlet`; a node added later does the same, and if herd-api moves to
+another client, herdlets ask again at the new address. herd-api serves
+`/metrics` (the authentication allowance counters) on 127.0.0.1:7449, herd-router on 127.0.0.1:8449 (an explicit
+`-metrics-listen` exposes them).

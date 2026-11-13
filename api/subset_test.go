@@ -190,7 +190,7 @@ func TestHerdAdditionsInTheDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kinds := map[string]protoreflect.Kind{"string": protoreflect.StringKind}
+	kinds := map[string]protoreflect.Kind{"string": protoreflect.StringKind, "bytes": protoreflect.BytesKind}
 	field := regexp.MustCompile(`(?m)^\s+(repeated )?(\w+) (\w+) = (\d+);$`)
 	msgs := regexp.MustCompile(`(?s)message (\w+) \{(.*?)\n\}`).FindAllStringSubmatch(string(add), -1)
 	if len(msgs) == 0 {

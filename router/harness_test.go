@@ -25,6 +25,7 @@ import (
 	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/router"
 	"github.com/everdict/herd/snapstore/disk"
+	"github.com/everdict/herd/store"
 	"github.com/everdict/herd/store/memstore"
 	"github.com/everdict/herd/tunnel"
 	"github.com/everdict/herd/vmm"
@@ -57,7 +58,9 @@ const (
 type stack struct {
 	t          *testing.T
 	key        []byte
-	api        *conformance.Client // writes in both spaces
+	api        *conformance.Client // writes in both spaces, as the subject "client" (the creator of every actor createActor makes)
+	records    store.Store
+	meter      *auth.Meter
 	apiAddr    string
 	routerAddr string
 	tunnelAddr string
@@ -65,10 +68,13 @@ type stack struct {
 	tunnels    *tunnel.Server
 	vms        *fakeguest.VMM
 	// exited holds the VMs whose hypervisor the herdlet is told exited (VM id → true).
-	exited     sync.Map
-	tun        *herdlet.Tunnel
-	dials      atomic.Int64 // tunnel dials the router made
-	resumes    atomic.Int64 // ResumeActor calls the router made
+	exited  sync.Map
+	tun     *herdlet.Tunnel
+	dials   atomic.Int64 // tunnel dials the router made
+	resumes atomic.Int64 // ResumeActor calls the router made
+	checks  atomic.Int64 // CheckActorWrite calls the router made
+	// afterCheck, if set, runs after each CheckActorWrite answers (a test re-creating the actor in between).
+	afterCheck atomic.Pointer[func()]
 	guestDials atomic.Int64 // guest connections the herdlet made
 	// apiDelay, when set, delays each GetActor herd-api serves (a herd-api slower than the parking budget).
 	apiDelay   atomic.Int64
@@ -79,6 +85,8 @@ type stack struct {
 
 type stackOpts struct {
 	budget time.Duration
+	// breakGlassUntil, if set, makes herd-api's authenticator a break-glass Chain ending then.
+	breakGlassUntil time.Time
 }
 
 // exitingVMs is the fake hypervisor with an exit observer: a VM in exited has exited.
@@ -123,6 +131,15 @@ func (c countingControl) GetActor(ctx context.Context, token, space, name string
 	return c.c.GetActor(ctx, token, space, name)
 }
 
+func (c countingControl) CheckActorWrite(ctx context.Context, token, space, name string) (router.ActorWriteDecision, error) {
+	c.s.checks.Add(1)
+	d, err := c.c.CheckActorWrite(ctx, token, space, name)
+	if h := c.s.afterCheck.Load(); h != nil {
+		(*h)()
+	}
+	return d, err
+}
+
 func (c countingControl) ResumeActor(ctx context.Context, token, space, name string) error {
 	c.s.resumes.Add(1)
 	return c.c.ResumeActor(ctx, token, space, name)
@@ -144,7 +161,10 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	if _, err := rand.Read(s.key); err != nil {
 		t.Fatal(err)
 	}
-	authn := auth.StaticKey{Key: s.key}
+	var authn auth.Authenticator = auth.StaticKey{Key: s.key}
+	if !o.breakGlassUntil.IsZero() {
+		authn = auth.Chain{BreakGlass: auth.StaticKey{Key: s.key}, BreakGlassUntil: o.breakGlassUntil}
+	}
 
 	// herd-api
 	snaps, err := disk.New(t.TempDir())
@@ -155,7 +175,10 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	// on the host disk (p99 near 600 ms on a loaded box, past the conformance harness's 400 ms).
 	snaps.NoSync = true
 	hub := link.NewHub()
-	api, err := apiserver.New(apiserver.Config{Store: memstore.New(), Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{},
+	s.records, s.meter = memstore.New(), auth.NewMeter()
+	api, err := apiserver.New(apiserver.Config{Store: s.records, Snapshots: snaps, Hub: hub, Authn: authn, Authz: auth.SpaceRoles{}, Meter: s.meter,
+		// Every CheckActorWrite in this stack comes from its router.
+		IsRouter:    func(context.Context) bool { return true },
 		CallTimeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +210,7 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	}
 	s.rt, err = router.New(router.Config{
 		Control: countingControl{s, router.GRPCControl{CC: apiCC}}, Tunnels: countingTunnels{s, s.tunnels},
-		Authn: authn, Authz: auth.SpaceRoles{}, DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
+		DefaultPort: fakeguest.GuestPort, ParkingBudget: o.budget, PollInterval: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +239,8 @@ func startStack(t *testing.T, o stackOpts) *stack {
 	go func() { defer close(linkDone); _ = agent.Run(ctx, linkCC) }()
 	s.startTunnel(herdletCred)
 
-	s.api = conformance.NewClient(s.apiAddr, s.token(map[string]auth.Role{space1: auth.RoleWrite, space2: auth.RoleWrite}, false, "admin"))
+	// The same subject as clientToken: an actor is written, and reached through the router, by its creator (A-60).
+	s.api = conformance.NewClient(s.apiAddr, s.token(map[string]auth.Role{space1: auth.RoleWrite, space2: auth.RoleWrite}, false, "client"))
 	t.Cleanup(func() {
 		s.api.Close()
 		_ = hs.Close()

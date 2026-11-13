@@ -41,7 +41,7 @@ func (e *Env) serve(t testing.TB, ln net.Listener) {
 	var err error
 	e.Server, err = apiserver.New(apiserver.Config{
 		Store: endedRecords{Store: e.Store, p: p}, Snapshots: endedSnapshots{Store: e.Snapshots, p: p}, Hub: e.Hub,
-		Authn: auth.StaticKey{Key: e.Key}, Authz: auth.SpaceRoles{},
+		Authn: Authn(e.Key, e.Meter), Authz: auth.SpaceRoles{}, Meter: e.Meter,
 		CallTimeout:          CallTimeout,
 		ReconcileCallTimeout: ReconcileCallTimeout,
 		GoldenWarmup:         GoldenWarmup,
@@ -54,9 +54,19 @@ func (e *Env) serve(t testing.TB, ln net.Listener) {
 	}
 	p.g = grpc.NewServer()
 	e.Server.Register(p.g)
+	for _, r := range ExtraServices {
+		r(p.g)
+	}
 	go func() { defer close(p.served); _ = p.g.Serve(ln) }()
 	e.api = p
 }
+
+// ExtraServices are registered on herd-api's gRPC server beside its own (tests: a method nothing covers, to see a
+// population check go red).
+var ExtraServices []func(grpc.ServiceRegistrar)
+
+// ServiceInfo is every service and method herd-api's gRPC server registered, hand-registered ones included.
+func (e *Env) ServiceInfo() map[string]grpc.ServiceInfo { return e.api.g.GetServiceInfo() }
 
 // RestartAPI ends the herd-api process as a kill does, wherever its work is (a call to a herdlet in flight goes on in
 // the test's process, but nothing it does after this reaches the records or the snapshot store), and starts a new one

@@ -76,6 +76,8 @@ type Machines struct {
 	links map[string]vmLink
 	// images is the image each VMM id runs per reference: what its snapshots pin.
 	images map[string]map[string]image.Rootfs
+	// restored is the fidelity each VMM id a restore started was really restored at (Restored).
+	restored map[string]vmm.Fidelity
 	// pins is the digest each template's references resolved to on their first boot here (template uid →
 	// reference → digest); pinMu serializes the first resolve of one.
 	pins  map[string]map[string]string
@@ -93,7 +95,7 @@ func New(cfg Config) (*Machines, error) {
 		return nil, fmt.Errorf("machine: %w", err)
 	}
 	return &Machines{cfg: cfg, ids: map[string]string{}, tpl: map[string]link.Template{}, links: map[string]vmLink{},
-		images: map[string]map[string]image.Rootfs{}, pins: map[string]map[string]string{}, pinMu: map[string]*sync.Mutex{},
+		images: map[string]map[string]image.Rootfs{}, restored: map[string]vmm.Fidelity{}, pins: map[string]map[string]string{}, pinMu: map[string]*sync.Mutex{},
 		snaps: snapUse{inUse: map[string]int{}, removing: map[string]chan struct{}{}, taken: map[string]string{}}}, nil
 }
 
@@ -619,11 +621,24 @@ func (m *Machines) restore(ctx context.Context, id string, tr *tar.Reader, man M
 		return err
 	}
 	m.checkAttached(ctx, vmID)
+	f := snap.Fidelity
+	if cold {
+		f = vmm.FidelityVolumes
+	}
 	m.mu.Lock()
-	m.tpl[vmID], m.images[vmID] = man.Template, roots
+	m.tpl[vmID], m.images[vmID], m.restored[vmID] = man.Template, roots, f
 	m.mu.Unlock()
 	m.Adopt(id, vmID)
 	return nil
+}
+
+// Restored is the fidelity Restore really restored the actor's VM at: the bundle's, or VOLUMES where a MEMORY bundle
+// cold-booted from its volume tree. Unspecified for a VM no restore on this host started.
+func (m *Machines) Restored(id string) vmm.Fidelity {
+	vmID := m.resolve(id)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.restored[vmID]
 }
 
 // Inspect answers whether the actor's VM exists.
@@ -656,6 +671,7 @@ func (m *Machines) Delete(ctx context.Context, id string) (vmm.Presence, error) 
 	delete(m.tpl, vmID)
 	delete(m.links, vmID)
 	delete(m.images, vmID)
+	delete(m.restored, vmID)
 	m.mu.Unlock()
 	return vmm.PresenceGone, nil
 }

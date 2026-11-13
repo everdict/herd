@@ -8,8 +8,6 @@ import (
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
-	"github.com/everdict/herd/conformance"
-	"github.com/everdict/herd/deploy"
 	"github.com/everdict/herd/vmm/fake"
 	"github.com/everdict/herd/vmm/fakeguest"
 )
@@ -25,10 +23,7 @@ import (
 // live 12 minutes behind on 2026-11-06.
 func TestSessionsReadTheHostsClock(t *testing.T) {
 	a := startAPI(t)
-	tok, err := (&deploy.JoinToken{KeyFile: filepath.Join(a.dir, "jwt.key"), TTL: time.Hour}).Mint()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tok := "" // a node joins by its SVID
 	vms, err := os.MkdirTemp("", "dclk")
 	if err != nil {
 		t.Fatal(err)
@@ -40,10 +35,10 @@ func TestSessionsReadTheHostsClock(t *testing.T) {
 	h.VMM, h.Guests = v, v
 	h.API, h.Token, h.Snapshots, h.Slots = a.addr, tok, filepath.Join(a.dir, "snapshots"), 4
 	runHerdlet(t, h)
-	ctl := writeToken(t, a.key)
+	ctl := ""
 	waitWorkers(t, a.addr, ctl, 1)
 
-	c := conformance.NewClient(a.addr, ctl)
+	c := client(t, a.addr, ctl)
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()

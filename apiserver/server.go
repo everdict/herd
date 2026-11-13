@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +42,13 @@ const OwedHeader = "herd-owed"
 // names the record store herd-api answers from on every Control and Capabilities call (StoreID, PLT-458).
 const StoreIDHeader = "herd-store-id"
 
+// RestoredFidelityHeader is the response metadata (gRPC header, and trailer) that names the fidelity a running actor's VM
+// was really restored at, in Substrate's SnapshotFidelity names (SNAPSHOT_FIDELITY_MEMORY, _ROOTFS, _VOLUMES): on a
+// ResumeActor, on a CreateActor that restored from a tag, and on GetActor, so a resume whose answer was owed is read
+// there once it is settled. A MEMORY snapshot the herdlet cold-booted from its volume tree is VOLUMES. Absent for a
+// cold boot, and where the herdlet did not say (one older than PLT-496).
+const RestoredFidelityHeader = "herd-restored-fidelity"
+
 // Config wires a Server.
 type Config struct {
 	Store     store.Store
@@ -50,6 +56,11 @@ type Config struct {
 	Hub       *link.Hub
 	Authn     auth.Authenticator
 	Authz     auth.Authorizer
+	// Meter counts the writes on actors with no creator recorded (auth.MetricUnownedActorWrites); nil counts nothing.
+	Meter *auth.Meter
+	// IsRouter reports a call from herd-router itself (its verified peer SVID): it may ask a worker's identity, and a
+	// CheckActorWrite it makes is counted for it. Nil: no caller is.
+	IsRouter func(ctx context.Context) bool
 	// CallTimeout bounds each call to a herdlet (default 30 s), and each snapshot store call of a workflow that moves no
 	// object bytes (a resume's Stat, a delete's Delete: storeCall).
 	CallTimeout time.Duration
@@ -141,6 +152,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, goldenTimers: map[store.Key]*time.Timer{}, pulls: map[string]goldenPull{}, storeID: id}
+	if err := s.bindEgressPolicies(context.Background()); err != nil {
+		return nil, fmt.Errorf("apiserver: binding egress policies to their actors: %w", err)
+	}
 	cfg.Hub.StoreID = id
 	cfg.Hub.OnRegister = s.recordWorker
 	cfg.Hub.OnExit = s.vmExited
@@ -241,10 +255,14 @@ func (s *Server) principal(ctx context.Context) (auth.Principal, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok || tok == "" {
-		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no bearer token")
+	if err := auth.RefuseHeader(h); err != nil {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
 	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no bearer token and no client certificate")
+	}
+	// No bearer: the caller is its mTLS client certificate, an X.509-SVID the authenticator verifies (ADR 0001 A-60).
 	p, err := s.cfg.Authn.Authenticate(ctx, tok)
 	if err != nil {
 		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
@@ -254,17 +272,83 @@ func (s *Server) principal(ctx context.Context) (auth.Principal, error) {
 
 // authorize authenticates the caller and checks the action in space: authority before effect.
 func (s *Server) authorize(ctx context.Context, space string, a auth.Action) error {
+	_, err := s.authorizeAs(ctx, space, a)
+	return err
+}
+
+// authorizeAs is authorize answering the principal it authorized.
+func (s *Server) authorizeAs(ctx context.Context, space string, a auth.Action) (auth.Principal, error) {
 	if space == "" {
-		return status.Errorf(codes.InvalidArgument, "no atespace named")
+		return auth.Principal{}, status.Errorf(codes.InvalidArgument, "no atespace named")
 	}
 	p, err := s.principal(ctx)
 	if err != nil {
-		return err
+		return auth.Principal{}, err
 	}
 	if err := s.cfg.Authz.Authorize(p, space, a); err != nil {
-		return status.Errorf(codes.PermissionDenied, "%v", err)
+		return auth.Principal{}, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
-	return nil
+	return p, nil
+}
+
+// writerKey carries the caller authorized to write one actor (asWriter).
+type writerKey struct{}
+
+type writer struct {
+	p   auth.Principal
+	key store.Key
+	// dry marks a decision that writes nothing (CheckActorWrite): it counts no write (re-review 6b).
+	dry bool
+}
+
+// authorizeActorWrite authorizes a write on the existing actor space/name (W4, ADR 0001 A-60): the space must admit
+// the write, and the returned context carries the caller so that the workflow, loading the actor under its lock
+// (loadActorToWrite), allows it only to the actor's creator or an operator. A write role on the space no longer
+// suffices.
+func (s *Server) authorizeActorWrite(ctx context.Context, space, name string) (context.Context, error) {
+	p, err := s.authorizeAs(ctx, space, auth.ActionWrite)
+	if err != nil {
+		return ctx, err
+	}
+	return context.WithValue(ctx, writerKey{}, writer{p: p, key: actorKey(space, name)}), nil
+}
+
+// actorWriteAs is authorizeActorWrite for a caller already authenticated as p (one call is authenticated once).
+func (s *Server) actorWriteAs(ctx context.Context, p auth.Principal, space, name string, dry bool) (context.Context, error) {
+	if err := s.cfg.Authz.Authorize(p, space, auth.ActionWrite); err != nil {
+		return ctx, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
+	return context.WithValue(ctx, writerKey{}, writer{p: p, key: actorKey(space, name), dry: dry}), nil
+}
+
+// loadActorToWrite loads the actor a write acts on. When ctx carries the caller authorized to write this actor
+// (authorizeActorWrite), the caller must be its creator or an operator, and a write on an actor with no creator
+// recorded is counted under its allowance; herd-api's own workflows (Reconcile, golden builds, a template's delete
+// of its golden actor) carry none for the actor they load.
+func (s *Server) loadActorToWrite(ctx context.Context, space, name string) (*actorRec, error) {
+	ar, err := s.loadActor(ctx, space, name)
+	if err != nil {
+		return nil, err
+	}
+	w, ok := ctx.Value(writerKey{}).(writer)
+	if !ok || w.key != ar.rec.Key {
+		return ar, nil
+	}
+	creator := ar.actor.GetStatus().GetCreator()
+	a, err := auth.ActorWriter(w.p, space, creator)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "actor %s/%s: %v", space, name, err)
+	}
+	if a.Counted() && !w.dry {
+		s.cfg.Meter.Inc(auth.MetricUnownedActorWrites, "allowance", string(a), "caller", w.p.Creator())
+		caller := w.p.Creator()
+		s.cfg.Meter.Note("unowned "+string(a)+" "+caller,
+			fmt.Sprintf("herd-api: actor %s/%s has no creator recorded; %s writes it under the %s allowance (ADR 0001 A-60); later such writes by it are summed once a minute", space, name, caller, a),
+			func(n int, d time.Duration) string {
+				return fmt.Sprintf("herd-api: %d writes by %s on actors with no creator recorded (%s) in the last %s", n, caller, a, auth.Seconds(d))
+			})
+	}
+	return ar, nil
 }
 
 // status maps a domain error to a gRPC status.

@@ -24,7 +24,6 @@ import (
 	"github.com/everdict/herd/egress/nft"
 	"github.com/everdict/herd/egress/tapnet"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type list []string
@@ -119,7 +118,14 @@ type Egress struct {
 	// Routers are herd-router's endpoints (-router), which a declared host service may not name, as it may not name API.
 	Routers list
 
-	// Token, if set, is used instead of TokenFile.
+	// Identity is herd-egress's SPIFFE identity (the Workload API's by default): it dials herd-api over TLS as itself,
+	// spiffe://<td>/herd/egress/<worker> (or its node's SVID), which reads every atespace's egress policies.
+	Identity Identity
+
+	// Worker is the node's worker: herd-egress's SVID must be spiffe://<td>/herd/egress/<Worker> (-worker).
+	Worker string
+
+	// Token, if set, is used instead of TokenFile: an HS256 bearer, accepted only under herd-api's break-glass.
 	Token string
 	// NewGateway, if set, builds the gateway from the configuration the flags gave instead of egress.New (tests: a
 	// resolver and dialer of their own).
@@ -129,7 +135,9 @@ type Egress struct {
 // Flags registers herd-egress's flags on fs.
 func (e *Egress) Flags(fs *flag.FlagSet) {
 	fs.StringVar(&e.API, "api", "127.0.0.1:7443", "herd-api address")
-	fs.StringVar(&e.TokenFile, "token-file", "", "bearer token for herd-api (read access to the actors' spaces; `herdlet join` writes one)")
+	fs.StringVar(&e.TokenFile, "token-file", "", "break-glass only: an HS256 bearer for herd-api (a join token's grant writes one); herd-egress is its SVID otherwise")
+	e.Identity.Flags(fs)
+	fs.StringVar(&e.Worker, "worker", "", "this node's worker: herd-egress's SVID must be spiffe://<td>/herd/egress/<worker> (default: this host's name)")
 	fs.StringVar(&e.Listen, "listen", ":15001", "transparent TCP listener nftables redirects to")
 	fs.StringVar(&e.DNSListen, "dns", ":15053", "synthetic DNS listener (UDP) nftables redirects port 53 to")
 	fs.StringVar(&e.DNSAnswer, "dns-answer", "198.18.0.1", "the address every A query is answered with; any address routed over the TAP works, since all TCP is redirected")
@@ -204,7 +212,33 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 		return fmt.Errorf("-dns-answer: %w", err)
 	}
 
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	id, closeID, err := e.Identity.Open(ctx, "herd-egress")
+	if err != nil {
+		return err
+	}
+	defer closeID()
+	self, err := auth.Self(id)
+	if err != nil {
+		return err
+	}
+	// herd-egress is herd-egress of this node's worker, nothing else (review 8): not the node's herdlet, not another
+	// node's egress.
+	ident, err := auth.ParseID(self)
+	if err != nil {
+		return fmt.Errorf("herd-egress: %w", err)
+	}
+	if ident.Kind != auth.KindEgress {
+		return fmt.Errorf("herd-egress: its SVID %s is not a herd-egress's (spiffe://%s/herd/egress/<worker>)", self, self.TrustDomain().Name())
+	}
+	worker := e.Worker
+	if worker == "" {
+		worker = defaultWorker()
+	}
+	if ident.Worker != worker {
+		return fmt.Errorf("herd-egress: its SVID %s is worker %q's, and this node is %q (-worker)", self, ident.Worker, worker)
+	}
+	ctx, changed := pinIdentity(ctx, id, "herd-egress")
+	var opts []grpc.DialOption
 	tok := e.Token
 	if tok == "" && e.TokenFile != "" {
 		b, err := os.ReadFile(e.TokenFile)
@@ -216,7 +250,7 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 	if tok != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(auth.Bearer(tok)))
 	}
-	conn, err := grpc.NewClient("passthrough:///"+e.API, opts...)
+	conn, err := redialing(e.API, id, auth.HerdID(self.TrustDomain(), "api"), opts...)
 	if err != nil {
 		return err
 	}
@@ -268,7 +302,11 @@ func (e *Egress) Run(ctx context.Context, ln net.Listener, pc net.PacketConn) er
 		}
 	}()
 	log.Printf("herd-egress: flows on %s, DNS on %s, policies from %s every %v", ln.Addr(), pc.LocalAddr(), e.API, e.Interval)
-	return g.ServeTransparent(ctx, ln, &src, nil)
+	err = g.ServeTransparent(ctx, ln, &src, nil)
+	if cerr := changed(); cerr != nil {
+		return cerr
+	}
+	return err
 }
 
 // bindingsPoll is how often herd-egress looks whether the bindings file changed (a stat), so a binding herdlet writes

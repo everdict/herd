@@ -2,7 +2,11 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -42,27 +46,116 @@ func encodePolicy(in *ateapi.EgressPolicy) ([]byte, error) {
 	return proto.Marshal(p)
 }
 
-func (s *Server) egressTarget(ctx context.Context, actor *ateapi.ObjectRef, a auth.Action) (store.Key, error) {
+// egressState binds a policy record to the actor uid it was written for (review 5): the record is keyed by the actor's
+// name, and an actor deleted and created again under that name is another actor.
+type egressState struct {
+	ActorUID string `json:"actorUid,omitempty"`
+}
+
+// egressFor is the policy record of the actor uid holds, or ErrNotFound: a record bound to another uid is an earlier
+// actor's, left by a write that raced its delete. A record with no uid is no actor's: herd-api bound those at its start.
+func (s *Server) egressFor(ctx context.Context, k store.Key, uid string) (store.Record, error) {
+	r, err := s.cfg.Store.Get(ctx, k)
+	if err != nil {
+		return r, err
+	}
+	var st egressState
+	if len(r.State) > 0 {
+		if err := json.Unmarshal(r.State, &st); err != nil {
+			return r, fmt.Errorf("%w: %v: its state does not decode (%v): no actor's policy", store.ErrNotFound, k, err)
+		}
+	}
+	if st.ActorUID != uid {
+		// Records written before the binding were bound at herd-api's start (bindEgressPolicies): one with no uid now
+		// is no actor's.
+		return r, fmt.Errorf("%w: %v belongs to actor uid %q, not %s", store.ErrNotFound, k, st.ActorUID, uid)
+	}
+	return r, nil
+}
+
+// bindEgressPolicies binds each egress-policy record written before policies carried the actor uid to the actor of
+// its name now, or deletes it when there is none, each logged (re-review 6d). herd-api runs it at its start.
+func (s *Server) bindEgressPolicies(ctx context.Context) error {
+	recs, err := s.cfg.Store.List(ctx, store.KindEgressPolicy, "")
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		var st egressState
+		if len(r.State) > 0 {
+			if err := json.Unmarshal(r.State, &st); err != nil {
+				// A state herd-api cannot read does not stop it starting: the record is no actor's policy (deny),
+				// logged and counted.
+				s.cfg.Meter.Inc(auth.MetricEgressStateUnreadable)
+				log.Printf("herd-api: egress policy %s/%s: its state does not decode (%v): it is no actor's policy", r.Space, r.Name, err)
+				continue
+			}
+		}
+		if st.ActorUID != "" {
+			continue
+		}
+		ar, err := s.loadActor(ctx, r.Space, r.Name)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			if err := s.cfg.Store.Delete(ctx, r.Key, r.UID, r.Version); err != nil {
+				return err
+			}
+			log.Printf("herd-api: egress policy %s/%s had no actor uid and no actor of its name: deleted", r.Space, r.Name)
+		case err != nil:
+			return err
+		default:
+			r.State, _ = json.Marshal(egressState{ActorUID: ar.rec.UID})
+			if _, err := s.cfg.Store.Update(ctx, r); err != nil {
+				return err
+			}
+			log.Printf("herd-api: egress policy %s/%s had no actor uid: bound to the actor of its name, uid %s", r.Space, r.Name, ar.rec.UID)
+		}
+	}
+	return nil
+}
+
+// egressTarget authorizes an egress-policy call on actor and answers its policy key and the actor's uid. A write runs
+// under the actor's lock (unlock releases it), so it cannot interleave with the actor's delete, which removes the policy
+// under the same lock.
+func (s *Server) egressTarget(ctx context.Context, actor *ateapi.ObjectRef, a auth.Action) (store.Key, string, func(), error) {
 	space, name, err := ref(actor)
 	if err != nil {
-		return store.Key{}, err
+		return store.Key{}, "", nil, err
 	}
-	if err := s.authorize(ctx, space, a); err != nil {
-		return store.Key{}, err
+	if a != auth.ActionWrite {
+		if err := s.authorize(ctx, space, a); err != nil {
+			return store.Key{}, "", nil, err
+		}
+		ar, err := s.loadActor(ctx, space, name)
+		if err != nil {
+			return store.Key{}, "", nil, toStatus(err)
+		}
+		return egressKey(space, name), ar.rec.UID, func() {}, nil
 	}
-	if _, err := s.cfg.Store.Get(ctx, actorKey(space, name)); err != nil {
-		return store.Key{}, toStatus(err)
+	// An actor's egress policy is a write on the actor: its creator's or an operator's (A-60).
+	ctx, err = s.authorizeActorWrite(ctx, space, name)
+	if err != nil {
+		return store.Key{}, "", nil, err
 	}
-	return egressKey(space, name), nil
+	unlock := s.lock(actorKey(space, name))
+	ar, err := s.loadActorToWrite(ctx, space, name)
+	if err != nil {
+		unlock()
+		return store.Key{}, "", nil, toStatus(err)
+	}
+	var once sync.Once
+	return egressKey(space, name), ar.rec.UID, func() { once.Do(unlock) }, nil
 }
 
 // GetActorEgressPolicy returns an actor's egress policy.
 func (s *Server) GetActorEgressPolicy(ctx context.Context, req *ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionRead)
+	// Reading an egress policy is herd-egress's whole grant (auth.RoleEgress); every reader of the space may too.
+	k, uid, unlock, err := s.egressTarget(ctx, req.GetActor(), auth.ActionReadEgress)
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.cfg.Store.Get(ctx, k)
+	defer unlock()
+	r, err := s.egressFor(ctx, k, uid)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -70,17 +163,27 @@ func (s *Server) GetActorEgressPolicy(ctx context.Context, req *ateapi.GetActorE
 	return v, toStatus(err)
 }
 
-// CreateActorEgressPolicy sets an actor's egress policy.
+// CreateActorEgressPolicy sets an actor's egress policy, bound to the actor's uid; a record an earlier actor of the
+// name left is replaced.
 func (s *Server) CreateActorEgressPolicy(ctx context.Context, req *ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
+	k, uid, unlock, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	data, err := encodePolicy(req.GetEgressPolicy())
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	r, err := s.cfg.Store.Create(ctx, store.Record{Key: k, Data: data})
+	if old, err := s.cfg.Store.Get(ctx, k); err == nil {
+		if _, err := s.egressFor(ctx, k, uid); errors.Is(err, store.ErrNotFound) {
+			if err := s.cfg.Store.Delete(ctx, k, old.UID, old.Version); err != nil {
+				return nil, toStatus(err)
+			}
+		}
+	}
+	st, _ := json.Marshal(egressState{ActorUID: uid})
+	r, err := s.cfg.Store.Create(ctx, store.Record{Key: k, Data: data, State: st})
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -90,12 +193,13 @@ func (s *Server) CreateActorEgressPolicy(ctx context.Context, req *ateapi.Create
 
 // UpdateActorEgressPolicy replaces an actor's egress rules; the request must carry the uid and version it read.
 func (s *Server) UpdateActorEgressPolicy(ctx context.Context, req *ateapi.UpdateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
+	k, uid, unlock, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	in := req.GetEgressPolicy()
-	cur, err := s.cfg.Store.Get(ctx, k)
+	cur, err := s.egressFor(ctx, k, uid)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -107,10 +211,12 @@ func (s *Server) UpdateActorEgressPolicy(ctx context.Context, req *ateapi.Update
 		return nil, toStatus(err)
 	}
 	cur.Data = data
+	cur.State, _ = json.Marshal(egressState{ActorUID: uid})
 	r, err := s.cfg.Store.Update(ctx, cur)
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	unlock() // the wait for the policy to be in force holds no actor lock
 	if err := inForce(ctx); err != nil {
 		return nil, err
 	}
@@ -120,11 +226,12 @@ func (s *Server) UpdateActorEgressPolicy(ctx context.Context, req *ateapi.Update
 
 // DeleteActorEgressPolicy removes an actor's egress policy.
 func (s *Server) DeleteActorEgressPolicy(ctx context.Context, req *ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-	k, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
+	k, uid, unlock, err := s.egressTarget(ctx, req.GetActor(), auth.ActionWrite)
 	if err != nil {
 		return nil, err
 	}
-	cur, err := s.cfg.Store.Get(ctx, k)
+	defer unlock()
+	cur, err := s.egressFor(ctx, k, uid)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -138,6 +245,7 @@ func (s *Server) DeleteActorEgressPolicy(ctx context.Context, req *ateapi.Delete
 	if err := s.cfg.Store.Delete(ctx, k, cur.UID, cur.Version); err != nil {
 		return nil, toStatus(err)
 	}
+	unlock() // the wait for the policy to be in force holds no actor lock
 	if err := inForce(ctx); err != nil {
 		return nil, err
 	}

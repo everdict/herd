@@ -1236,7 +1236,18 @@ type Actor struct {
 	// server and ignored on input. It is always present in output.
 	//
 	// +k8s:optional
-	Status        *ActorStatus `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	Status *ActorStatus `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	// herd addition (PLT-489): opaque bytes the creator attaches at
+	// CreateActor, at most 4096, stored verbatim and returned by GetActor and
+	// ListActors. Set once: an UpdateActor that carries other bytes here is
+	// refused InvalidArgument, and one that carries none leaves them as they
+	// are. herd never reads them; Everdict stores its provision grant here (a
+	// JWS the control plane signed after the session row was durable).
+	//
+	// +k8s:optional
+	// +k8s:maxLength=4096
+	// +k8s:immutable
+	Provenance    []byte `protobuf:"bytes,1000,opt,name=provenance,proto3" json:"provenance,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1302,6 +1313,13 @@ func (x *Actor) GetSourceTag() *ObjectRef {
 func (x *Actor) GetStatus() *ActorStatus {
 	if x != nil {
 		return x.Status
+	}
+	return nil
+}
+
+func (x *Actor) GetProvenance() []byte {
+	if x != nil {
+		return x.Provenance
 	}
 	return nil
 }
@@ -2158,8 +2176,19 @@ type ActorStatus struct {
 	// +k8s:minimum=0
 	// +k8s:update=NoUnset
 	LastAssignedGeneration int32 `protobuf:"varint,7,opt,name=last_assigned_generation,json=lastAssignedGeneration,proto3" json:"last_assigned_generation,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// herd addition (PLT-489): who created the Actor, as herd-api
+	// authenticated the CreateActor call: the caller's SPIFFE ID
+	// ("spiffe://<trust domain>/<path>"), or "hs256:<sub>" for a break-glass
+	// HS256 bearer. Set by the server at CreateActor and immutable; whatever a
+	// request carries here is ignored. Empty for an actor created before
+	// PLT-489. A write on the actor (delete, suspend, resume, tag, egress
+	// policy, exec through the router) is allowed to this caller or to an
+	// operator (ADR 0001 A-60).
+	//
+	// +k8s:optional
+	Creator       string `protobuf:"bytes,1000,opt,name=creator,proto3" json:"creator,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ActorStatus) Reset() {
@@ -2239,6 +2268,13 @@ func (x *ActorStatus) GetLastAssignedGeneration() int32 {
 		return x.LastAssignedGeneration
 	}
 	return 0
+}
+
+func (x *ActorStatus) GetCreator() string {
+	if x != nil {
+		return x.Creator
+	}
+	return ""
 }
 
 // ActorCrash describes the failure that moved an Actor to CRASHED.
@@ -7064,14 +7100,17 @@ const file_ateapi_v1_ateapi_proto_rawDesc = "" +
 	"\x0evolume_context\x18\x04 \x03(\v2<.substrate.ateapi.v1.ExternalVolumeStatus.VolumeContextEntryR\rvolumeContext\x1a@\n" +
 	"\x12VolumeContextEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe2\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x03\n" +
 	"\x05Actor\x12A\n" +
 	"\bmetadata\x18\x01 \x01(\v2%.substrate.ateapi.v1.ResourceMetadataR\bmetadata\x12E\n" +
 	"\x0eactor_template\x18\x02 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\ractorTemplate\x12F\n" +
 	"\x0fworker_selector\x18\x03 \x01(\v2\x1d.substrate.ateapi.v1.SelectorR\x0eworkerSelector\x12=\n" +
 	"\n" +
 	"source_tag\x18\x04 \x01(\v2\x1e.substrate.ateapi.v1.ObjectRefR\tsourceTag\x128\n" +
-	"\x06status\x18\x05 \x01(\v2 .substrate.ateapi.v1.ActorStatusR\x06status:\x0e\x82\xb5\x18\n" +
+	"\x06status\x18\x05 \x01(\v2 .substrate.ateapi.v1.ActorStatusR\x06status\x12\x1f\n" +
+	"\n" +
+	"provenance\x18\xe8\a \x01(\fR\n" +
+	"provenance:\x0e\x82\xb5\x18\n" +
 	"\x18\x01\"\x06Actors\"\xa7\x01\n" +
 	"\fEgressPolicy\x12A\n" +
 	"\bmetadata\x18\x01 \x01(\v2%.substrate.ateapi.v1.ResourceMetadataR\bmetadata\x125\n" +
@@ -7109,7 +7148,7 @@ const file_ateapi_v1_ateapi_proto_rawDesc = "" +
 	"\tactor_jwt\x18\x04 \x01(\v2#.substrate.ateapi.v1.ActorJwtSourceR\bactorJwt\"]\n" +
 	"\x0eActorJwtSource\x12\x1c\n" +
 	"\taudiences\x18\x01 \x03(\tR\taudiences\x12-\n" +
-	"\x12expiration_seconds\x18\x02 \x01(\x03R\x11expirationSeconds\"\xbc\x03\n" +
+	"\x12expiration_seconds\x18\x02 \x01(\x03R\x11expirationSeconds\"\xd7\x03\n" +
 	"\vActorStatus\x125\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.substrate.ateapi.v1.ActorStateR\x05state\x12R\n" +
 	"\x11worker_assignment\x18\x02 \x01(\v2%.substrate.ateapi.v1.WorkerAssignmentR\x10workerAssignment\x12O\n" +
@@ -7117,7 +7156,8 @@ const file_ateapi_v1_ateapi_proto_rawDesc = "" +
 	"\x05crash\x18\x04 \x01(\v2\x1f.substrate.ateapi.v1.ActorCrashR\x05crash\x12#\n" +
 	"\rassigned_node\x18\x05 \x01(\tR\fassignedNode\x12;\n" +
 	"\tsnapshots\x18\x06 \x03(\v2\x1d.substrate.ateapi.v1.SnapshotR\tsnapshots\x128\n" +
-	"\x18last_assigned_generation\x18\a \x01(\x05R\x16lastAssignedGeneration\"a\n" +
+	"\x18last_assigned_generation\x18\a \x01(\x05R\x16lastAssignedGeneration\x12\x19\n" +
+	"\acreator\x18\xe8\a \x01(\tR\acreator\"a\n" +
 	"\n" +
 	"ActorCrash\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\x129\n" +

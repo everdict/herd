@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +25,9 @@ type Server struct {
 	Authn auth.Authenticator
 	// OpenTimeout bounds how long Dial waits for the herdlet to answer an Open (default 10 s).
 	OpenTimeout time.Duration
+	// WorkerIdentity, if set, answers the node SVID that registered a worker at herd-api ("" if none did): an HS256
+	// tunnel for such a worker is refused.
+	WorkerIdentity func(ctx context.Context, worker string) (string, error)
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -35,6 +37,9 @@ type Server struct {
 
 type session struct {
 	worker string
+	// p is the credential that opened the tunnel: an HS256 tunnel may not replace an SVID one (R3), and a data stream
+	// outlives its own leaf while the worker's current tunnel holds a valid one (R1).
+	p      auth.Principal
 	sendMu sync.Mutex
 	stream grpc.ServerStream
 	done   chan struct{}
@@ -72,8 +77,14 @@ func (s *Server) Register(g grpc.ServiceRegistrar) {
 
 // herdlet authenticates the stream's caller as a herdlet credential.
 func (s *Server) herdlet(ctx context.Context) (string, error) {
+	p, err := s.herdletPrincipal(ctx)
+	return p.HerdletWorker(), err
+}
+
+// herdletPrincipal authenticates the stream's caller as a herdlet credential.
+func (s *Server) herdletPrincipal(ctx context.Context) (auth.Principal, error) {
 	if s.Authn == nil {
-		return "", status.Errorf(codes.Unauthenticated, "tunnel: no authenticator configured")
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "tunnel: no authenticator configured")
 	}
 	var h string
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -81,25 +92,45 @@ func (s *Server) herdlet(ctx context.Context) (string, error) {
 			h = v[0]
 		}
 	}
-	tok, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok || tok == "" {
-		return "", status.Errorf(codes.Unauthenticated, "no bearer token")
+	if err := auth.RefuseHeader(h); err != nil {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
 	}
+	tok := auth.BearerToken(h)
+	if tok == "" && len(auth.PeerChain(ctx)) == 0 {
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "no node SVID and no bearer token")
+	}
+	// No bearer: the tunnel is its node's X.509-SVID over mTLS (ADR 0001 A-60).
 	p, err := s.Authn.Authenticate(ctx, tok)
 	if err != nil {
-		return "", status.Errorf(codes.Unauthenticated, "%v", err)
+		return auth.Principal{}, status.Errorf(codes.Unauthenticated, "%v", err)
 	}
 	if !p.Herdlet {
-		return "", status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
+		return auth.Principal{}, status.Errorf(codes.PermissionDenied, "%q is not a herdlet credential", p.Subject)
 	}
-	return p.Subject, nil
+	return p, nil
 }
 
 func (s *Server) serveControl(ss grpc.ServerStream) error {
-	sub, err := s.herdlet(ss.Context())
+	p, err := s.herdletPrincipal(ss.Context())
 	if err != nil {
 		return err
 	}
+	if !p.SVID() && s.WorkerIdentity != nil {
+		// A worker a node SVID registered is that node's: an HS256 tunnel cannot claim or replace it (re-review 5).
+		id, err := s.WorkerIdentity(ss.Context(), p.HerdletWorker())
+		if err != nil {
+			return status.Errorf(codes.Unavailable, "tunnel: %v", err)
+		}
+		if id != "" {
+			return status.Errorf(codes.PermissionDenied, "worker %q is node SVID %s's: an HS256 credential cannot open its tunnel", p.HerdletWorker(), id)
+		}
+	}
+	// A tunnel ends with the credential that opened it (review 2).
+	return auth.ServeWhile(p.Holds, func() error { return s.control(ss, p) })
+}
+
+func (s *Server) control(ss grpc.ServerStream, p auth.Principal) error {
+	sub := p.HerdletWorker()
 	var hello json.RawMessage
 	if err := ss.RecvMsg(&hello); err != nil {
 		return err
@@ -111,21 +142,24 @@ func (s *Server) serveControl(ss grpc.ServerStream) error {
 	if up.Hello.Worker != sub {
 		return status.Errorf(codes.PermissionDenied, "herdlet credential %q may not open the tunnel of worker %q", sub, up.Hello.Worker)
 	}
-	sess := &session{worker: sub, stream: ss, done: make(chan struct{})}
+	sess := &session{worker: sub, p: p, stream: ss, done: make(chan struct{})}
 	s.mu.Lock()
 	s.init()
-	if old, ok := s.sessions[sub]; ok {
-		// A reconnect replaces the old tunnel; Opens waiting on it fail.
-		close(old.done)
+	if old, ok := s.sessions[sub]; ok && old.p.SVID() && !p.SVID() {
+		// Checked under the lock with the swap (R3): an HS256 tunnel cannot replace a node SVID's.
+		s.mu.Unlock()
+		return status.Errorf(codes.PermissionDenied, "worker %q's tunnel is node SVID %s's: an HS256 credential cannot replace it", sub, old.p.Subject)
 	}
+	// A newer tunnel of the worker takes its Opens from now on (make-before-break, ADR 0001 A-60): the older one goes
+	// on serving the Opens it was sent until its herdlet ends it, and the data streams it opened stay up until they end.
 	s.sessions[sub] = sess
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		if s.sessions[sub] == sess {
 			delete(s.sessions, sub)
-			close(sess.done)
 		}
+		close(sess.done)
 		s.mu.Unlock()
 	}()
 	if err := sess.send(Down{Welcome: &Welcome{Worker: sub}}); err != nil {
@@ -231,10 +265,31 @@ func (s *Server) Dial(ctx context.Context, worker, vm string, port uint32) (net.
 }
 
 func (s *Server) serveData(ss grpc.ServerStream) error {
-	sub, err := s.herdlet(ss.Context())
+	p, err := s.herdletPrincipal(ss.Context())
 	if err != nil {
 		return err
 	}
+	// A data stream may outlive the leaf it opened with while the worker's current tunnel is authenticated with a
+	// valid, trusted leaf: a node that rotates keeps its long streams; one that stops loses them by its leaf's end plus
+	// DrainGrace (R1).
+	worker := p.HerdletWorker()
+	hold := func(t time.Time) error {
+		err := p.Holds(t)
+		if err == nil || p.Hold == nil || !p.HardEnd.IsZero() {
+			return err
+		}
+		s.mu.Lock()
+		cur, ok := s.sessions[worker]
+		s.mu.Unlock()
+		if ok && cur.p.SVID() && cur.p.Expires.After(t) && cur.p.Holds(t) == nil {
+			return nil
+		}
+		return err
+	}
+	return auth.ServeWhile(hold, func() error { return s.data(ss, worker) })
+}
+
+func (s *Server) data(ss grpc.ServerStream, sub string) error {
 	var id string
 	if md, ok := metadata.FromIncomingContext(ss.Context()); ok {
 		if v := md.Get(IDHeader); len(v) > 0 {

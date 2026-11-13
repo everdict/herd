@@ -454,10 +454,15 @@ func (a *Agent) restore(ctx context.Context, w link.Work) link.Outcome {
 	if err := json.NewDecoder(rc).Decode(&snap); err != nil {
 		return link.Outcome{Result: link.ResultFailed, Reason: fmt.Sprintf("snapshot manifest: %v", err)}
 	}
-	if _, err := a.VMM.Restore(ctx, snap, a.spec(w.VM)); err != nil && !errors.Is(err, vmm.ErrExists) {
+	_, err = a.VMM.Restore(ctx, snap, a.spec(w.VM))
+	if errors.Is(err, vmm.ErrExists) {
+		// A VM already there: what it was restored at is not this restore's to say.
+		return link.Outcome{Result: link.ResultDone}
+	}
+	if err != nil {
 		return classify(err)
 	}
-	return link.Outcome{Result: link.ResultDone}
+	return link.Outcome{Result: link.ResultDone, Restored: snap.Fidelity}
 }
 
 // openSnapshot returns the bytes of the snapshot object ref names, verified to be its digest: through the bundle
