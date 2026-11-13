@@ -2,7 +2,8 @@
 // different hosts share snapshots without a shared filesystem. It speaks the object calls it needs (PUT, GET, HEAD,
 // DELETE, the multipart upload and the server-side copies, path-style) signed with SigV4; there is no SDK dependency.
 //
-// Durability: Put hashes the bytes first and uploads them in one PUT whose signed payload hash
+// Durability: Put hashes the bytes first (or takes the sums a snapstore.Summed source made as it was written, so it
+// reads the source once, PLT-591) and uploads them in one PUT whose signed payload hash
 // (x-amz-content-sha256) and x-amz-checksum-sha256 make the endpoint refuse any other bytes; it then HEADs the object
 // and answers only when the endpoint reports the size and digest it was given (and, when the endpoint keeps
 // checksums, its own SHA-256 of what it stored; without one, Put re-reads the object). An S3 PUT that returned 200 is
@@ -10,11 +11,12 @@
 // the new bytes, and not the old ones it was replacing.
 //
 // An object larger than the part size (Store.PartSize) goes up as a multipart upload, since one PUT takes at most
-// 5 GiB: each part is hashed in the same first pass and sent with its own signed payload hash and SHA-256 checksum,
+// 5 GiB: each part is hashed in the same first pass (or summed by the source), up to Store.Concurrency parts are sent
+// at once, each with its own signed payload hash and SHA-256 checksum,
 // so the endpoint refuses a part that is not those bytes; the completed object's checksum is S3's composite one (the
 // SHA-256 of the parts' SHA-256s), which Put checks against the parts it hashed, and the herd digest of the whole
 // object is recorded as before. A multipart Put that fails aborts its upload, so the endpoint keeps none of its parts,
-// and then deletes the key as any failed Put does.
+// and then deletes the key as any failed Put does: one failed part fails the Put.
 //
 // Copy copies inside the bucket (CopyObject, UploadPartCopy past 5 GiB) and Prove checks an object by the endpoint's
 // checksum, each with a HEAD and no byte through the client where the endpoint keeps checksums (ADR A-39).
@@ -29,13 +31,13 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/everdict/herd/snapstore"
@@ -52,7 +54,11 @@ const (
 )
 
 // DefaultPartSize is Store.PartSize's default. An object of up to this size is one PUT.
-const DefaultPartSize = 64 << 20
+const DefaultPartSize = snapstore.DefaultPartSize
+
+// DefaultConcurrency is Store.Concurrency's default (PLT-591): one stream to an endpoint across a slow link moves a
+// fraction of what several do.
+const DefaultConcurrency = 4
 
 // The object metadata Put records.
 const (
@@ -104,6 +110,9 @@ type Store struct {
 	// MaxCopySize is the largest object Copy copies in one CopyObject (zero: MaxPutSize, S3's 5 GiB); a larger one is
 	// copied part by part (UploadPartCopy).
 	MaxCopySize int64
+	// Concurrency is how many parts of a multipart upload Put sends at once (zero: DefaultConcurrency). A part that fails
+	// fails the Put, which aborts the upload.
+	Concurrency int
 }
 
 // New returns a store for cfg. client nil means http.DefaultClient.
@@ -291,16 +300,14 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 		return snapstore.Object{}, fmt.Errorf("%d bytes is more than S3 stores in one object (%d)", want, int64(MaxObjectSize))
 	}
 	part := s.partSize(want)
-	h := sha256.New()
-	var w io.Writer = h
-	var parts *partSums
-	if want > part {
-		parts = &partSums{size: part}
-		w = io.MultiWriter(h, parts)
-	}
-	size, err := io.Copy(w, ctxReader{ctx, rs})
-	if err != nil {
-		return snapstore.Object{}, err
+	size, sum, sums, ok := summed(r, rs, start, part)
+	if !ok {
+		// Nothing summed the source as it was written: one pass over it hashes it, and the upload reads it again.
+		h := snapstore.NewSummer(part)
+		if size, err = io.Copy(h, ctxReader{ctx, rs}); err != nil {
+			return snapstore.Object{}, err
+		}
+		_, sum, sums, _ = h.Sums(part)
 	}
 	if size != want {
 		return snapstore.Object{}, fmt.Errorf("the source changed while it was read: %d bytes, then %d", want, size)
@@ -308,10 +315,12 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 	if _, err := rs.Seek(start, io.SeekStart); err != nil {
 		return snapstore.Object{}, err
 	}
-	sum := h.Sum(nil)
 	obj := snapstore.Object{Key: key, Digest: "sha256:" + hex.EncodeToString(sum), Size: size}
-	if parts != nil {
-		err = s.uploadParts(ctx, key, rs, start, obj, part, parts.done())
+	if want > part {
+		if n := (want + part - 1) / part; int64(len(sums)) != n {
+			return snapstore.Object{}, fmt.Errorf("the source's sums name %d parts of %d bytes, its %d bytes make %d", len(sums), part, want, n)
+		}
+		err = s.uploadParts(ctx, key, rs, start, obj, part, sums)
 	} else {
 		err = s.upload(ctx, key, rs, obj, sum)
 	}
@@ -321,46 +330,29 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader) (snapstore.Obj
 	return obj, nil
 }
 
+// summed answers the sums r, the source rs read from start, carries (snapstore.Summed) at part bytes a part: only for
+// a source read from its own start, since its sums are of all of it.
+func summed(r io.Reader, rs io.ReadSeeker, start, part int64) (int64, []byte, [][]byte, bool) {
+	sm, ok := r.(snapstore.Summed)
+	if !ok || rs != r || start != 0 {
+		return 0, nil, nil, false
+	}
+	return sm.Sums(part)
+}
+
 // partSize is the part size an object of size bytes goes up in: PartSize, or larger where that would make more than
 // MaxParts parts.
 func (s *Store) partSize(size int64) int64 {
-	part := s.PartSize
-	if part <= 0 {
-		part = DefaultPartSize
-	}
-	return max(part, (size+MaxParts-1)/MaxParts)
+	return max(s.SumPartSize(), (size+MaxParts-1)/MaxParts)
 }
 
-// partSums is the SHA-256 of each consecutive size bytes written to it.
-type partSums struct {
-	size int64
-	n    int64
-	h    hash.Hash
-	sums [][]byte
-}
-
-func (p *partSums) Write(b []byte) (int, error) {
-	total := len(b)
-	for len(b) > 0 {
-		if p.h == nil {
-			p.h, p.n = sha256.New(), 0
-		}
-		k := min(int64(len(b)), p.size-p.n)
-		p.h.Write(b[:k])
-		p.n += k
-		b = b[k:]
-		if p.n == p.size {
-			p.sums, p.h = append(p.sums, p.h.Sum(nil)), nil
-		}
+// SumPartSize is the part size Put uploads an object in, up to MaxParts parts of it: what a snapstore.Summed source
+// sums at.
+func (s *Store) SumPartSize() int64 {
+	if s.PartSize <= 0 {
+		return DefaultPartSize
 	}
-	return total, nil
-}
-
-func (p *partSums) done() [][]byte {
-	if p.h != nil {
-		p.sums, p.h = append(p.sums, p.h.Sum(nil)), nil
-	}
-	return p.sums
+	return s.PartSize
 }
 
 // upload PUTs the bytes and checks that the endpoint holds exactly them.
@@ -434,37 +426,107 @@ func (s *Store) uploadParts(ctx context.Context, key string, body io.ReadSeeker,
 			err = fmt.Errorf("%w (and aborting the upload: %v)", err, aerr)
 		}
 	}()
-	done := completeUpload{}
+	done := completeUpload{Parts: make([]completedPart, len(sums))}
+	at := readerAt(body)
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		failed error
+	)
+	slots := make(chan struct{}, s.concurrency())
 	for i, sum := range sums {
-		off := int64(i) * part
-		n := min(part, obj.Size-off)
-		if _, err := body.Seek(start+off, io.SeekStart); err != nil {
-			return err
+		select {
+		case slots <- struct{}{}:
+		case <-pctx.Done():
 		}
-		checksum := base64.StdEncoding.EncodeToString(sum)
-		phdr := http.Header{}
-		phdr.Set(ChecksumHeader, checksum)
-		q := url.Values{"partNumber": {strconv.Itoa(i + 1)}, "uploadId": {id}}
-		resp, err := s.doQuery(ctx, http.MethodPut, key, q, phdr, ctxReader{ctx, io.LimitReader(body, n)}, n, hex.EncodeToString(sum))
-		if err != nil {
-			return fmt.Errorf("part %d: %w", i+1, err)
+		if pctx.Err() != nil {
+			break
 		}
-		if resp.StatusCode/100 != 2 {
-			defer resp.Body.Close()
-			return fmt.Errorf("part %d: %w", i+1, statusError("put", key, resp))
-		}
-		drain(resp)
-		etag := resp.Header.Get("ETag")
-		if etag == "" {
-			return fmt.Errorf("part %d: the endpoint answered no ETag", i+1)
-		}
-		done.Parts = append(done.Parts, completedPart{PartNumber: i + 1, ETag: etag, ChecksumSHA256: checksum})
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			off := int64(i) * part
+			n := min(part, obj.Size-off)
+			p, err := s.uploadPart(pctx, key, id, i+1, io.NewSectionReader(at, start+off, n), n, sum)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if failed == nil {
+					// The first part that failed fails the upload; the others in flight are cut.
+					failed = err
+					cancel()
+				}
+				return
+			}
+			done.Parts[i] = p
+		}()
+	}
+	wg.Wait()
+	if failed != nil {
+		return failed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := s.completeUpload(ctx, key, id, done); err != nil {
 		return err
 	}
 	completed = true
 	return s.check(ctx, key, obj, composite)
+}
+
+// uploadPart sends one part of an upload, n bytes of body whose SHA-256 is sum, and answers it as the completion names it.
+func (s *Store) uploadPart(ctx context.Context, key, id string, number int, body io.Reader, n int64, sum []byte) (completedPart, error) {
+	checksum := base64.StdEncoding.EncodeToString(sum)
+	phdr := http.Header{}
+	phdr.Set(ChecksumHeader, checksum)
+	q := url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {id}}
+	resp, err := s.doQuery(ctx, http.MethodPut, key, q, phdr, ctxReader{ctx, body}, n, hex.EncodeToString(sum))
+	if err != nil {
+		return completedPart{}, fmt.Errorf("part %d: %w", number, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		return completedPart{}, fmt.Errorf("part %d: %w", number, statusError("put", key, resp))
+	}
+	drain(resp)
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return completedPart{}, fmt.Errorf("part %d: the endpoint answered no ETag", number)
+	}
+	return completedPart{PartNumber: number, ETag: etag, ChecksumSHA256: checksum}, nil
+}
+
+// concurrency is how many parts Put sends at once: Concurrency, or DefaultConcurrency.
+func (s *Store) concurrency() int {
+	if s.Concurrency <= 0 {
+		return DefaultConcurrency
+	}
+	return s.Concurrency
+}
+
+// readerAt reads r at offsets: itself where it can, else through its Seek, one read at a time.
+func readerAt(r io.ReadSeeker) io.ReaderAt {
+	if ra, ok := r.(io.ReaderAt); ok {
+		return ra
+	}
+	return &seekReaderAt{r: r}
+}
+
+type seekReaderAt struct {
+	mu sync.Mutex
+	r  io.ReadSeeker
+}
+
+func (s *seekReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.r.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return io.ReadFull(s.r, p)
 }
 
 type completeUpload struct {

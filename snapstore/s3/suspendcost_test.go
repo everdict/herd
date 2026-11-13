@@ -238,3 +238,22 @@ func TestFailedPartFailsThePut(t *testing.T) {
 		t.Errorf("Stat after a failed Put = %+v, %v; want ErrNotFound", o, err)
 	}
 }
+
+// TestConcurrencyBoundsThePartsInFlight (PLT-591): Store.Concurrency is the most parts in flight at once.
+func TestConcurrencyBoundsThePartsInFlight(t *testing.T) {
+	data := bytes.Repeat([]byte("guest memory "), (3<<20)/13)
+	for _, c := range []int{1, 2} {
+		srv := s3test.New("us-east-1", creds)
+		srv.SetMinPartSize(0)
+		rt := newHoldParts(c+1, "")
+		s := newStore(t, srv, rt, 1<<20)
+		s.Concurrency = c
+		o, err := s.Put(t.Context(), "bundle", bytes.NewReader(data))
+		if err != nil || o.Digest != digestOf(data) {
+			t.Fatalf("Concurrency %d: Put = %+v, %v", c, o, err)
+		}
+		if n := rt.mostInFlight(); n != c {
+			t.Errorf("Concurrency %d: at most %d parts were in flight at once", c, n)
+		}
+	}
+}
