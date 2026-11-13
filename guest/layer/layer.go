@@ -12,6 +12,8 @@ package layer
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +23,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 // Dir is where, relative to the share, the guest leaves each container's archive: Dir/<container>.tar.
@@ -33,6 +37,9 @@ const Ext = ".tar"
 func Path(container string) string { return path.Join(Dir, container+Ext) }
 
 const xattrPrefix = "SCHILY.xattr."
+
+// lz4Magic begins an LZ4 frame (little-endian 0x184D2204): an archive Save compressed. A tar begins with a file name.
+var lz4Magic = []byte{0x04, 0x22, 0x4d, 0x18}
 
 // Write archives each directory of dirs (archive name → directory) into w. An entry whose name (<name>/<path>) is
 // in skip, or below one, is left out with everything under it. Sockets are left out; nothing listens on one after
@@ -276,8 +283,11 @@ func mode(m int64) fs.FileMode {
 	return out
 }
 
-// Save archives container's dirs (Write) into share at Path(container), whole or not at all: it is written beside
-// and renamed into place, so a cold boot never reads half an archive.
+// Save archives container's dirs (Write) into share at Path(container), compressed (an LZ4 frame stream, PLT-591),
+// whole or not at all: it is written beside and renamed into place, so a cold boot never reads half an archive. The
+// layer's files are in the guest's memory as well (its tmpfs), so a MEMORY snapshot holds them there; the archive is
+// what a cold boot reads, and compressed it costs the bundle and the upload about what the memory's frames cost.
+// Written through the share, it is in the guest's page cache until herd-guest's Sync drops that cache.
 func Save(share, container string, dirs map[string]string, skip []string) error {
 	root, err := os.OpenRoot(share)
 	if err != nil {
@@ -293,10 +303,16 @@ func Save(share, container string, dirs map[string]string, skip []string) error 
 	if err != nil {
 		return fmt.Errorf("layer: %w", err)
 	}
-	if err := Write(f, dirs, skip); err != nil {
+	zw := lz4.NewWriter(f)
+	if err := Write(zw, dirs, skip); err != nil {
 		_ = f.Close()
 		_ = root.Remove(tmp)
 		return err
+	}
+	if err := zw.Close(); err != nil {
+		_ = f.Close()
+		_ = root.Remove(tmp)
+		return fmt.Errorf("layer: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = root.Remove(tmp)
@@ -308,7 +324,8 @@ func Save(share, container string, dirs map[string]string, skip []string) error 
 	return nil
 }
 
-// Restore extracts container's archive in share into dirs (Extract) and answers whether there was one. A share
+// Restore extracts container's archive in share into dirs (Extract) and answers whether there was one. The archive is
+// an LZ4 frame stream (Save since PLT-591) or a plain tar (herd v0.1.23 and before, which bundles of version 3 carry). A share
 // with none (a new actor, or a snapshot taken before herd carried layers) leaves dirs as they are.
 func Restore(share, container string, dirs map[string]string) (bool, error) {
 	root, err := os.OpenRoot(share)
@@ -324,7 +341,11 @@ func Restore(share, container string, dirs map[string]string) (bool, error) {
 		return false, fmt.Errorf("layer: %w", err)
 	}
 	defer f.Close()
-	if err := Extract(f, dirs); err != nil {
+	var r io.Reader = bufio.NewReader(f)
+	if magic, _ := r.(*bufio.Reader).Peek(4); bytes.Equal(magic, lz4Magic) {
+		r = lz4.NewReader(r)
+	}
+	if err := Extract(r, dirs); err != nil {
 		return true, fmt.Errorf("layer: container %q: %w", container, err)
 	}
 	return true, nil
