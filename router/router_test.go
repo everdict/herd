@@ -259,6 +259,48 @@ func TestNodeUnreachableWhenHerdAPIIsSlow(t *testing.T) {
 	s.apiDelay.Store(0)
 }
 
+// TestRequestThatDoesNotWake (PLT-586): a request that carries herd-wake: never to a SUSPENDED actor is refused at once
+// with the reason suspended, and herd-api is asked for no resume: the actor stays SUSPENDED. A control plane that
+// suspended an actor itself re-attaches its follows with this header, so only its own ResumeActor wakes the actor.
+// Without the header the same request resumes it (TestResumeOnRequest), which undid every suspend that a follow
+// outlived (Everdict, 2026-11-13: the row read suspended and the VM ran).
+func TestRequestThatDoesNotWake(t *testing.T) {
+	const budget = 3 * time.Second
+	s := startStack(t, stackOpts{budget: budget})
+	ctx := ctxT(t, 30*time.Second)
+	s.createActor(space1, "a1")
+	if err := s.suspend(space1, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	c := s.client(space1+"/a1", s.clientToken())
+	start := time.Now()
+	reason, err := listDir(ctx, c.with(router.WakeHeader, router.WakeNever))
+	took := time.Since(start)
+	wantCode(t, "a request that does not wake, to a suspended actor", err, codes.Unavailable)
+	if reason != string(router.ReasonSuspended) {
+		t.Errorf("herd-reason %q, want %q", reason, router.ReasonSuspended)
+	}
+	if took > budget/2 {
+		t.Errorf("answered after %v, want at once (the parking budget is %v)", took, budget)
+	}
+	if n := s.resumes.Load(); n != 0 {
+		t.Errorf("the router asked herd-api for %d resumes, want none", n)
+	}
+	if st := s.state(space1, "a1"); st != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Errorf("after the request: %v, want SUSPENDED", st)
+	}
+	// The same request reaches a running actor as any other.
+	if _, err := listDir(ctx, c); err != nil {
+		t.Fatalf("a waking request: %v", err)
+	}
+	if _, err := listDir(ctx, c.with(router.WakeHeader, router.WakeNever)); err != nil {
+		t.Errorf("a request that does not wake, to a running actor: %v", err)
+	}
+	// A value the router does not know is refused, not read as "wake".
+	_, err = listDir(ctx, c.with(router.WakeHeader, "later"))
+	wantCode(t, "an unknown herd-wake value", err, codes.InvalidArgument)
+}
+
 // TestResumeOnRequest (resume-on-request): requests to a SUSPENDED actor are parked, one resume is asked of
 // herd-api, and every parked request is delivered once the actor runs — within the parking budget. A resume that
 // cannot finish in the budget is answered with a typed 503, neither at once nor never.

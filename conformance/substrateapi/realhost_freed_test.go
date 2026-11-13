@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,7 +33,8 @@ import (
 // tmpfs) and removes them, runs a dd whose 256 MiB buffer of random bytes is freed when it exits, and writes, syncs
 // and reads back 128 MiB of random bytes in its volume (/work), which the guest's page cache then holds. Its second
 // suspend may send the baseline, the volume's 128 MiB (the bundle carries the volume) and 64 MiB more, no more: the
-// guest boots with init_on_free=1, so the tmpfs and dd pages are zero once freed, and the flush drops the page cache.
+// guest reports its free pages and Cloud Hypervisor gives them back to the host (vmm.FreePageReporting), so the tmpfs
+// and dd pages read zero once freed, and the flush drops the page cache.
 // On v0.1.23 the 384 + 256 + 128 MiB freed or cached stay in the memory, and the bundle carries them.
 func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 	if os.Getenv("HERD_MEMORY_REAL") != "1" {
@@ -136,6 +139,46 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		t.Logf("MEASURE suspend %s: %d bytes sent to the store in %.2f s", what, n, took.Seconds())
 		return n
 	}
+	// held is what the host holds for the guest's memory: the resident shared memory of its Cloud Hypervisor process.
+	held := func(what string) int64 {
+		t.Helper()
+		// The template's golden actor may still be shutting down beside the actor: the largest live VM is read.
+		pids, _ := filepath.Glob(filepath.Join(state, "vms", "*", "*", "cloud-hypervisor.pid"))
+		var most int64 = -1
+		for _, p := range pids {
+			pid, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			// The pid file's first line is the pid; its second names the API socket.
+			first, _, _ := strings.Cut(string(pid), "\n")
+			st, err := os.ReadFile(filepath.Join("/proc", strings.TrimSpace(first), "status"))
+			if err != nil {
+				continue // that VM has ended
+			}
+			for _, l := range strings.Split(string(st), "\n") {
+				if f := strings.Fields(l); len(f) == 3 && f[0] == "RssShmem:" {
+					kb, err := strconv.ParseInt(f[1], 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("MEASURE host memory %s: VM %s holds %d MiB of its 1024", what, filepath.Base(filepath.Dir(p)), kb>>10)
+					most = max(most, kb<<10)
+				}
+			}
+		}
+		if most >= 0 {
+			return most
+		}
+		t.Fatalf("no live Cloud Hypervisor under %s", state)
+		return 0
+	}
+	// A guest that has only booted busybox holds a fraction of its memory on the host. With init_on_free=1 (v0.1.24)
+	// the kernel wrote every page it freed at boot, and the host held all 1024 MiB.
+	booted := held("as booted")
+	if limit := int64(512 << 20); booted > limit {
+		t.Errorf("the host holds %d bytes for a guest that only booted, want at most %d of its 1024 MiB", booted, limit)
+	}
 	base := sent("as booted")
 	const volume = 128 << 20
 	script := "dd if=/dev/urandom of=/tmp/fill bs=1M count=384 2>/dev/null && rm /tmp/fill && " +
@@ -148,6 +191,12 @@ func TestRealHostFreedMemoryLeavesTheBundle(t *testing.T) {
 		t.Fatalf("filling the guest's memory: exit %d, %v\n%s%s", res.ExitCode, err, res.Stdout, res.Stderr)
 	}
 	t.Logf("the guest after the fill:\n%s", res.Stdout)
+	// The 384 MiB of tmpfs and the 256 MiB of the process are free in the guest; once it has reported them the host
+	// holds what the guest uses and the page cache's 128 MiB, not the 768 MiB the script touched.
+	time.Sleep(6 * time.Second)
+	if after, limit := held("after the fill, before the suspend"), int64(640<<20); after > limit {
+		t.Errorf("the host holds %d bytes after the guest freed 640 MiB of its 1024, want at most %d: the freed pages were not given back", after, limit)
+	}
 	filled := sent("after 384 MiB of tmpfs, 256 MiB of a process and 128 MiB of page cache were filled and freed")
 	if limit := base + volume + 64<<20; filled > limit {
 		t.Errorf("the suspend after the fill sent %d bytes, want at most %d (the baseline %d, the volume's %d and 64 MiB): the freed memory or the page cache is in the bundle",

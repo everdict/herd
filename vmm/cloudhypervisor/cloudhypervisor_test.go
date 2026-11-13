@@ -227,17 +227,18 @@ func TestBootWaitsForVMBoot(t *testing.T) {
 
 // TestBootDefaultCmdline: a spec without a command line boots with the backend's default for the host's arch, a
 // console the guest's output reaches and a panic that ends the VM, not an empty payload cmdline; a given one is
-// passed through as is. Either way the guest clears the pages it frees (vmm.ZeroFreedPages, PLT-591), unless the
-// given one sets init_on_free itself.
+// kept. Either way the guest reports every free page (vmm.ReportEveryFreePage), unless the given one sets the order.
+// No backend adds init_on_free=1 (v0.1.24 did, and each VM then held its whole memory on the host), and a spec that
+// carries it is refused before anything starts.
 func TestBootDefaultCmdline(t *testing.T) {
 	for _, c := range []struct {
 		name, cmdline, want string
 		cpu                 CPU
 	}{
-		{"amd64 empty", "", "console=ttyS0 panic=-1 init_on_free=1", X86CPU{CPUID: tigerLake.cpuid}},
-		{"arm64 empty", "", "console=ttyAMA0 panic=-1 init_on_free=1", ARM64CPU{Root: "/nonexistent"}},
-		{"given", "console=ttyS0 quiet", "console=ttyS0 quiet init_on_free=1", X86CPU{CPUID: tigerLake.cpuid}},
-		{"given, init_on_free set", "console=ttyS0 init_on_free=0", "console=ttyS0 init_on_free=0", X86CPU{CPUID: tigerLake.cpuid}},
+		{"amd64 empty", "", "console=ttyS0 panic=-1 " + vmm.ReportEveryFreePage, X86CPU{CPUID: tigerLake.cpuid}},
+		{"arm64 empty", "", "console=ttyAMA0 panic=-1 " + vmm.ReportEveryFreePage, ARM64CPU{Root: "/nonexistent"}},
+		{"given", "console=ttyS0 quiet", "console=ttyS0 quiet " + vmm.ReportEveryFreePage, X86CPU{CPUID: tigerLake.cpuid}},
+		{"given, its own order", "console=ttyS0 page_reporting.page_reporting_order=9", "console=ttyS0 page_reporting.page_reporting_order=9", X86CPU{CPUID: tigerLake.cpuid}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newRig(t)
@@ -255,6 +256,31 @@ func TestBootDefaultCmdline(t *testing.T) {
 				t.Errorf("spec cmdline %q sent payload cmdlines %q to Cloud Hypervisor, want [%q]", c.cmdline, got, c.want)
 			}
 		})
+	}
+}
+
+// TestGuestGivesFreedMemoryBack (PLT-591): every VM gets a balloon that takes none of its memory and has the guest
+// report its free pages, which Cloud Hypervisor returns to the host, so freed memory is neither in a MEMORY snapshot
+// nor held on the node. A command line with init_on_free=1 is refused: with it the guest writes every page it frees
+// and holds its whole memory on the host (the v0.1.24 roll, 2026-11-13: three 4 GiB VMs ran a 15 GB node out of memory).
+func TestGuestGivesFreedMemoryBack(t *testing.T) {
+	r := newRig(t)
+	v := New(Config{Binary: r.host.chBin, Virtiofsd: r.host.fsBin, StateDir: filepath.Join(r.root, "a"),
+		CPU: X86CPU{CPUID: tigerLake.cpuid}, Processes: r.host, ExitTimeout: 200 * time.Millisecond})
+	b := v.vmConfig(r.spec("c1"), t.TempDir()).Balloon
+	if b == nil || !b.FreePageReporting || b.Size != 0 {
+		t.Errorf("the VM's balloon is %+v, want one of size 0 that reports free pages", b)
+	}
+	spec := r.spec("c2")
+	spec.Cmdline = "console=ttyS0 init_on_free=1"
+	if _, err := v.Boot(ctxT(t, 5*time.Second), spec); !errors.Is(err, vmm.ErrInvalidSpec) {
+		t.Errorf("a boot with init_on_free=1 answered %v, want ErrInvalidSpec", err)
+	}
+	r.host.mu.Lock()
+	got := r.host.cmdlines
+	r.host.mu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("Cloud Hypervisor was sent %q for a refused command line", got)
 	}
 }
 

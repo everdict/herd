@@ -102,6 +102,7 @@ func syncDirs(dirs []string, flush func(*os.File) error) error {
 
 // DropCachesLevel is what Sync writes to /proc/sys/vm/drop_caches once the guest's buffers are flushed: "3", the clean
 // page cache (1) and the reclaimable dentries and inodes (2) (ADR A-52; the page cache since PLT-591). The page cache
-// is then free memory, which the guest kernel clears (vmm.ZeroFreedPages), so a MEMORY snapshot carries none of it;
+// is then free memory, which the guest reports and the VMM gives back to the host (vmm.FreePageReporting), so a MEMORY
+// snapshot carries none of it;
 // a restored guest reads again from its disks and share what it reads.
 const DropCachesLevel = "3"

@@ -182,7 +182,6 @@ func machineConfig(spec vmm.Spec) MachineConfig {
 		// panic=-1: a guest that cannot boot ends its VM at once, as on Cloud Hypervisor, instead of hanging it.
 		mc.Cmdline = "console=hvc0 panic=-1"
 	}
-	mc.Cmdline = vmm.WithZeroFreedPages(mc.Cmdline)
 	for _, r := range spec.Rootfs {
 		// Images are read-only; the guest puts an overlay on tmpfs on top (ADR A-10).
 		mc.Disks = append(mc.Disks, Disk{Path: r, ReadOnly: true})
