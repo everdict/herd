@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/Code-Hex/vz/v3 v3.8.0
 	github.com/containers/gvisor-tap-vsock v0.8.7
+	github.com/pierrec/lz4/v4 v4.1.14
 	go.etcd.io/bbolt v1.5.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
@@ -18,7 +19,6 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9 // indirect
 	github.com/miekg/dns v1.1.68 // indirect
-	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect

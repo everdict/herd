@@ -3,7 +3,6 @@ package machine
 import (
 	"archive/tar"
 	"bytes"
-	"compress/flate"
 	"crypto/rand"
 	"encoding/binary"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/everdict/herd/vmm"
+	"github.com/pierrec/lz4/v4"
 )
 
 // touchedMemory writes a memory file of size bytes in which every page holds 16 random bytes and zeros: 1 MiB of data
@@ -142,17 +142,17 @@ func TestMemoryThatExpandsToOtherBytesIsRefused(t *testing.T) {
 	end := bundleMemory + "/memory-ranges/" + frameEnd
 	first := frameName("memory-ranges", 0)
 	recompress := func(body []byte, raw func([]byte) []byte) []byte {
-		zr := flate.NewReader(bytes.NewReader(body[frameHeader:]))
-		b, err := io.ReadAll(zr)
+		b := make([]byte, binary.BigEndian.Uint64(body[8:frameHeader]))
+		if err := decodeFrame(body[frameHeader:], b); err != nil {
+			t.Fatal(err)
+		}
+		b = raw(b)
+		var c lz4.Compressor
+		stored, err := encodeFrame(&c, make([]byte, lz4.CompressBlockBound(len(b))), b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var out bytes.Buffer
-		out.Write(body[:frameHeader])
-		zw, _ := flate.NewWriter(&out, flate.BestSpeed)
-		zw.Write(raw(b))
-		zw.Close()
-		return out.Bytes()
+		return append(bytes.Clone(body[:frameHeader]), stored...)
 	}
 	for name, edit := range map[string]func(string, []byte) []byte{
 		"another digest": func(n string, b []byte) []byte {
@@ -191,5 +191,35 @@ func TestMemoryThatExpandsToOtherBytesIsRefused(t *testing.T) {
 				t.Errorf("the memory file read back whole")
 			}
 		})
+	}
+}
+
+// TestIncompressibleMemoryIsStoredRaw (PLT-591): a frame LZ4 cannot make shorter (random bytes) is stored as its raw
+// bytes, so a bundle of memory that does not compress is no larger than the memory and its frame headers, and it
+// reads back as the same bytes.
+func TestIncompressibleMemoryIsStoredRaw(t *testing.T) {
+	const size = 8 << 20
+	want := make([]byte, size)
+	if _, err := rand.Read(want); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "memory-ranges")
+	if err := os.WriteFile(p, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := vmm.SnapshotFile{Name: "memory-ranges", Size: size, Open: func() (io.ReadCloser, error) { return os.Open(p) }}
+	var bundle bytes.Buffer
+	if err := writeBundle(&bundle, Manifest{Version: bundleVersion, Memory: []vmm.SnapshotFile{f}}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if limit := size + 64<<10; bundle.Len() > limit {
+		t.Errorf("a %d-byte memory file of random bytes: a %d-byte bundle, want at most %d", size, bundle.Len(), limit)
+	}
+	got, err := readBackMemory(t, bundle.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("the memory file read back differs")
 	}
 }

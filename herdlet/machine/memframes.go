@@ -3,7 +3,6 @@ package machine
 import (
 	"archive/tar"
 	"bytes"
-	"compress/flate"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -13,13 +12,15 @@ import (
 	"runtime"
 
 	"github.com/everdict/herd/vmm"
+	"github.com/pierrec/lz4/v4"
 )
 
 // From bundle version 4 a memory file goes into a bundle as frames (PLT-591), so a VM's memory costs the bytes it
 // holds, not the bytes of its limit:
 //
 //   - memory/<name>/<n>, n = 00000000, 00000001, ...: one frame, a 16-byte header (the raw offset and the raw length,
-//     big-endian) and then those raw bytes compressed (DEFLATE, compress/flate at BestSpeed: no zstd is vendored).
+//     big-endian) and then those raw bytes as one LZ4 block (pierrec/lz4), or the raw bytes themselves where LZ4 does not make them
+//     shorter: a frame whose stored bytes are as long as its raw length holds them raw.
 //     A frame holds at most frameRaw raw bytes; frames are in offset order and do not overlap.
 //   - memory/<name>/end: the raw size and the SHA-256 of all raw bytes, 8 + 32 bytes.
 //
@@ -39,11 +40,12 @@ const (
 
 // frame is one frame's raw bytes at its offset and, once compressed, its stored bytes.
 type frame struct {
-	off  int64
-	raw  []byte
-	out  bytes.Buffer
-	err  error
-	done chan struct{}
+	off    int64
+	raw    []byte
+	out    bytes.Buffer
+	err    error
+	stored []byte // the last frame's stored bytes
+	done   chan struct{}
 }
 
 // frameName is the tar entry of the memory file's frame n.
@@ -66,18 +68,16 @@ func writeMemoryFrames(tw *tar.Writer, f vmm.SnapshotFile) error {
 	stop := make(chan struct{})
 	for range workers {
 		go func() {
-			zw, _ := flate.NewWriter(io.Discard, flate.BestSpeed)
+			var c lz4.Compressor
+			buf := make([]byte, lz4.CompressBlockBound(frameRaw))
 			for fr := range work {
 				var hdr [frameHeader]byte
 				binary.BigEndian.PutUint64(hdr[:8], uint64(fr.off))
 				binary.BigEndian.PutUint64(hdr[8:], uint64(len(fr.raw)))
 				fr.out.Write(hdr[:])
-				zw.Reset(&fr.out)
-				if _, err := zw.Write(fr.raw); err != nil {
-					fr.err = err
-				} else {
-					fr.err = zw.Close()
-				}
+				var b []byte
+				b, fr.err = encodeFrame(&c, buf, fr.raw)
+				fr.out.Write(b)
 				fr.raw = nil
 				close(fr.done)
 			}
@@ -165,6 +165,36 @@ func splitFrames(r io.Reader, size int64, h hash.Hash, emit func(*frame) bool) e
 	return nil
 }
 
+// encodeFrame is raw as a frame stores it: an LZ4 block, compressed with c into buf (at least
+// lz4.CompressBlockBound(len(raw)) bytes), or raw itself when LZ4 does not make it shorter.
+func encodeFrame(c *lz4.Compressor, buf, raw []byte) ([]byte, error) {
+	n, err := c.CompressBlock(raw, buf)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 || n >= len(raw) {
+		return raw, nil
+	}
+	return buf[:n], nil
+}
+
+// decodeFrame expands a frame's stored bytes into raw, which is exactly the frame's raw length: it fails on stored
+// bytes that expand to more or fewer.
+func decodeFrame(stored, raw []byte) error {
+	if len(stored) == len(raw) {
+		copy(raw, stored)
+		return nil
+	}
+	n, err := lz4.UncompressBlock(stored, raw)
+	if err != nil {
+		return err
+	}
+	if n != len(raw) {
+		return fmt.Errorf("expands to %d bytes", n)
+	}
+	return nil
+}
+
 func writeEntry(tw *tar.Writer, name string, b []byte) error {
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(b)), Typeflag: tar.TypeReg, Format: tar.FormatPAX}); err != nil {
 		return err
@@ -177,20 +207,20 @@ func writeEntry(tw *tar.Writer, name string, b []byte) error {
 // on a frame out of order or out of the file, a frame that expands to other than its raw length, and a file whose
 // size or digest is not its end entry's; it reads the end entry and checks it before it gives the last byte.
 type frameReader struct {
-	tr   *tar.Reader
-	file vmm.SnapshotFile
-	h    hash.Hash
-	pos  int64 // raw bytes produced (and hashed) so far
-	out  []byte
-	n    int // frames read
-	next *frameHead
-	end  []byte // the end entry, once read
-	done bool   // the end entry was read
-	err  error
-	zr   io.ReadCloser
+	tr     *tar.Reader
+	file   vmm.SnapshotFile
+	h      hash.Hash
+	pos    int64 // raw bytes produced (and hashed) so far
+	out    []byte
+	n      int // frames read
+	next   *frameHead
+	end    []byte // the end entry, once read
+	done   bool   // the end entry was read
+	err    error
+	stored []byte // the last frame's stored bytes, reused
 }
 
-type frameHead struct{ off, n int64 }
+type frameHead struct{ off, n, stored int64 }
 
 var zeros = make([]byte, 1<<20)
 
@@ -275,14 +305,14 @@ func (r *frameReader) entry() error {
 		r.done = true
 		return nil
 	}
-	if hd.Name != frameName(r.file.Name, r.n) || hd.Size < frameHeader {
+	if hd.Name != frameName(r.file.Name, r.n) || hd.Size < frameHeader || hd.Size > frameHeader+int64(lz4.CompressBlockBound(frameRaw)) {
 		return fmt.Errorf("machine: bundle: entry %q (%d bytes) where frame %d of memory file %s belongs", hd.Name, hd.Size, r.n, r.file.Name)
 	}
 	var b [frameHeader]byte
 	if _, err := io.ReadFull(r.tr, b[:]); err != nil {
 		return fmt.Errorf("machine: bundle: memory file %s: %w", r.file.Name, err)
 	}
-	fh := frameHead{off: int64(binary.BigEndian.Uint64(b[:8])), n: int64(binary.BigEndian.Uint64(b[8:]))}
+	fh := frameHead{off: int64(binary.BigEndian.Uint64(b[:8])), n: int64(binary.BigEndian.Uint64(b[8:])), stored: hd.Size - frameHeader}
 	if fh.off < r.pos || fh.n <= 0 || fh.n > frameRaw || fh.off > r.file.Size-fh.n {
 		return fmt.Errorf("machine: bundle: memory file %s: frame %d holds %d bytes at %d, after %d of %d bytes", r.file.Name, r.n, fh.n, fh.off, r.pos, r.file.Size)
 	}
@@ -291,22 +321,18 @@ func (r *frameReader) entry() error {
 	return nil
 }
 
-// expand reads the current frame's compressed bytes: exactly its raw length of them.
+// expand reads the current frame's stored bytes and expands them: exactly its raw length of them.
 func (r *frameReader) expand(fh frameHead) ([]byte, error) {
-	if r.zr == nil {
-		r.zr = flate.NewReader(r.tr)
-	} else if err := r.zr.(flate.Resetter).Reset(r.tr, nil); err != nil {
-		return nil, err
+	if cap(r.stored) < int(fh.stored) {
+		r.stored = make([]byte, fh.stored)
 	}
-	b := make([]byte, fh.n)
-	if _, err := io.ReadFull(r.zr, b); err != nil {
+	stored := r.stored[:fh.stored]
+	if _, err := io.ReadFull(r.tr, stored); err != nil {
 		return nil, fmt.Errorf("machine: bundle: memory file %s: frame at %d: %w", r.file.Name, fh.off, err)
 	}
-	if n, err := r.zr.Read(make([]byte, 1)); n != 0 || err != io.EOF {
-		return nil, fmt.Errorf("machine: bundle: memory file %s: frame at %d expands past its %d bytes", r.file.Name, fh.off, fh.n)
-	}
-	if n, _ := io.Copy(io.Discard, r.tr); n != 0 {
-		return nil, fmt.Errorf("machine: bundle: memory file %s: frame at %d: %d bytes after its compressed stream", r.file.Name, fh.off, n)
+	b := make([]byte, fh.n)
+	if err := decodeFrame(stored, b); err != nil {
+		return nil, fmt.Errorf("machine: bundle: memory file %s: frame at %d does not expand to its %d bytes: %w", r.file.Name, fh.off, fh.n, err)
 	}
 	return b, nil
 }
