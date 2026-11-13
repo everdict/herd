@@ -65,7 +65,11 @@ func TestRestoreWhoseFetchOutlastsEachCallConverges(t *testing.T) {
 	_, err := e.Client.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: oref(e, "a1")})
 	wantCode(t, "ResumeActor whose bundle takes longer to fetch than its call waits", err, codes.Unavailable)
 
-	for i := 0; i < 10; i++ {
+	// Each Reconcile is bounded at 400 ms, well short of the ~3.3 s fetch, so a restore that fetched from zero never
+	// converges however many there are. How many a joined fetch needs is the host's timers' business (a fixed count
+	// left about 1 s of slack), so the attempts are bounded by a deadline, not a count.
+	n, deadline := 0, time.Now().Add(15*time.Second) // inside ctxT's 20 s
+	for ; time.Now().Before(deadline); n++ {
 		rctx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
 		_, _ = e.Server.Reconcile(rctx)
 		cancel()
@@ -74,6 +78,6 @@ func TestRestoreWhoseFetchOutlastsEachCallConverges(t *testing.T) {
 		}
 	}
 	a, owed := getActor(t, e, "a1")
-	t.Fatalf("actor a1 is %v (owed %q) after ten Reconciles of 400 ms each, want RUNNING: each restore fetched its bundle from zero",
-		a.GetStatus().GetState(), owed)
+	t.Fatalf("actor a1 is %v (owed %q) after %d Reconciles of 400 ms each over 15 s, want RUNNING: each restore fetched its bundle from zero",
+		a.GetStatus().GetState(), owed, n)
 }

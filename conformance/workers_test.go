@@ -2,6 +2,7 @@ package conformance_test
 
 import (
 	"testing"
+	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
 	"github.com/everdict/herd/auth"
@@ -91,7 +92,14 @@ func TestListWorkers(t *testing.T) {
 	}
 
 	// The record outlives the link: a worker that is not connected is listed UNAVAILABLE with what it declared.
+	// Disconnect returns once the herdlet's end of the link is gone; herd-api's hub sees the stream end on its own
+	// goroutine, after that. Wait for the hub to drop m1 (what ListWorkers reports ACTIVE from), then list once.
 	e.Herdlets["m1"].Disconnect()
+	for deadline := time.Now().Add(5 * time.Second); hubHas(e, "m1"); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("m1 still linked to herd-api 5s after its link ended")
+		}
+	}
 	resp, err = list(ro, nil)
 	if err != nil || len(resp.GetWorkers()) != 2 {
 		t.Fatalf("ListWorkers after m1 left = %v, %v", resp, err)
