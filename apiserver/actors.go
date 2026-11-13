@@ -267,6 +267,10 @@ func (s *Server) createActor(ctx context.Context, req *ateapi.CreateActorRequest
 		st:   actorState{TemplateName: tplRec.Name, TemplateUID: tplRec.UID, Golden: golden},
 		pull: goldenPull{auth: pullAuth, plain: plain},
 	}
+	if !golden {
+		// The templates actors are made from have their golden rebuilt first after an upgrade (byUse).
+		s.used(tplRec.Key)
+	}
 	fromGolden := false
 	if gt := tpl.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(); in.GetSourceTag() == nil && gt != nil && !golden {
 		// Substrate's contract: an actor of a template with a golden snapshot starts from it.

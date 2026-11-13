@@ -388,11 +388,23 @@ func (s *Server) deleteSteps(ctx context.Context, ar *actorRec) error {
 	return nil
 }
 
-// Reconcile settles every actor whose VM ended with an earlier herdlet process of its worker (crashRestarted),
-// retries every owed workflow step once, then takes every template's unfinished golden snapshot build one
-// pass further, and returns how many steps and builds are still owed. Each herdlet call it makes waits up to
-// ReconcileCallTimeout.
+// Reconcile runs one pass over the actors (ReconcileActors) and, unless that used up ctx, one over the templates
+// (ReconcileTemplates), and returns how many steps and builds are still owed. herd-api runs the two passes on their
+// own loops, so that a herdlet that does not answer an actor's owed step delays no golden (deploy.API).
 func (s *Server) Reconcile(ctx context.Context) (int, error) {
+	left, err := s.ReconcileActors(ctx)
+	if err != nil || ctx.Err() != nil {
+		// The pass ran out of time on the actors; golden builds wait for the next one.
+		return left, err
+	}
+	more, err := s.ReconcileTemplates(ctx)
+	return left + more, err
+}
+
+// ReconcileActors settles every actor whose VM ended with an earlier herdlet process of its worker
+// (crashRestarted) and retries every owed workflow step once; it returns how many steps are still owed. Each herdlet
+// call it makes waits up to ReconcileCallTimeout.
+func (s *Server) ReconcileActors(ctx context.Context) (int, error) {
 	ctx = context.WithValue(ctx, reconciling{}, true)
 	recs, err := s.cfg.Store.List(ctx, store.KindActor, "")
 	if err != nil {
@@ -418,21 +430,29 @@ func (s *Server) Reconcile(ctx context.Context) (int, error) {
 			left++
 		}
 	}
-	if ctx.Err() != nil {
-		// The pass ran out of time on the actors; golden builds wait for the next one.
-		return left, nil
-	}
+	return left, nil
+}
+
+// ReconcileTemplates takes every template's unfinished golden snapshot build one pass further, beginning the golden
+// rebuilds that are due, and returns how many builds are still owed.
+func (s *Server) ReconcileTemplates(ctx context.Context) (int, error) {
+	ctx = context.WithValue(ctx, reconciling{}, true)
+	left := 0
 	tpls, err := s.cfg.Store.List(ctx, store.KindActorTemplate, "")
 	if err != nil {
 		return left, err
 	}
-	// Golden rebuilds for the guests the workers run now (DEFAUL-1606): at most GoldenRebuilds in progress at once,
-	// counted over every template, and only this loop begins one.
+	// Golden rebuilds for the guests the workers run now (DEFAUL-1606): at most GoldenRebuilds being built at once,
+	// counted over every template, and only this loop begins one. A rebuild that waits out a failure's backoff is not
+	// being built and holds no place (PLT-591). The templates actors are made from come first (byUse).
 	s.rebuildMu.Lock()
 	defer s.rebuildMu.Unlock()
-	pool, rebuilds := s.guestPool(), 0
+	if err := s.byUse(ctx, tpls); err != nil {
+		return left, err
+	}
+	pool, rebuilds, now := s.guestPool(), 0, time.Now()
 	for _, r := range tpls {
-		if rebuilding(r) {
+		if building(r, now) {
 			rebuilds++
 		}
 	}

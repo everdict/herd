@@ -103,6 +103,8 @@ type Server struct {
 	rebuildMu    sync.Mutex
 	goldenMu     sync.Mutex
 	goldenTimers map[store.Key]*time.Timer // golden passes waiting out a warmup
+	// uses is when this process last made an actor from each template (used, byUse), under goldenMu.
+	uses map[store.Key]time.Time
 	// pulls are the image_pull_auth and image_plain_http_hosts of templates whose golden build has not ended, by
 	// template uid: in memory
 	// only, never stored (PLT-330).

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	ateapi "github.com/everdict/herd/api/ateapi/v1"
@@ -58,6 +59,61 @@ func (s *Server) startRebuild(ctx context.Context, k store.Key, pool []string) (
 func rebuilding(r store.Record) bool {
 	st, err := parseTemplateState(r)
 	return err == nil && st.Rebuild != nil
+}
+
+// building: a rebuild of the template's golden is being built at now, which counts against Config.GoldenRebuilds; one
+// that waits out a failure's backoff is not.
+func building(r store.Record, now time.Time) bool {
+	st, err := parseTemplateState(r)
+	return err == nil && st.Rebuild != nil && (st.Rebuild.RetryAt == nil || !now.Before(*st.Rebuild.RetryAt))
+}
+
+// used records that an actor was made from the template at k now.
+func (s *Server) used(k store.Key) {
+	s.goldenMu.Lock()
+	defer s.goldenMu.Unlock()
+	if s.uses == nil {
+		s.uses = map[store.Key]time.Time{}
+	}
+	s.uses[k] = time.Now()
+}
+
+// byUse sorts templates by when an actor was last made from them, latest first, and by name among those none was:
+// the order ReconcileTemplates begins golden rebuilds in. A use is a CreateActor this process answered or, across a
+// restart of herd-api, the creation of an actor the store still holds.
+func (s *Server) byUse(ctx context.Context, tpls []store.Record) error {
+	actors, err := s.cfg.Store.List(ctx, store.KindActor, "")
+	if err != nil {
+		return err
+	}
+	last := map[store.Key]time.Time{}
+	for _, r := range actors {
+		ar, err := parseActor(r)
+		if err != nil {
+			return err
+		}
+		if ar.st.TemplateName == "" || ar.st.Golden {
+			continue
+		}
+		if k := templateKey(r.Space, ar.st.TemplateName); r.CreateTime.After(last[k]) {
+			last[k] = r.CreateTime
+		}
+	}
+	s.goldenMu.Lock()
+	for k, t := range s.uses {
+		if t.After(last[k]) {
+			last[k] = t
+		}
+	}
+	s.goldenMu.Unlock()
+	sort.SliceStable(tpls, func(i, j int) bool {
+		a, b := last[tpls[i].Key], last[tpls[j].Key]
+		if !a.Equal(b) {
+			return a.After(b)
+		}
+		return tpls[i].Key.String() < tpls[j].Key.String()
+	})
+	return nil
 }
 
 // retiring: the template has replaced golden tags still to delete.

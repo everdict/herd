@@ -49,9 +49,22 @@ type Cache struct {
 	// Recent is how long after a Get answered an image (or a build read a blob) Trim leaves it, so an image handed to a
 	// VM that is still booting is not taken from under it (zero: DefaultRecent; negative: none).
 	Recent time.Duration
+	// BuildTimeout bounds one build of an image, whoever waits for it (zero: DefaultBuildTimeout). A build is not
+	// bounded by the caller that began it: see Get.
+	BuildTimeout time.Duration
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	mu     sync.Mutex
+	locks  map[string]*sync.Mutex
+	builds map[string]*building
+}
+
+// DefaultBuildTimeout is Cache.BuildTimeout's default: a 1 GB image took mke2fs more than three minutes on one host.
+const DefaultBuildTimeout = 30 * time.Minute
+
+// building is one build of an image in progress: done closes when it ended, with err.
+type building struct {
+	done chan struct{}
+	err  error
 }
 
 func (c *Cache) keyLock(key string) *sync.Mutex {
@@ -75,7 +88,9 @@ func (c *Cache) lock(key string) func() {
 }
 
 // Get returns ref's rootfs image for the cache's platform, building it if the cache does not hold that manifest's
-// image yet. A reference that names a digest is answered from the cache's manifest records (Dir/manifests, keyed by
+// image yet. A build belongs to the cache, not to the Get that began it: a caller whose context ends is answered that
+// error while the build goes on, and a later Get of the same image joins it, so that an image that takes longer to
+// build than one caller waits is still built, once (PLT-591). A reference that names a digest is answered from the cache's manifest records (Dir/manifests, keyed by
 // digest) when they hold it, so a pinned reference whose image this host has reaches no registry, and one it lacks
 // is fetched by its digest; a tag is resolved on every Get (pinning it is the caller's: Rootfs.Index, Pin). Every
 // blob is checked against its digest before it is used, and layers are kept by digest (Dir/blobs).
@@ -90,28 +105,73 @@ func (c *Cache) Get(ctx context.Context, ref string) (Rootfs, error) {
 	}
 	fsType := c.Builder.FSType()
 	key := fsType + "/" + strings.TrimPrefix(img.Digest, "sha256:")
-	unlock := c.lock(key)
 	out := Rootfs{Ref: ref, Digest: img.Digest, Index: img.Index, FSType: fsType, Config: img.Config,
 		Path: filepath.Join(c.Dir, fsType, strings.TrimPrefix(img.Digest, "sha256:")+"."+fsType)}
-	if _, err := os.Stat(out.Path); err == nil {
-		touch(out.Path)
-		unlock()
-		return out, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		unlock()
-		return Rootfs{}, fmt.Errorf("image: cache: %w", err)
-	}
-	err = c.build(ctx, r, img, out.Path)
-	unlock()
+	b, err := c.begin(ctx, key, r, img, out.Path)
 	if err != nil {
 		return Rootfs{}, err
 	}
-	if c.MaxBytes > 0 {
-		if _, _, err := c.Trim(); err != nil {
-			log.Printf("image: cache: trim: %v", err)
-		}
+	if b == nil {
+		return out, nil
+	}
+	select {
+	case <-b.done:
+	case <-ctx.Done():
+		return Rootfs{}, fmt.Errorf("image: building %s for %s goes on, but its caller waits no longer: %w", fsType, r, ctx.Err())
+	}
+	if b.err != nil {
+		return Rootfs{}, b.err
 	}
 	return out, nil
+}
+
+// begin answers the build of the image at dst in progress, beginning one if the cache does not hold the image; nil:
+// the cache holds it. The build runs under its own bound (BuildTimeout), not its first caller's context, and holds
+// the image's key lock, which keeps Trim from it.
+func (c *Cache) begin(ctx context.Context, key string, r Ref, img Image, dst string) (*building, error) {
+	c.mu.Lock()
+	if b := c.builds[key]; b != nil {
+		c.mu.Unlock()
+		return b, nil
+	}
+	c.mu.Unlock()
+	unlock := c.lock(key)
+	if _, err := os.Stat(dst); err == nil {
+		touch(dst)
+		unlock()
+		return nil, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		unlock()
+		return nil, fmt.Errorf("image: cache: %w", err)
+	}
+	// The key lock is held and no build of the key holds it: this caller begins one.
+	b := &building{done: make(chan struct{})}
+	c.mu.Lock()
+	if c.builds == nil {
+		c.builds = map[string]*building{}
+	}
+	c.builds[key] = b
+	c.mu.Unlock()
+	limit := c.BuildTimeout
+	if limit <= 0 {
+		limit = DefaultBuildTimeout
+	}
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), limit)
+	go func() {
+		defer cancel()
+		b.err = c.build(bctx, r, img, dst)
+		c.mu.Lock()
+		delete(c.builds, key)
+		c.mu.Unlock()
+		unlock()
+		if b.err == nil && c.MaxBytes > 0 {
+			if _, _, err := c.Trim(); err != nil {
+				log.Printf("image: cache: trim: %v", err)
+			}
+		}
+		close(b.done)
+	}()
+	return b, nil
 }
 
 // touch marks p used now: Trim removes the least recently used first.
