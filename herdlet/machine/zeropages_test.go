@@ -29,9 +29,9 @@ func memoryImage(t *testing.T, size int64, runs [][2]int64) (vmm.SnapshotFile, [
 	return vmm.SnapshotFile{Name: "memory-ranges", Size: size, Open: func() (io.ReadCloser, error) { return os.Open(p) }}, b
 }
 
-// TestMemoryBundleLeavesOutZeroPages (DEFAUL-1601): a MEMORY bundle carries a memory file's pages that are zero as
-// holes of a sparse tar entry, so a guest's untouched memory is neither stored nor moved; the bundle reads back as the
-// same bytes through archive/tar, as every herdlet already reads bundles, so a restore needs no new reader.
+// TestMemoryBundleLeavesOutZeroPages (DEFAUL-1601, PLT-591): a MEMORY bundle leaves a memory file's pages that are
+// zero out of its frames, so a guest's untouched memory is neither stored nor moved; the bundle reads back as the same
+// bytes.
 func TestMemoryBundleLeavesOutZeroPages(t *testing.T) {
 	const size = 64 << 20
 	cases := []struct {
@@ -79,53 +79,5 @@ func TestMemoryBundleLeavesOutZeroPages(t *testing.T) {
 				t.Errorf("after the memory file: %v, want the end of the bundle", err)
 			}
 		})
-	}
-}
-
-// TestSparseMapStaysReadable: a memory file whose data runs are more than a sparse map may list (archive/tar reads
-// at most 1 MiB of it) has the runs with the shortest gaps merged, zeros between them stored, and reads back whole.
-func TestSparseMapStaysReadable(t *testing.T) {
-	saved := maxFragments
-	maxFragments = 100
-	t.Cleanup(func() { maxFragments = saved })
-	// 1000 one-page runs: 50 groups of 20 a page apart, the groups 32 pages apart.
-	var runs [][2]int64
-	for g := int64(0); g < 50; g++ {
-		for i := int64(0); i < 20; i++ {
-			runs = append(runs, [2]int64{(g*72 + 2*i) * 4096, 4096})
-		}
-	}
-	f, want := memoryImage(t, 16<<20, runs)
-	rc, err := f.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	frags, err := dataFragments(rc.(io.ReaderAt), f.Size)
-	rc.Close()
-	if err != nil || len(frags) > maxFragments || len(frags) < 2 {
-		t.Fatalf("dataFragments = %d fragments, %v; want 2 to %d", len(frags), err, maxFragments)
-	}
-	var bundle bytes.Buffer
-	if err := writeBundle(&bundle, Manifest{Version: bundleVersion, Memory: []vmm.SnapshotFile{f}}, t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	tr := tar.NewReader(&bundle)
-	m, err := readManifest(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = readMemory(tr, m, func(next func() (vmm.SnapshotFile, io.Reader, error)) error {
-		_, r, err := next()
-		if err != nil {
-			return err
-		}
-		got, err := io.ReadAll(r)
-		if err == nil && !bytes.Equal(got, want) {
-			t.Errorf("the memory file read back differs")
-		}
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }

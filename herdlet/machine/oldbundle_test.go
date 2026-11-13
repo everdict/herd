@@ -9,12 +9,13 @@ import (
 	"testing"
 
 	"github.com/everdict/herd/guest/layer"
-	"github.com/everdict/herd/link"
 	"github.com/everdict/herd/vmm"
 )
 
 // v3Fixture is a MEMORY bundle as bundle version 3 (herd v0.1.23) wrote it, kept as bytes: two memory files, one with
-// zero pages (a sparse entry) and one dense, a volume with a file and a symlink, and a container's layer.
+// zero pages (a sparse entry) and one dense, a volume with a file and a symlink, and a container's layer. It was
+// written by the v0.1.23 writer (writeBundle at bundle version 3, test TestWriteV3Fixture of commit 8058598), which
+// version 4 replaced.
 const v3Fixture = "testdata/bundle-v3.tar"
 
 // v3Memory is the content of the fixture's memory files, made again here byte for byte.
@@ -27,57 +28,6 @@ func v3Memory() map[string][]byte {
 		ranges[i] = byte(i ^ 0x5a)
 	}
 	return map[string][]byte{"memory-ranges": ranges, "state.json": []byte(`{"vm":"v3","devices":["virtio-net","virtio-fs"]}`)}
-}
-
-func v3Share(t *testing.T) string {
-	t.Helper()
-	share := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(share, "data", "sub"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(share, "data", "hello.txt"), []byte("hello from v3\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("../hello.txt", filepath.Join(share, "data", "sub", "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(share, layer.Dir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(share, layer.Dir, "agent"+layer.Ext), []byte("agent's layer"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return share
-}
-
-// TestWriteV3Fixture writes the fixture with the bundle writer of the moment; it runs only when HERD_WRITE_V3_FIXTURE
-// is set, and was run once on bundle version 3.
-func TestWriteV3Fixture(t *testing.T) {
-	if os.Getenv("HERD_WRITE_V3_FIXTURE") == "" {
-		t.Skip("set HERD_WRITE_V3_FIXTURE to write " + v3Fixture)
-	}
-	if bundleVersion != 3 {
-		t.Fatalf("the fixture is of bundle version 3; this writer writes %d", bundleVersion)
-	}
-	dir := t.TempDir()
-	var files []vmm.SnapshotFile
-	for _, name := range []string{"memory-ranges", "state.json"} {
-		b := v3Memory()[name]
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, vmm.SnapshotFile{Name: name, Size: int64(len(b)), Open: func() (io.ReadCloser, error) { return os.Open(p) }})
-	}
-	m := Manifest{Version: 3, Snapshot: vmm.Snapshot{ID: "snap-v3", VMID: "vm-v3", Fidelity: vmm.FidelityMemory, RestoreFamily: ubuntuCaps.RestoreFamily},
-		Template: link.Template{UID: "tpl-v3", Volumes: []string{"data"}}, Platform: ubuntuCaps.Platform, Arch: ubuntuCaps.Arch, Memory: files}
-	var b bytes.Buffer
-	if err := writeBundle(&b, m, v3Share(t)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(v3Fixture, b.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestV3BundleStillRestores (PLT-591): a version 3 bundle, written by herd v0.1.23 and kept as bytes, reads back with

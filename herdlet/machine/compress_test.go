@@ -3,7 +3,9 @@ package machine
 import (
 	"archive/tar"
 	"bytes"
+	"compress/flate"
 	"crypto/rand"
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,5 +90,106 @@ func TestAlteredMemoryIsRefused(t *testing.T) {
 	b[len(b)/2] ^= 0x40
 	if _, err := readBackMemory(t, b); err == nil {
 		t.Errorf("a bundle with a byte of its memory file altered read back without an error")
+	}
+}
+
+// rewriteBundle copies a bundle entry by entry, each entry's body through edit.
+func rewriteBundle(t *testing.T, b []byte, edit func(name string, body []byte) []byte) []byte {
+	t.Helper()
+	tr := tar.NewReader(bytes.NewReader(b))
+	var out bytes.Buffer
+	tw := tar.NewWriter(&out)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = edit(h.Name, body)
+		h.Size = int64(len(body))
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+// TestMemoryThatExpandsToOtherBytesIsRefused (PLT-591): a version 4 memory file carries its raw size and raw SHA-256
+// (its end entry), and a restore refuses a file that expands to another size or digest before it hands over the
+// file's last byte, as cloudhypervisor's import reads exactly the file's size: an end entry that records another
+// digest or size, and a frame that expands to more or fewer bytes than its header says.
+func TestMemoryThatExpandsToOtherBytesIsRefused(t *testing.T) {
+	f, want := touchedMemory(t, 12<<20)
+	var good bytes.Buffer
+	if err := writeBundle(&good, Manifest{Version: bundleVersion, Memory: []vmm.SnapshotFile{f}}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readBackMemory(t, good.Bytes()); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("the unaltered bundle reads back %d bytes, %v", len(got), err)
+	}
+	end := bundleMemory + "/memory-ranges/" + frameEnd
+	first := frameName("memory-ranges", 0)
+	recompress := func(body []byte, raw func([]byte) []byte) []byte {
+		zr := flate.NewReader(bytes.NewReader(body[frameHeader:]))
+		b, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		out.Write(body[:frameHeader])
+		zw, _ := flate.NewWriter(&out, flate.BestSpeed)
+		zw.Write(raw(b))
+		zw.Close()
+		return out.Bytes()
+	}
+	for name, edit := range map[string]func(string, []byte) []byte{
+		"another digest": func(n string, b []byte) []byte {
+			if n == end {
+				b[len(b)-1] ^= 1
+			}
+			return b
+		},
+		"another size": func(n string, b []byte) []byte {
+			if n == end {
+				binary.BigEndian.PutUint64(b[:8], uint64(f.Size+zeroPage))
+			}
+			return b
+		},
+		"a frame that expands to fewer bytes": func(n string, b []byte) []byte {
+			if n == first {
+				return recompress(b, func(raw []byte) []byte { return raw[:len(raw)-1] })
+			}
+			return b
+		},
+		"a frame that expands to more bytes": func(n string, b []byte) []byte {
+			if n == first {
+				return recompress(b, func(raw []byte) []byte { return append(raw, 0) })
+			}
+			return b
+		},
+		"a frame's bytes altered, its header not": func(n string, b []byte) []byte {
+			if n == first {
+				return recompress(b, func(raw []byte) []byte { raw[100] ^= 1; return raw })
+			}
+			return b
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readBackMemory(t, rewriteBundle(t, bytes.Clone(good.Bytes()), edit)); err == nil {
+				t.Errorf("the memory file read back whole")
+			}
+		})
 	}
 }

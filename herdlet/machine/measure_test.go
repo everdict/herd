@@ -14,10 +14,11 @@ import (
 )
 
 // TestMeasureMemoryBundle (DEFAUL-1601) measures, on a synthetic memory image, what a MEMORY bundle stores and the
-// seconds per GiB its write and a restore's read of it take, with the memory file stored densely and as a sparse
-// entry without its zero pages. A restore's read is what ImportSnapshot does: the memory file out of the bundle into a
-// file, synced. It runs only when HERD_MEASURE is set (HERD_MEASURE_MIB, default 512; HERD_MEASURE_ZERO, default
-// 0.85, the share of 1 MiB runs that are zero). Each line it logs starts with MEASURE.
+// seconds per GiB its write and a restore's read of it take, at the bundle version this writer writes (version 4 since
+// PLT-591: frames, compressed, without zero pages). A restore's read is what ImportSnapshot does: the memory file out of
+// the bundle into a file, synced. It runs only when HERD_MEASURE is set (HERD_MEASURE_MIB, default 512;
+// HERD_MEASURE_ZERO, default 0.85, the share of 1 MiB runs that are zero; HERD_MEASURE_FILL=text fills the other runs
+// with text, as page cache holds, instead of random bytes). Each line it logs starts with MEASURE.
 func TestMeasureMemoryBundle(t *testing.T) {
 	if os.Getenv("HERD_MEASURE") == "" {
 		t.Skip("HERD_MEASURE is not set")
@@ -45,7 +46,9 @@ func TestMeasureMemoryBundle(t *testing.T) {
 		}
 		clear(run)
 		if float64(coin[0])/256 >= zero {
-			if _, err := rand.Read(run); err != nil {
+			if os.Getenv("HERD_MEASURE_FILL") == "text" {
+				fillText(run, off)
+			} else if _, err := rand.Read(run); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -55,14 +58,8 @@ func TestMeasureMemoryBundle(t *testing.T) {
 	}
 	f.Close()
 	t.Logf("MEASURE image_bytes=%d zero_share_asked=%.2f", size, zero)
-	for _, sparse := range []bool{false, true} {
-		open := func() (io.ReadCloser, error) {
-			f, err := os.Open(path)
-			if err != nil || sparse {
-				return f, err
-			}
-			return struct{ io.ReadCloser }{f}, nil // no ReadAt: written densely, as before
-		}
+	{
+		open := func() (io.ReadCloser, error) { return os.Open(path) }
 		for i := range 3 {
 			bpath := filepath.Join(dir, "bundle")
 			b, err := os.Create(bpath)
@@ -101,7 +98,7 @@ func TestMeasureMemoryBundle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("MEASURE sparse=%v run=%d bundle_bytes=%d write_s_per_gib=%.3f restore_read_s_per_gib=%.3f", sparse, i, stored, write.Seconds()/gib, read.Seconds()/gib)
+			t.Logf("MEASURE version=%d run=%d bundle_bytes=%d write_s_per_gib=%.3f restore_read_s_per_gib=%.3f", bundleVersion, i, stored, write.Seconds()/gib, read.Seconds()/gib)
 			os.Remove(out)
 			os.Remove(bpath)
 		}
@@ -123,4 +120,14 @@ func restoreFile(path string, r io.Reader, size int64) error {
 		return err
 	}
 	return f.Close()
+}
+
+// fillText fills b with lines of numbered source text, which compresses about as page cache of text files does.
+func fillText(b []byte, seed int64) {
+	var line []byte
+	for i := 0; i < len(b); {
+		line = strconv.AppendInt(append(line[:0], "\tif err := step"...), seed+int64(i), 10)
+		line = append(line, "(ctx, w); err != nil {\n\t\treturn fmt.Errorf(\"step: %w\", err)\n\t}\n"...)
+		i += copy(b[i:], line)
+	}
 }
