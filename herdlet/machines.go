@@ -160,12 +160,27 @@ func (a *Agent) machineSnapshot(ctx context.Context, w link.Work, stop bool) lin
 	log.Printf("herdlet %s: snapshot %s of %s (%s): flush %.3fs, vmm snapshot %.3fs, bundle %.3fs %d B, hash %.3fs %d B, upload %.3fs %d B, total %.3fs; %s, memory files %d B",
 		a.Worker, obj.Key, w.VM, why, ph.Flush.Seconds(), ph.VMM.Seconds(), (ph.Bundle - sums.d).Seconds(), pw.n, sums.d.Seconds(), sums.n,
 		upload.Seconds(), obj.Size, time.Since(begun).Seconds(), snap.Fidelity, ph.Memory)
-	a.noteSnapshot(snap.ID, obj.Key)
+	kept := false
 	if a.Bundles != nil {
 		// A snapshot this node took (a template's golden) is restored here from its own copy (PLT-227).
 		if err := a.Bundles.KeepAs(f.Name(), obj.Key, obj.Digest); err != nil {
 			log.Printf("herdlet: snapshot %s: not kept in the bundle cache: %v", obj.Key, err)
+		} else {
+			kept = true
 		}
+	}
+	removed := false
+	if kept && snap.ID != "" && a.Machines.RemovesSnapshots() {
+		// One local copy (PLT-591): the bundle in the cache carries the VMM's snapshot files, and a restore here imports
+		// them from it, so the VMM's own copy of the memory, as large as the VM's limit, goes now rather than at the
+		// resume or the sweep.
+		var err error
+		if removed, err = a.Machines.RemoveSnapshot(ctx, snap.ID); err != nil {
+			log.Printf("herdlet: VMM snapshot %s of %s: not removed beside its kept bundle: %v", snap.ID, obj.Key, err)
+		}
+	}
+	if !removed {
+		a.noteSnapshot(snap.ID, obj.Key)
 	}
 	return link.Outcome{Result: link.ResultDone, Snapshot: &link.SnapshotRef{
 		Key: obj.Key, Digest: obj.Digest, Fidelity: snap.Fidelity, RestoreFamily: snap.RestoreFamily,

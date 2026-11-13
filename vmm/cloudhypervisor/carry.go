@@ -3,6 +3,7 @@
 package cloudhypervisor
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -120,7 +121,8 @@ func (v *VMM) importInto(ctx context.Context, s vmm.Snapshot, tmp string, next f
 	return syncDir(v.cfg.SnapshotDir)
 }
 
-// writeFrom writes exactly size bytes of r to a new file at path and syncs it.
+// writeFrom writes exactly size bytes of r to a new file at path and syncs it. Runs of zeros are left as holes
+// (PLT-591): a memory file is mostly zero pages, which a restore then neither writes nor stores.
 func writeFrom(path string, r io.Reader, size int64) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -129,7 +131,7 @@ func writeFrom(path string, r io.Reader, size int64) error {
 		}
 		return err
 	}
-	if _, err := io.CopyN(f, r, size); err != nil {
+	if err := copySparse(f, r, size); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -226,3 +228,31 @@ func (v *VMM) RemoveLeftovers(ctx context.Context) error {
 	}
 	return nil
 }
+
+// copySparse copies exactly size bytes of r to f, from its start, seeking over each 64 KiB block of r that is all
+// zeros rather than writing it; the file ends at size.
+func copySparse(f *os.File, r io.Reader, size int64) error {
+	buf := make([]byte, len(zeroBlock))
+	for n := int64(0); n < size; {
+		b := buf[:min(int64(len(buf)), size-n)]
+		if _, err := io.ReadFull(r, b); err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return err
+		}
+		if allZero(b) {
+			if _, err := f.Seek(int64(len(b)), io.SeekCurrent); err != nil {
+				return err
+			}
+		} else if _, err := f.Write(b); err != nil {
+			return err
+		}
+		n += int64(len(b))
+	}
+	return f.Truncate(size)
+}
+
+var zeroBlock = make([]byte, 64<<10)
+
+func allZero(b []byte) bool { return bytes.Equal(b, zeroBlock[:len(b)]) }
